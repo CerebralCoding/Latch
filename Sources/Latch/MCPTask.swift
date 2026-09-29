@@ -23,7 +23,7 @@ final class MCPProgress {
 
 final class MCPTask {
     let jobID: String
-    let createdAt = Date()
+    let createdAt: Date
     var updatedAt = Date()
     var status = "working"
     var message = "queued"
@@ -33,9 +33,10 @@ final class MCPTask {
         status != "working"
     }
 
-    init(jobID: String, progress: MCPProgress?) {
+    init(jobID: String, progress: MCPProgress?, createdAt: Date = Date()) {
         self.jobID = jobID
         self.progress = progress
+        self.createdAt = createdAt
     }
 
     func update(job: MCPJob) throws -> Bool {
@@ -46,7 +47,7 @@ final class MCPTask {
         guard next != status || message != self.message else { return false }
         status = next
         self.message = message
-        updatedAt = Date()
+        updatedAt = job.record.updatedAt
         return true
     }
 

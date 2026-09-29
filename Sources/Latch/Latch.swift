@@ -18,6 +18,11 @@ struct LatchError: Error, CustomStringConvertible {
 @main
 struct Latch {
     static func main() {
+        if CommandLine.arguments.count == 6, CommandLine.arguments[1] == "__mcp_supervisor",
+           let lease = Int32(CommandLine.arguments[4]), let activity = Int32(CommandLine.arguments[5])
+        {
+            exit(MCPSupervisor.run(path: CommandLine.arguments[2], id: CommandLine.arguments[3], lease: lease, activity: activity))
+        }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "__mcp_worker" {
             exit(MCPWorker.run(requestPath: CommandLine.arguments[2]))
         }
@@ -38,7 +43,7 @@ struct Latch {
 
             let path = try options.resolvedPath()
             if options.command == .mcp {
-                try MCPServer(path: path).run()
+                try MCPServer(path: path, owner: options.owner).run()
                 return
             }
             if options.command == .service {

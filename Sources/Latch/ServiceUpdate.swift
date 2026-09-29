@@ -3,9 +3,9 @@ import Darwin
 import Foundation
 
 struct BuildIdentity: Codable, Equatable {
-    static let version = "0.5.0"
+    static let version = "0.6.0"
     // Bump when daemon behavior or its client/state contract requires a service restart.
-    static let serviceRevision = 1
+    static let serviceRevision = 2
     var release: String
     var serviceRevision: Int?
     var sha256: String

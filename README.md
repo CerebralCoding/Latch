@@ -35,16 +35,18 @@ For a separately managed service, run `latch service run --file /existing/direct
 
 Agents hand tasks to Latch; **Latch owns scheduling and resource planning**. Agents do not calculate CPU/memory budgets, choose admission modes or temperature thresholds, or inspect capacity before submitting. The CLI is primarily for humans and service operators.
 
-Configure a local stdio MCP server with the absolute path to an MCP-capable `latch` executable and `args: ["mcp"]`. For example, the launch configuration fields are:
+Configure a local stdio MCP server with the absolute path to an MCP-capable `latch` executable and a stable operator-assigned owner:
 
 ```json
 {
   "command": "/absolute/path/to/latch",
-  "args": ["mcp"]
+  "args": ["mcp", "--owner", "build-agent"]
 }
 ```
 
-Starting this endpoint uses the existing user service; it never installs, starts, stops, or replaces that service. A locally built executable can connect to the existing service without upgrading it. `swift build -c release --show-bin-path` identifies the build directory containing `latch`. The endpoint uses `LATCH_FILE` or the default shared latch; an operator can select `mcp --file PATH` at launch, but individual tool calls cannot select separate queues.
+The owner groups jobs, retry keys, and quotas across connections and reconnects. Connections sharing an owner can retrieve, cancel, and forget each other's jobs. Omitting `--owner` uses the shared `agents` owner. Owners contain 1–128 ASCII letters, digits, dots, underscores, or hyphens. This is cooperative identity, not authentication: code running as the same macOS user can change its launch configuration. Tool calls cannot choose an owner.
+
+Starting this endpoint uses the existing user service; it never installs, starts, stops, or replaces that service. Durable submissions require the matching service revision; an older service must first be updated by its operator. `swift build -c release --show-bin-path` identifies the build directory containing `latch`. The endpoint uses `LATCH_FILE` or the default shared latch; an operator can select `mcp --file PATH` at launch, but individual tool calls cannot select separate queues.
 
 | Tool | Purpose |
 | --- | --- |
@@ -52,7 +54,7 @@ Starting this endpoint uses the existing user service; it never installs, starts
 | `latch_submit` | Submit `requestKey`, `name`, absolute `executable`, literal `arguments`, and absolute `workingDirectory`; optionally set `measurement: true` for benchmarks/profiling. Returns a job ID immediately. |
 | `latch_wait` | Wait on `jobID`, returning status and bounded stdout/stderr. Defaults to 25 seconds per call; `timeoutSeconds` can be 0–600 to suit the MCP host's call timeout. |
 | `latch_cancel` | Cancel an owned job and its process group, escalating TERM to KILL after two seconds. |
-| `latch_view` | Optional diagnostics: cached scheduler state and jobs owned by this connection. No sensor sampling or planning prerequisite. |
+| `latch_view` | Optional diagnostics: cached scheduler state, owner, queue limits, and this owner's jobs. No sensor sampling or planning prerequisite. |
 | `latch_forget` | Discard a completed job's retained output and retry key. |
 
 Example `latch_execute` (or `latch_submit`) arguments:
@@ -67,19 +69,19 @@ Example `latch_execute` (or `latch_submit`) arguments:
 }
 ```
 
-Prefer `latch_execute` when the host supports long requests or MCP tasks. For hosts with short call timeouts, use `latch_submit`, then `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. Reuse `requestKey` only to retry the identical submission on the same connection. A changed submission with that key is rejected. Once forgotten, a key can submit new work again. Each connection retains at most 64 jobs and 128 pending waits; forget completed jobs when their results are no longer needed.
+Prefer `latch_execute` when the host supports long requests or MCP tasks. For hosts with short call timeouts, use `latch_submit`, then `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. Reuse `requestKey` only to retry the identical submission under the same owner, including after reconnecting. A changed submission with that key is rejected. Once forgotten, a key can submit new work again. Each owner may have two outstanding jobs (queued plus running); the shared queue allows 64 outstanding jobs. Retention is bounded to 64 jobs per owner and 256 globally. Forget completed jobs when their results are no longer needed. Each connection allows 128 pending waits.
 
 Hosts can request `notifications/progress` with `_meta.progressToken` on `tools/call`. Latch reports observed state changes (queued, running, cancelling, completed), using increasing counters without an invented percentage or heartbeat. A pending request sleeps on OS events and leaves other requests responsive. Hosts still control request timeouts and how notifications reach the agent.
 
-For protocol `2025-11-25`, `latch_execute` advertises `execution.taskSupport: "optional"`. Adding `task: {}` to its `tools/call` parameters returns a task handle immediately. The host can call `tasks/result` once to await the final tool result, while receiving `notifications/tasks/status` and any requested progress notifications. `tasks/get`, `tasks/list`, and `tasks/cancel` are also supported. Status notifications are optional in MCP; hosts must retain result retrieval/recovery logic. Host-side waiting or polling need not consume model turns. Task IDs equal job IDs and are distinct from scheduler reservation IDs. Retention overrides requested TTL to `null`: results remain until `latch_forget` or connection closure, subject to the same 64-job limit. Tasks are connection-local and cannot be recovered after reconnecting.
+For protocol `2025-11-25`, `latch_execute` advertises `execution.taskSupport: "optional"`. Adding `task: {}` to its `tools/call` parameters returns a task handle immediately. The host can call `tasks/result` once to await the final tool result, while receiving `notifications/tasks/status` and any requested progress notifications. `tasks/get`, `tasks/list`, and `tasks/cancel` are also supported. Status notifications are optional in MCP; hosts must retain result retrieval/recovery logic. Host-side waiting or polling need not consume model turns. Task, job, and scheduler ticket IDs are identical. Retention overrides requested TTL to `null`: results remain until `latch_forget`, subject to the same retention limits. Tasks are recoverable after reconnecting with the same owner; progress tokens belong to their connection.
 
-Latch's current automatic policy batches recognized `swift build` commands without explicit worker flags, adds its own `--jobs` limit (at most four and at most half the machine's cores, with a minimum of one), and reserves up to 1 GiB per worker capped at one quarter of physical memory. Tests, arbitrary commands, and commands with explicit worker settings run in isolation because Latch has no trustworthy concurrency contract for them. These use all-core reservations and one quarter of physical memory. Reservations remain advisory estimates, not OS-enforced limits. Ordinary guards require <=55 C for five seconds; measurements require <=50 C for ten seconds plus the quiet window. Admission times out after ten minutes. The selected `plan` is exposed in job results for diagnosis; agents do not supply it.
+Latch's current automatic policy batches recognized `swift build` commands without explicit worker flags, adds its own `--jobs` limit (at most four and at most half the machine's cores, with a minimum of one), and reserves up to 1 GiB per worker capped at one quarter of physical memory. Tests, arbitrary commands, and commands with explicit worker settings run in isolation because Latch has no trustworthy concurrency contract for them. These use all-core reservations and one quarter of physical memory. Reservations remain advisory estimates, not OS-enforced limits. Ordinary guards require <=55 C for five seconds; measurements require <=50 C for ten seconds plus the quiet window. MCP admission has no deadline, and running jobs have no time limit or preemption. The selected `plan` is exposed in job results for diagnosis; agents do not supply it.
 
 The endpoint calls the scheduler directly in Swift. It does not invoke a shell or translate tool calls into human CLI commands. Workers inherit the endpoint's environment, use `/dev/null` for stdin, and execute the argument array literally. Keep the full foreground workload in the task; do not nest Latch scheduling or detach work into another process group. Output is untrusted command data. Each stream retains its first 32 KiB, with explicit truncation flags; inherited output pipes are drained for at most two seconds after the main command exits. Use task-owned files for larger artifacts.
 
-Results contain `complete`, `state`, and, after completion, `succeeded`, `exitCode`, `terminationReason`, and `phase` (`admission`, `execution`, or `command`). This distinguishes a command returning 75 from an admission failure. Tool failures set `isError`; malformed protocol calls use JSON-RPC errors. Both text content and `structuredContent` contain the result. Cancellation of a pending MCP wait only cancels that wait; `latch_cancel` cancels the job. Jobs can only be waited on or cancelled by their submitting connection. A normal disconnect/TERM cancels its active jobs. On an abrupt server kill, queued workers notice owner loss; already executing commands retain their process-scoped reservations until exit. Job IDs/results are connection-local, not recoverable across reconnects.
+Results contain `complete`, `state`, and, after completion, `succeeded`, `exitCode`, `terminationReason`, and `phase` (`admission`, `execution`, or `command`). This distinguishes a command returning 75 from an admission failure. Tool failures set `isError`; malformed protocol calls use JSON-RPC errors. Both text content and `structuredContent` contain the result. Jobs belong to their configured owner and survive endpoint disconnects, TERM, and crashes. A private supervisor retains execution and bounded output. The service recovers committed tickets whose supervisor never launched. Lost supervisors never cause replay of potentially executed commands: after their worker leases close, results report uncertainty with `terminationReason: "unknown"`.
 
-Cancelling a non-task `latch_execute` request cancels its workload. Cancelling `latch_wait` or `tasks/result` only stops waiting. Use `tasks/cancel` to cancel task execution; it responds after process-group cleanup with terminal `cancelled` status and rejects already terminal tasks. Requested progress tokens remain active through task completion, even after the initial handle is returned.
+Cancelling any pending MCP request only stops waiting. Use `latch_cancel` or `tasks/cancel` to stop the workload explicitly. `tasks/cancel` responds after process-group cleanup with terminal `cancelled` status and rejects already terminal tasks. Requested progress tokens remain active through task completion on that connection, even after the initial handle is returned.
 
 The dependency-free implementation supports [MCP stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), initialization, ping, tool discovery/calls, progress, and cancellation for protocol versions `2025-11-25` and `2025-06-18`, plus [experimental tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) for `2025-11-25`. HTTP, resources, and service lifecycle tools are not exposed. Incoming frames are limited to 1 MiB and pending protocol output to 4 MiB. The endpoint runs with its launching user's permissions; it is not an execution sandbox.
 
@@ -107,7 +109,7 @@ This moves waiting into a sleeping process rather than an agent reasoning loop. 
 
 ## Scheduling policy
 
-Admission is FIFO. An isolated task at the front prevents later batch jobs from overtaking it. Compatible batch jobs can overlap. Reservations are advisory budgets, not OS resource limits.
+Admission is strict FIFO: an older blocked job prevents every newer job from overtaking it, including smaller batch jobs. Tickets are committed before worker launch and retain their position across MCP reconnects and service outages. Compatible batch jobs can overlap once admitted in order. Per-owner outstanding limits prevent one configured agent from flooding the queue; they never shorten an admitted job's runtime. Reservations are advisory budgets, not OS resource limits.
 
 | Setting | Default / behavior |
 | --- | --- |
@@ -140,7 +142,7 @@ latch status
 latch sensors
 ```
 
-`view` returns a diagnostic JSON object, schema `version: 1`, without collecting fresh sensor readings. The MCP `latch_view` tool includes it under `scheduler` alongside connection-owned `jobs`:
+`view` returns a diagnostic JSON object, schema `version: 1`, without collecting fresh sensor readings. The MCP `latch_view` tool includes it under `scheduler` alongside owner-scoped `jobs`:
 
 | Field | Meaning |
 | --- | --- |
@@ -163,7 +165,7 @@ Optional JSON fields are omitted when unknown or inapplicable. Dates are ISO 860
 
 Path precedence is `--file`, then `LATCH_FILE`, then `~/.local/state/latch/default.lock`. Explicit paths need an existing parent directory. Service and clients must use the same path on a local filesystem. `service install --file PATH` persists that path in the LaunchAgent; clients must still select it themselves. Paths identify separate coordination domains and do not isolate machine resources from each other.
 
-State lives in `PATH.queue`, owned by the current user with mode 0700. Commands and arguments appear in this private state, so avoid putting secrets in arguments. Do not delete or replace live latch, lease, or state files.
+State lives in `PATH.queue`, owned by the current user with mode 0700. Commands, arguments, retained output, and the submitting environment for unfinished durable jobs are stored privately here. Environment snapshots are removed on completion; results remain until forgotten. Avoid putting secrets in arguments or output. Do not delete or replace live latch, lease, or state files.
 
 `run` remains a sensor-free primitive:
 
@@ -177,7 +179,7 @@ latch wait --timeout 60
 
 `run` and `schedule` replace themselves with the command, preserving its PID, arguments, standard streams, signals, and exit status. Inherited lock descriptors keep reservations alive until the last copy closes, including descendants. Programs that close inherited descriptors can release early. Do not nest an exclusive latch on the same path; it can deadlock. Cancel a queued command with the normal process termination mechanism; its lease is then pruned automatically.
 
-Stopping or crashing the service does not stop admitted work or release its locks. Parked clients fail closed with exit 69 when they observe service loss; retry after the service is available. Restart clears old sensor/cooldown history and recovers running reservations from their live leases. Corrupt state causes an error rather than silently dropping reservations. Required sensor failures prevent starts; sandbox restrictions may prevent access even when an ordinary user process can read sensors.
+Stopping or crashing the service does not stop admitted work or release its locks. Parked CLI clients fail closed with exit 69 when they observe service loss; durable MCP jobs retain their tickets and wait for service recovery. Restart clears old sensor/cooldown history and recovers running reservations from their live leases. Corrupt state causes an error rather than silently dropping reservations. Required sensor failures prevent starts; sandbox restrictions may prevent access even when an ordinary user process can read sensors.
 
 Coordination is cooperative and local to one user. Sensors notice unrelated activity before admission, but Latch cannot prevent another app or an uncooperative agent from starting work later. Admission checks cannot guarantee an uncontaminated measurement throughout its lifetime.
 

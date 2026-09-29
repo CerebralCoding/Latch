@@ -17,6 +17,8 @@ final class MCPServer {
     private let queue: Int32
     private let generation: Data?
     private let executableIdentity: [FileAttributeKey: Any]
+    private let owner: String
+    private let store: DurableJobs
     private var input = Data()
     private var output = Data()
     private var jobs: [String: MCPJob] = [:]
@@ -28,30 +30,25 @@ final class MCPServer {
     private var ready = false
     private var closingAt: Double?
     private var watchingOutput = false
-    private var directoryCreated = false
 
-    init(path: String) throws {
+    init(path: String, owner: String = "agents") throws {
+        self.owner = try DurableJobs.validateOwner(owner)
         scheduler = try Scheduler(path: URL(fileURLWithPath: path).standardizedFileURL.path)
+        store = try DurableJobs(scheduler: scheduler)
         executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
         generation = try UpdateDrain.generation(in: scheduler.directory)
         executableIdentity = try FileManager.default.attributesOfItem(atPath: executable.path)
-        directory = scheduler.directory.appendingPathComponent("mcp-" + UUID().uuidString, isDirectory: true)
+        directory = store.directory
         queue = kqueue()
         guard queue >= 0 else { throw LatchError.system("create MCP event queue") }
         _ = fcntl(queue, F_SETFD, FD_CLOEXEC)
     }
 
     deinit {
-        for job in jobs.values where !job.complete {
-            job.signalGroup(SIGKILL)
-        }
         jobs.removeAll()
         close(queue)
         if directoryDescriptor >= 0 {
             close(directoryDescriptor)
-        }
-        if directoryCreated {
-            try? FileManager.default.removeItem(at: directory)
         }
     }
 
@@ -71,29 +68,23 @@ final class MCPServer {
             signal(number, SIG_IGN)
             try watch(UInt(number), filter: EVFILT_SIGNAL)
         }
+        directoryDescriptor = open(directory.path, O_EVTONLY | O_CLOEXEC)
+        guard directoryDescriptor >= 0 else { throw LatchError.system("open durable jobs directory") }
+        try watch(UInt(directoryDescriptor), filter: EVFILT_VNODE, flags: EV_ADD | EV_CLEAR, fflags: UInt32(NOTE_WRITE))
         while true {
+            if closingAt != nil {
+                return
+            }
+            while waitpid(-1, nil, WNOHANG) > 0 {}
             let now = ProcessInfo.processInfo.systemUptime
+            try syncJobs()
             for job in jobs.values {
-                job.update(now: now)
+                try job.update(now: now)
             }
             try updateTasks()
             try updateProgress()
             try finishWaiters(now: now)
-            if let closingAt, jobs.values.allSatisfy(\.complete) || now - closingAt >= 3 {
-                return
-            }
-            var deadlines = waiters.compactMap(\.deadline)
-            for job in jobs.values where !job.complete {
-                if let cancel = job.cancelAt, !job.killSent {
-                    deadlines.append(cancel + 2)
-                }
-                if let exited = job.exitedAt {
-                    deadlines.append(exited + 2)
-                }
-            }
-            if let closingAt {
-                deadlines.append(closingAt + 3)
-            }
+            let deadlines = waiters.compactMap(\.deadline)
             let seconds = deadlines.min().map { max(0, $0 - now) }
             var timeout = timespec(tv_sec: Int(seconds ?? 0), tv_nsec: Int(((seconds ?? 0).truncatingRemainder(dividingBy: 1)) * 1_000_000_000))
             var events = Array(repeating: kevent(), count: 32)
@@ -122,8 +113,6 @@ final class MCPServer {
                     }
                 } else if descriptor == STDOUT_FILENO {
                     try flushOutput()
-                } else if let job = jobs.values.first(where: { $0.descriptors.contains(descriptor) }) {
-                    job.drain(descriptor)
                 }
             }
         }
@@ -143,9 +132,6 @@ final class MCPServer {
         try? watch(UInt(STDIN_FILENO), filter: EVFILT_READ, flags: EV_DELETE)
         if watchingOutput {
             try? watch(UInt(STDOUT_FILENO), filter: EVFILT_WRITE, flags: EV_DELETE); watchingOutput = false
-        }
-        for job in jobs.values {
-            job.cancel(now: now)
         }
     }
 
@@ -193,9 +179,6 @@ final class MCPServer {
                 ready = true
             }
             if method == "notifications/cancelled", let cancelled = message["params"]?["requestId"] {
-                for waiter in waiters where waiter.requestID == cancelled && waiter.kind == .execute {
-                    jobs[waiter.jobID]?.cancel(now: ProcessInfo.processInfo.systemUptime)
-                }
                 waiters.removeAll { $0.requestID == cancelled }
             }
             return
@@ -260,10 +243,13 @@ final class MCPServer {
     }
 
     private func call(_ name: String, arguments: MCPValue?, id: MCPValue, progress: MCPProgress?, task: Bool) throws {
+        try syncJobs()
         switch name {
         case "latch_view":
             _ = try MCPArguments(arguments, allowed: [])
             try toolResult(id: id, value: ["scheduler": MCPValue.encoded(SchedulerView(scheduler: scheduler)),
+                                           "owner": .string(owner), "ownerOutstandingLimit": .number(Double(DurableJobs.ownerOutstandingLimit)),
+                                           "globalOutstandingLimit": .number(Double(DurableJobs.globalOutstandingLimit)),
                                            "jobs": .array(jobs.values.sorted { $0.id < $1.id }.map { try $0.result(includeOutput: false) })])
         case "latch_submit", "latch_execute":
             if name == "latch_execute", !task {
@@ -271,7 +257,8 @@ final class MCPServer {
             }
             let job = try submit(MCPSubmission(arguments))
             if task {
-                let record = tasks[job.id] ?? MCPTask(jobID: job.id, progress: progress)
+                try store.markTask(job.id, owner: owner)
+                let record = tasks[job.id] ?? MCPTask(jobID: job.id, progress: progress, createdAt: job.record.createdAt)
                 tasks[job.id] = record
                 try respond(id: id, result: ["task": record.value()])
             } else if name == "latch_execute" {
@@ -286,13 +273,14 @@ final class MCPServer {
             if name == "latch_forget", jobs[jobID] == nil {
                 try toolResult(id: id, value: ["forgotten": false]); return
             }
-            guard let job = jobs[jobID] else { throw MCPFailure.invalid("Unknown jobID for this connection") }
+            guard let job = jobs[jobID] else { throw MCPFailure.invalid("Unknown jobID for this owner") }
             if name == "latch_cancel" {
-                job.cancel(now: ProcessInfo.processInfo.systemUptime)
+                try job.cancel(now: ProcessInfo.processInfo.systemUptime)
                 try toolResult(id: id, value: job.result(includeOutput: false))
             } else if name == "latch_forget" {
                 guard job.complete else { throw MCPFailure.invalid("Only completed jobs can be forgotten") }
                 guard !waiters.contains(where: { $0.jobID == jobID }) else { throw MCPFailure.invalid("Job still has pending requests") }
+                try store.forget(jobID, owner: owner)
                 jobs.removeValue(forKey: jobID)
                 tasks.removeValue(forKey: jobID)
                 try toolResult(id: id, value: ["forgotten": true])
@@ -315,7 +303,6 @@ final class MCPServer {
             guard existing.submission == submission else { throw MCPFailure.invalid("requestKey already belongs to a different submission") }
             return existing
         }
-        guard jobs.count < 64 else { throw LatchError("connection holds 64 jobs; forget completed jobs before submitting more", exitCode: 75) }
         let updatePermit = try UpdateDrain.admit(in: scheduler.directory)
         defer { withExtendedLifetime(updatePermit) {} }
         let identity = try FileManager.default.attributesOfItem(atPath: executable.path)
@@ -326,30 +313,38 @@ final class MCPServer {
             throw LatchError("Latch was updated; retrieve retained results, then reconnect this MCP host before submitting new work", exitCode: 69)
         }
         _ = try SchedulerService.requireRunning(in: scheduler.directory)
-        if !directoryCreated {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            directoryCreated = true
+        guard try SchedulerService.status(in: scheduler.directory).serviceRevision == BuildIdentity.serviceRevision else {
+            throw LatchError("durable jobs require the updated scheduler service; ask the operator to update it", exitCode: 69)
         }
-        if directoryDescriptor < 0 {
-            let descriptor = open(directory.path, O_EVTONLY | O_CLOEXEC)
-            guard descriptor >= 0 else { throw LatchError.system("open MCP status directory") }
-            do { try watch(UInt(descriptor), filter: EVFILT_VNODE, flags: EV_ADD | EV_CLEAR, fflags: UInt32(NOTE_WRITE)) }
-            catch { close(descriptor); throw error }
-            directoryDescriptor = descriptor
-        }
-        let job = try MCPJob(submission: submission, directory: directory, path: scheduler.path, executable: executable, updatePermit: updatePermit)
+        let record = try store.submit(submission, owner: owner)
+        let job = MCPJob(record: record, store: store)
         jobs[job.id] = job
-        do {
-            for descriptor in job.descriptors {
-                try watch(UInt(descriptor), filter: EVFILT_READ)
-            }
-        } catch {
-            job.signalGroup(SIGKILL)
-            jobs.removeValue(forKey: job.id)
-            throw error
-        }
-        try? watch(UInt(job.pid), filter: EVFILT_PROC, flags: EV_ADD | EV_ONESHOT, fflags: UInt32(NOTE_EXIT))
+        // The ticket is committed before launch; the service recovers a missed launch after a connection crash.
+        try? store.launch(record.id, executable: executable)
         return job
+    }
+
+    private func syncJobs() throws {
+        let records = try store.records(owner: owner)
+        for record in records {
+            let job = jobs[record.id] ?? MCPJob(record: record, store: store)
+            job.record = record
+            try job.update(now: ProcessInfo.processInfo.systemUptime)
+            jobs[record.id] = job
+            if record.protocolTask, tasks[record.id] == nil {
+                tasks[record.id] = MCPTask(jobID: record.id, progress: nil, createdAt: record.createdAt)
+            }
+        }
+        let ids = Set(records.map(\.id))
+        for id in jobs.keys where !ids.contains(id) {
+            let forgotten = waiters.filter { $0.jobID == id }
+            waiters.removeAll { $0.jobID == id }
+            for waiter in forgotten {
+                try failure(id: waiter.requestID, code: -32602, message: "Job was forgotten by another connection for this owner")
+            }
+            jobs.removeValue(forKey: id)
+            tasks.removeValue(forKey: id)
+        }
     }
 
     private func requireWaiterSlot() throws {
@@ -371,6 +366,7 @@ final class MCPServer {
     }
 
     private func notify(_ method: String, params: MCPValue) throws {
+        guard ready else { return }
         try emit(["jsonrpc": "2.0", "method": .string(method), "params": params])
     }
 
@@ -406,8 +402,9 @@ final class MCPServer {
     }
 
     private func taskRequest(_ method: String, params: MCPValue, id: MCPValue) throws {
+        try syncJobs()
         for job in jobs.values {
-            job.update(now: ProcessInfo.processInfo.systemUptime)
+            try job.update(now: ProcessInfo.processInfo.systemUptime)
         }
         try updateTasks()
         let input = try MCPArguments(params, allowed: method == "tasks/list" ? ["cursor", "_meta"] : ["taskId", "_meta"])
@@ -417,13 +414,13 @@ final class MCPServer {
             return
         }
         let taskID = try input.text("taskId", maximum: 128)
-        guard let task = tasks[taskID], let job = jobs[taskID] else { throw MCPFailure.invalid("Unknown taskId for this connection") }
+        guard let task = tasks[taskID], let job = jobs[taskID] else { throw MCPFailure.invalid("Unknown taskId for this owner") }
         if method == "tasks/get" {
             try respond(id: id, result: task.value())
         } else if method == "tasks/cancel" {
             guard !task.terminal else { throw MCPFailure.invalid("Cannot cancel a terminal task") }
             try requireWaiterSlot()
-            job.cancel(now: ProcessInfo.processInfo.systemUptime)
+            try job.cancel(now: ProcessInfo.processInfo.systemUptime)
             // Reply only after process-group cleanup; cancelled is terminal and its result must be final.
             waiters.append(Waiter(requestID: id, jobID: taskID, kind: .taskCancel))
         } else {
@@ -456,7 +453,9 @@ final class MCPServer {
     }
 
     private func resultValue(value: MCPValue, isError: Bool, taskID: String?) throws -> MCPValue {
-        let text = try String(decoding: JSONEncoder().encode(value), as: UTF8.self)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let text = try String(decoding: encoder.encode(value), as: UTF8.self)
         var result: [String: MCPValue] = ["content": [["type": "text", "text": .string(text)]], "structuredContent": value, "isError": .bool(isError)]
         if let taskID {
             result["_meta"] = MCPTask.metadata(taskID)

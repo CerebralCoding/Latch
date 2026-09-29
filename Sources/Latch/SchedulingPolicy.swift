@@ -60,10 +60,12 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
     var startedAt: Date?
     var waitingFor: String?
     var coolSince: Double?
+    var owner: String?
 }
 
 struct SchedulerState: Codable, Equatable {
     var version = 1
+    var jobs: [DurableJobRecord]?
     var tasks: [ScheduledTask] = []
     var sensors: SensorSnapshot?
     var sensorError: String?

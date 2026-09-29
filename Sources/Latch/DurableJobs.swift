@@ -1,0 +1,250 @@
+import Darwin
+import Foundation
+
+struct DurableJobRecord: Codable, Equatable {
+    var id: String
+    var owner: String
+    var submission: MCPSubmission
+    var environment = ProcessInfo.processInfo.environment
+    var createdAt = Date()
+    var updatedAt = Date()
+    var state = "queued"
+    var complete = false
+    var supervisorPID: Int32?
+    var protocolTask = false
+}
+
+final class DurableJobs {
+    static let ownerOutstandingLimit = 2
+    static let globalOutstandingLimit = 64
+    static let ownerRetainedLimit = 64
+    static let globalRetainedLimit = 256
+    let scheduler: Scheduler
+    let directory: URL
+
+    init(scheduler: Scheduler) throws {
+        self.scheduler = scheduler
+        directory = scheduler.directory.appendingPathComponent("jobs", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory,
+              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid(),
+              (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700
+        else {
+            throw LatchError("job directory must be private and owned by this user", exitCode: 74)
+        }
+    }
+
+    static func validateOwner(_ owner: String) throws -> String {
+        guard !owner.isEmpty, owner.utf8.count <= 128,
+              owner.utf8.allSatisfy({ (65 ... 90).contains($0) || (97 ... 122).contains($0) || (48 ... 57).contains($0) || [45, 46, 95].contains($0) })
+        else {
+            throw LatchError("owner must contain 1–128 ASCII letters, digits, dots, underscores, or hyphens")
+        }
+        return owner
+    }
+
+    func file(_ id: String, _ suffix: String) -> URL {
+        directory.appendingPathComponent(id + "." + suffix)
+    }
+
+    func records(owner: String? = nil) throws -> [DurableJobRecord] {
+        try (scheduler.snapshot().jobs ?? []).filter { owner == nil || $0.owner == owner }
+    }
+
+    func submit(_ submission: MCPSubmission, owner: String) throws -> DurableJobRecord {
+        try scheduler.transaction { state in
+            var records = state.jobs ?? []
+            if let existing = records.first(where: { $0.owner == owner && $0.submission.requestKey == submission.requestKey }) {
+                guard existing.submission == submission else { throw MCPFailure.invalid("requestKey already belongs to a different submission for this owner") }
+                return existing
+            }
+            guard records.filter({ $0.owner == owner && !$0.complete }).count < Self.ownerOutstandingLimit else {
+                throw LatchError("owner \(owner) already has \(Self.ownerOutstandingLimit) outstanding jobs; wait for completion or explicitly cancel one", exitCode: 75)
+            }
+            guard state.tasks.count < Self.globalOutstandingLimit,
+                  records.filter({ !$0.complete }).count < Self.globalOutstandingLimit
+            else {
+                throw LatchError("shared queue has reached its \(Self.globalOutstandingLimit)-job limit", exitCode: 75)
+            }
+            guard records.count < Self.globalRetainedLimit,
+                  records.filter({ $0.owner == owner }).count < Self.ownerRetainedLimit
+            else {
+                throw LatchError("retained result limit reached; forget completed jobs", exitCode: 75)
+            }
+            let record = DurableJobRecord(id: UUID().uuidString, owner: owner, submission: submission)
+            let plan = TaskPlanner.plan(executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
+            records.append(record)
+            state.jobs = records
+            state.tasks.append(ScheduledTask(id: record.id, name: submission.name, pid: 0, arguments: [submission.executable] + plan.arguments,
+                                             requirements: plan.requirements, owner: owner))
+            return record
+        }
+    }
+
+    func markTask(_ id: String, owner: String) throws {
+        try scheduler.transaction { state in
+            guard let index = state.jobs?.firstIndex(where: { $0.id == id && $0.owner == owner }) else { throw MCPFailure.invalid("Unknown jobID for this owner") }
+            state.jobs?[index].protocolTask = true
+        }
+    }
+
+    func publish(_ id: String, result: MCPValue) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(result)
+        try scheduler.transaction { state in
+            guard let index = state.jobs?.firstIndex(where: { $0.id == id }) else { return }
+            try data.write(to: file(id, "result.json"), options: .atomic)
+            let phase = result["state"]?.string ?? "queued"
+            if state.jobs?[index].state != phase {
+                state.jobs?[index].state = phase
+                state.jobs?[index].updatedAt = Date()
+            }
+            if result["complete"] == true {
+                state.jobs?[index].complete = true
+                state.jobs?[index].environment = [:]
+                if state.tasks.contains(where: { $0.id == id && $0.state == .running }) {
+                    state.resetCooldowns()
+                }
+                state.tasks.removeAll { $0.id == id }
+            }
+        }
+    }
+
+    func cancel(_ id: String) throws {
+        try Data().write(to: file(id, "cancel"), options: .atomic)
+    }
+
+    func forget(_ id: String, owner: String) throws {
+        try scheduler.transaction { state in
+            guard let record = state.jobs?.first(where: { $0.id == id && $0.owner == owner }) else { return }
+            guard record.complete else { throw MCPFailure.invalid("Only completed jobs can be forgotten") }
+            state.jobs?.removeAll { $0.id == id }
+            for suffix in ["result.json", "cancel", "status.json", "request.json", "supervisor.lock"] {
+                try? FileManager.default.removeItem(at: file(id, suffix))
+            }
+            let leaseURL = scheduler.directory.appendingPathComponent(id + ".lease")
+            if let lease = try? FileLatch(path: leaseURL.path), (try? lease.acquire(shared: false, timeout: 0)) != nil {
+                withExtendedLifetime(lease) { try? FileManager.default.removeItem(at: leaseURL) }
+            }
+        }
+    }
+
+    func recover(executable: URL) throws {
+        for record in try records() where !record.complete {
+            try launch(record.id, executable: executable)
+        }
+    }
+
+    func launch(_ id: String, executable: URL) throws {
+        let supervisor = try FileLatch(path: file(id, "supervisor.lock").path)
+        do { try supervisor.acquire(shared: false, timeout: 0) }
+        catch let error as LatchError where error.exitCode == 75 { return }
+        // A lost supervisor never permits replay while its old worker or descendants retain the lease.
+        let worker = try FileLatch(path: scheduler.directory.appendingPathComponent(id + ".lease").path)
+        do { try worker.acquire(shared: false, timeout: 0) }
+        catch let error as LatchError where error.exitCode == 75 { return }
+        worker.release()
+        guard let record = try records().first(where: { $0.id == id }), !record.complete else { return }
+        if let data = try? Data(contentsOf: file(id, "result.json")),
+           let result = try? JSONDecoder().decode(MCPValue.self, from: data), result["complete"] == true
+        {
+            try publish(id, result: result)
+            return
+        }
+        let task = try scheduler.snapshot().tasks.first { $0.id == id }
+        if task?.state == .running || record.state == "running" || record.state == "cancelling" || task == nil {
+            try publish(id, result: ["jobID": .string(id), "requestKey": .string(record.submission.requestKey), "name": .string(record.submission.name),
+                                     "state": "completed", "complete": true, "succeeded": false, "phase": "execution", "exitCode": 74,
+                                     "terminationReason": "unknown", "error": "Supervisor was lost; execution may have occurred. This job will not be replayed.",
+                                     "stdout": "", "stderr": "", "stdoutTruncated": true, "stderrTruncated": true])
+            return
+        }
+        let activity = try FileLatch(path: scheduler.directory.appendingPathComponent("activity.lock").path)
+        try activity.acquire(shared: true, timeout: 0)
+        try withExtendedLifetime((supervisor, activity)) {
+            var actions: posix_spawn_file_actions_t?
+            var attributes: posix_spawnattr_t?
+            func check(_ code: Int32) throws {
+                guard code == 0 else { throw LatchError("spawn supervisor: \(String(cString: strerror(code)))", exitCode: 74) }
+            }
+            try check(posix_spawn_file_actions_init(&actions))
+            defer { posix_spawn_file_actions_destroy(&actions) }
+            try check(posix_spawnattr_init(&attributes))
+            defer { posix_spawnattr_destroy(&attributes) }
+            for fd in [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO] {
+                try check(posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == STDIN_FILENO ? O_RDONLY : O_WRONLY, 0))
+            }
+            for fd in [supervisor.descriptor, activity.descriptor] {
+                try check(posix_spawn_file_actions_addinherit_np(&actions, fd))
+            }
+            try check(posix_spawnattr_setpgroup(&attributes, 0))
+            var mask = sigset_t(0)
+            try check(posix_spawnattr_setsigmask(&attributes, &mask))
+            try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)))
+            let strings = [executable.path, "__mcp_supervisor", scheduler.path, id, String(supervisor.descriptor), String(activity.descriptor)].map { strdup($0) }
+            let environment = record.environment.map { strdup("\($0.key)=\($0.value)") }
+            defer { (strings + environment).forEach { free($0) } }
+            guard (strings + environment).allSatisfy({ $0 != nil }) else { throw LatchError("out of memory", exitCode: 71) }
+            var argv = strings + [nil]
+            var env = environment + [nil]
+            var pid: Int32 = 0
+            try check(posix_spawn(&pid, executable.path, &actions, &attributes, &argv, &env))
+            try scheduler.transaction { state in
+                if let index = state.jobs?.firstIndex(where: { $0.id == id }) {
+                    state.jobs?[index].supervisorPID = pid
+                }
+            }
+        }
+    }
+}
+
+final class MCPJob {
+    let id: String
+    let submission: MCPSubmission
+    let store: DurableJobs
+    var record: DurableJobRecord
+    private var value: MCPValue
+    var complete: Bool {
+        value["complete"] == true
+    }
+
+    var cancelAt: Double? {
+        value["state"] == "cancelled" || value["state"] == "cancelling" ? 0 : nil
+    }
+
+    init(record: DurableJobRecord, store: DurableJobs) {
+        self.record = record
+        id = record.id
+        submission = record.submission
+        self.store = store
+        value = ["jobID": .string(record.id), "requestKey": .string(record.submission.requestKey), "name": .string(record.submission.name),
+                 "owner": .string(record.owner), "state": "queued", "complete": false]
+    }
+
+    func update(now _: Double) throws {
+        do { value = try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(id, "result.json"))) }
+        catch CocoaError.fileReadNoSuchFile {}
+        if let pid = record.supervisorPID {
+            _ = waitpid(pid, nil, WNOHANG)
+        }
+    }
+
+    func cancel(now _: Double) throws {
+        if !complete {
+            try store.cancel(id)
+        }
+    }
+
+    func result(includeOutput: Bool) throws -> MCPValue {
+        var result = value.object ?? [:]
+        result["owner"] = .string(record.owner)
+        if !includeOutput {
+            for key in ["stdout", "stderr", "stdoutTruncated", "stderrTruncated"] {
+                result.removeValue(forKey: key)
+            }
+        }
+        return .object(result)
+    }
+}

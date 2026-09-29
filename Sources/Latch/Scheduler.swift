@@ -35,7 +35,7 @@ final class Scheduler {
         }
     }
 
-    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false, ownerPID: Int32? = nil, inheritedUpdatePermit: Bool = false) throws -> TaskReservation {
+    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false, ownerPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil) throws -> TaskReservation {
         try requirements.validate()
         let updatePermit = inheritedUpdatePermit ? nil : try UpdateDrain.admit(in: directory)
         if useService {
@@ -44,18 +44,24 @@ final class Scheduler {
         let started = ProcessInfo.processInfo.systemUptime
         let deadline = timeout.map { started + $0 }
         let watcher = try QueueWatcher(directory: directory.path)
-        let id = UUID().uuidString
+        let id = ticketID ?? UUID().uuidString
         let lease = try FileLatch(path: leasePath(id))
         try lease.acquire(shared: false, timeout: 0)
         let gate = try FileLatch(path: path)
         var admitted = false
         defer {
-            if !admitted {
+            if !admitted, ticketID == nil {
                 try? withdraw(id)
             }
         }
         try transaction { state in
-            state.tasks.append(ScheduledTask(id: id, name: name, pid: getpid(), arguments: arguments, requirements: requirements))
+            if ticketID != nil {
+                guard let index = state.tasks.firstIndex(where: { $0.id == id && $0.state == .queued && $0.owner != nil }) else { throw LatchError("durable admission ticket is missing", exitCode: 74) }
+                state.tasks[index].pid = getpid()
+            } else {
+                guard state.tasks.count < DurableJobs.globalOutstandingLimit else { throw LatchError("shared queue limit reached", exitCode: 75) }
+                state.tasks.append(ScheduledTask(id: id, name: name, pid: getpid(), arguments: arguments, requirements: requirements))
+            }
         }
         while true {
             if let ownerPID, getppid() != ownerPID {
@@ -178,6 +184,10 @@ final class Scheduler {
             var live: [ScheduledTask] = []
             for task in state.tasks {
                 guard UUID(uuidString: task.id) != nil else { throw LatchError("invalid task ID in scheduler state", exitCode: 74) }
+                if task.owner != nil {
+                    live.append(task)
+                    continue
+                }
                 let probe = try FileLatch(path: leasePath(task.id))
                 do {
                     try probe.acquire(shared: false, timeout: 0)

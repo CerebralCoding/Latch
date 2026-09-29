@@ -3,7 +3,7 @@ import Foundation
 struct TaskPlan: Codable, Equatable {
     var arguments: [String]
     var requirements: TaskRequirements
-    var admissionTimeout = 600.0
+    var admissionTimeout: Double? = nil
     var reason: String
 }
 

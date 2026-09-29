@@ -11,9 +11,12 @@ private final class MCPClient {
     private var received: [MCPValue] = []
     private var sequence = 0
 
-    init(fixture: Fixture, initialize: Bool = true) throws {
+    let owner: String
+
+    init(fixture: Fixture, initialize: Bool = true, owner: String = UUID().uuidString) throws {
         self.fixture = fixture
-        child = try fixture.launch(["mcp"], input: input)
+        self.owner = owner
+        child = try fixture.launch(["mcp", "--owner", owner], input: input)
         _ = fcntl(child.stdout.fileHandleForReading.fileDescriptor, F_SETFL, O_NONBLOCK)
         if initialize {
             try handshake()
@@ -212,7 +215,7 @@ func `MCP task result blocks until completion and retains the final result`(mode
     #expect(try older.request("tools/call", params: ["name": "latch_view", "task": [:]])["result"]?["structuredContent"]?["scheduler"] != nil)
 }
 
-@Test func `MCP execution cancellation stops the job but wait cancellation only releases its token`() throws {
+@Test func `MCP request cancellation only stops waiting and explicit cancellation stops the job`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
@@ -230,6 +233,8 @@ func `MCP task result blocks until completion and retains the final result`(mode
         let pending = try client.request("tools/call", params: ["name": "latch_wait", "arguments": ["jobID": .string(id), "timeoutSeconds": .number(0.01)], "_meta": ["progressToken": "waiting"]])
         #expect(pending["result"]?["structuredContent"]?["state"] == "queued")
         try client.send(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "execute"]])
+        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 0])["result"]?["structuredContent"]?["complete"] == false)
+        _ = try client.tool("latch_cancel", arguments: ["jobID": .string(id)])
         let cancelled = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])
         #expect(cancelled["result"]?["structuredContent"]?["state"] == "cancelled")
         #expect(try scheduler.snapshot().tasks.isEmpty)
@@ -268,7 +273,7 @@ func `MCP task result blocks until completion and retains the final result`(mode
 private func mcpService(_ scheduler: Scheduler) throws -> FileLatch {
     let lock = try FileLatch(path: scheduler.directory.appendingPathComponent("service.lock").path)
     try lock.acquire(shared: false, timeout: 0)
-    let status = SchedulerService.Status(running: true, pid: getpid(), path: scheduler.path)
+    let status = SchedulerService.Status(running: true, pid: getpid(), path: scheduler.path, serviceRevision: BuildIdentity.serviceRevision)
     try JSONEncoder().encode(status).write(to: scheduler.directory.appendingPathComponent("service.json"), options: .atomic)
     return lock
 }
@@ -333,6 +338,7 @@ private func jobID(_ response: MCPValue) throws -> String {
     #expect(build.requirements.cpuCores == 4)
     #expect(build.requirements.memoryMiB == 4096)
     #expect(build.requirements.temperatureGuard == TemperatureGuard())
+    #expect(build.admissionTimeout == nil)
     let measurement = TaskPlanner.plan(executable: "/usr/bin/swift", arguments: ["build"], measurement: true, cpuCount: 12, memoryMiB: 32768)
     #expect(measurement.requirements.mode == .isolated)
     #expect(measurement.requirements.cpuCores == 12)
@@ -387,6 +393,7 @@ private func jobID(_ response: MCPValue) throws -> String {
         #expect(report["arguments"] == ["a b", "$HOME", "", "; false"])
         #expect(report["workingDirectory"] == [fixture.directory.path])
         #expect(try client.tool("latch_forget", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?["forgotten"] == true)
+        #expect(!FileManager.default.fileExists(atPath: scheduler.directory.appendingPathComponent(id + ".lease").path))
         #expect(try client.tool("latch_forget", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?["forgotten"] == false)
         #expect(try scheduler.snapshot().tasks.isEmpty)
     }
@@ -438,7 +445,7 @@ private func jobID(_ response: MCPValue) throws -> String {
     }
 }
 
-@Test func `MCP cancellation is connection scoped and reaps a queued worker`() throws {
+@Test func `MCP cancellation is owner scoped and reaps a queued worker`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
@@ -487,16 +494,21 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     }
 }
 
-@Test func `MCP disconnect cancels queued jobs and leaves service ownership unchanged`() throws {
+@Test func `MCP disconnect preserves tickets and results across owner reconnects`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        _ = try client.tool("latch_submit", arguments: submission(fixture))
+        let arguments = submission(fixture)
+        let id = try jobID(client.tool("latch_submit", arguments: arguments))
         try client.input.fileHandleForWriting.close()
         #expect(try fixture.finish(client.child) == 0)
-        #expect(try scheduler.snapshot().tasks.isEmpty)
+        #expect(try scheduler.snapshot().tasks.first?.id == id)
+        let reconnected = try MCPClient(fixture: fixture, owner: client.owner)
+        #expect(try jobID(reconnected.tool("latch_submit", arguments: arguments)) == id)
+        try admission(scheduler)
+        #expect(try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
         #expect(try SchedulerService.requireRunning(in: scheduler.directory) == getpid())
     }
 }
@@ -516,13 +528,14 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     #expect(try client.tool("latch_view")["result"]?["structuredContent"]?["scheduler"] != nil)
 }
 
-@Test func `queued MCP workers withdraw after an abrupt owner crash`() throws {
+@Test func `queued MCP tickets survive an abrupt endpoint crash`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        _ = try client.tool("latch_submit", arguments: submission(fixture))
+        let arguments = submission(fixture)
+        let id = try jobID(client.tool("latch_submit", arguments: arguments))
         let queuedBy = ProcessInfo.processInfo.systemUptime + 3
         while try scheduler.snapshot().tasks.isEmpty, ProcessInfo.processInfo.systemUptime < queuedBy {
             Thread.sleep(forTimeInterval: 0.01)
@@ -530,10 +543,152 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
         try #require(try scheduler.snapshot().tasks.count == 1)
         #expect(kill(client.child.process.processIdentifier, SIGKILL) == 0)
         #expect(try fixture.finish(client.child) == SIGKILL)
-        let releasedBy = ProcessInfo.processInfo.systemUptime + 3
-        while try !scheduler.snapshot().tasks.isEmpty, ProcessInfo.processInfo.systemUptime < releasedBy {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-        #expect(try scheduler.snapshot().tasks.isEmpty)
+        let reconnected = try MCPClient(fixture: fixture, owner: client.owner)
+        #expect(try jobID(reconnected.tool("latch_submit", arguments: arguments)) == id)
+        #expect(try scheduler.snapshot().tasks.first?.id == id)
+        try admission(scheduler)
+        #expect(try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
     }
+}
+
+@Test func `owner quotas and retry keys span simultaneous connections`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let first = try MCPClient(fixture: fixture, owner: "build-agent")
+        let second = try MCPClient(fixture: fixture, owner: first.owner)
+        let arguments = submission(fixture, key: "first")
+        let firstID = try jobID(first.tool("latch_submit", arguments: arguments))
+        #expect(try jobID(second.tool("latch_submit", arguments: arguments)) == firstID)
+        let secondID = try jobID(second.tool("latch_submit", arguments: submission(fixture, key: "second")))
+        let rejected = try first.tool("latch_submit", arguments: submission(fixture, key: "third"))
+        #expect(rejected["result"]?["structuredContent"]?["code"] == 75)
+        #expect(try scheduler.snapshot().tasks.map(\.id) == [firstID, secondID])
+        #expect(try second.tool("latch_view")["result"]?["structuredContent"]?["owner"] == "build-agent")
+        _ = try second.tool("latch_cancel", arguments: ["jobID": .string(firstID)])
+        #expect(try first.tool("latch_wait", arguments: ["jobID": .string(firstID), "timeoutSeconds": 4])["result"]?["structuredContent"]?["complete"] == true)
+        let thirdID = try jobID(first.tool("latch_submit", arguments: submission(fixture, key: "third")))
+        #expect(try scheduler.snapshot().tasks.map(\.id) == [secondID, thirdID])
+    }
+}
+
+@Test func `durable queue bounds outstanding jobs and retained results across owners`() throws {
+    let fixture = try Fixture()
+    let store = try DurableJobs(scheduler: Scheduler(path: fixture.lockPath))
+    for index in 0 ..< DurableJobs.globalOutstandingLimit {
+        _ = try store.submit(MCPSubmission(submission(fixture)), owner: "owner-\(index / 2)")
+    }
+    #expect(throws: LatchError.self) { try store.submit(MCPSubmission(submission(fixture)), owner: "another") }
+    #expect(try store.scheduler.snapshot().tasks.count == DurableJobs.globalOutstandingLimit)
+    for record in try store.records() {
+        try store.publish(record.id, result: ["state": "completed", "complete": true, "succeeded": true])
+    }
+    for index in 0 ..< DurableJobs.ownerRetainedLimit {
+        let record = try store.submit(MCPSubmission(submission(fixture, key: "result-\(index)")), owner: "results")
+        try store.publish(record.id, result: ["state": "completed", "complete": true, "succeeded": true])
+    }
+    #expect(throws: LatchError.self) { try store.submit(MCPSubmission(submission(fixture)), owner: "results") }
+    let completed = try #require(store.records(owner: "results").first)
+    try store.forget(completed.id, owner: "results")
+    #expect(try store.submit(completed.submission, owner: "results").id != completed.id)
+}
+
+@Test func `unlaunched durable tickets recover in their original FIFO position`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let store = try DurableJobs(scheduler: scheduler)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let older = try store.submit(MCPSubmission(submission(fixture)), owner: "older")
+        let newer = try store.submit(MCPSubmission(submission(fixture)), owner: "newer")
+        try store.launch(newer.id, executable: fixture.executable)
+        #expect(try scheduler.snapshot().tasks.map(\.id) == [older.id, newer.id])
+        try store.recover(executable: fixture.executable)
+        try admission(scheduler, expectedTasks: 2)
+        let first = try MCPClient(fixture: fixture, owner: older.owner)
+        #expect(try first.tool("latch_wait", arguments: ["jobID": .string(older.id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(try store.records(owner: newer.owner).first?.complete == false)
+        try admission(scheduler)
+        let second = try MCPClient(fixture: fixture, owner: newer.owner)
+        #expect(try second.tool("latch_wait", arguments: ["jobID": .string(newer.id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+    }
+}
+
+@Test func `recovery never replays a potentially executed command`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let store = try DurableJobs(scheduler: scheduler)
+    let record = try store.submit(MCPSubmission(submission(fixture)), owner: "agent")
+    try scheduler.transaction { $0.tasks[0].state = .running }
+    try store.recover(executable: fixture.executable)
+    let job = MCPJob(record: record, store: store)
+    try job.update(now: ProcessInfo.processInfo.systemUptime)
+    let result = try job.result(includeOutput: true)
+    #expect(result["complete"] == true)
+    #expect(result["succeeded"] == false)
+    #expect(result["terminationReason"] == "unknown")
+    #expect(try scheduler.snapshot().tasks.isEmpty)
+}
+
+@Test func `protocol tasks and completed output survive reconnecting with the same owner`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        let handle = try client.request("tools/call", params: ["name": "latch_execute", "arguments": submission(fixture), "task": [:]])
+        let id = try #require(handle["result"]?["task"]?["taskId"]?.string)
+        try admission(scheduler)
+        let original = try client.request("tasks/result", params: ["taskId": .string(id)])
+        try client.input.fileHandleForWriting.close()
+        #expect(try fixture.finish(client.child) == 0)
+        let reconnected = try MCPClient(fixture: fixture, owner: client.owner)
+        #expect(try reconnected.request("tasks/result", params: ["taskId": .string(id)])["result"] == original["result"])
+        #expect(try reconnected.request("tasks/get", params: ["taskId": .string(id)])["result"]?["status"] == "completed")
+    }
+}
+
+@Test func `queued durable jobs retain their tickets while the service is unavailable`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    let client = try MCPClient(fixture: fixture)
+    let id = try jobID(client.tool("latch_submit", arguments: submission(fixture)))
+    service.release()
+    let result = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": .number(0.2)])
+    #expect(result["result"]?["structuredContent"]?["complete"] == false)
+    #expect(try scheduler.snapshot().tasks.first?.id == id)
+    let restarted = try mcpService(scheduler)
+    try withExtendedLifetime(restarted) {
+        try admission(scheduler)
+        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+    }
+}
+
+@Test func `recovery commits an already written final result without replay`() throws {
+    let fixture = try Fixture()
+    let store = try DurableJobs(scheduler: Scheduler(path: fixture.lockPath))
+    let record = try store.submit(MCPSubmission(submission(fixture)), owner: "agent")
+    let final: MCPValue = ["state": "completed", "complete": true, "succeeded": true, "stdout": "saved output"]
+    try JSONEncoder().encode(final).write(to: store.file(record.id, "result.json"), options: .atomic)
+    try store.recover(executable: fixture.executable)
+    let recovered = try #require(store.records().first)
+    #expect(recovered.complete)
+    #expect(recovered.environment.isEmpty)
+    #expect(try store.scheduler.snapshot().tasks.isEmpty)
+    #expect(try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(record.id, "result.json"))) == final)
+}
+
+@Test func `owner is configured at launch and cannot be supplied in a task`() throws {
+    #expect(try Options(arguments: ["mcp"]).owner == "agents")
+    #expect(try Options(arguments: ["mcp", "--owner", "build-agent.1"]).owner == "build-agent.1")
+    for owner in ["", "../other", "a b", String(repeating: "x", count: 129)] {
+        #expect(throws: LatchError.self) { try Options(arguments: ["mcp", "--owner", owner]) }
+    }
+    #expect(throws: LatchError.self) { try Options(arguments: ["view", "--owner", "agent"]) }
+    let fixture = try Fixture()
+    var arguments = try #require(submission(fixture).object)
+    arguments["owner"] = "another"
+    #expect(throws: MCPFailure.self) { try MCPSubmission(.object(arguments)) }
 }

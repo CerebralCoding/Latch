@@ -42,6 +42,8 @@ enum SchedulerService {
             throw LatchError("scheduler service is already running for this latch", exitCode: 75)
         }
         try withExtendedLifetime(lock) {
+            let jobs = try DurableJobs(scheduler: scheduler)
+            let executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
             let watcher = try QueueWatcher(directory: scheduler.directory.path)
             try scheduler.transaction {
                 $0.resetCooldowns()
@@ -51,6 +53,8 @@ enum SchedulerService {
             let status = Status(running: true, pid: getpid(), path: path, serviceRevision: BuildIdentity.serviceRevision)
             try JSONEncoder().encode(status).write(to: scheduler.directory.appendingPathComponent("service.json"), options: .atomic)
             while true {
+                while waitpid(-1, nil, WNOHANG) > 0 {}
+                try jobs.recover(executable: executable)
                 let state = try scheduler.snapshot()
                 if let next = state.tasks.first(where: { $0.state == .queued }),
                    !state.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),

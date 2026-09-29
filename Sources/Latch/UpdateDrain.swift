@@ -39,12 +39,12 @@ final class UpdateDrain {
 
     func wait(timeout: Double) throws {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
-        try activity.acquire(shared: false, timeout: timeout)
         let watcher = try QueueWatcher(directory: scheduler.directory.path)
         while true {
             let state = try scheduler.snapshot()
             let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
             if state.tasks.isEmpty {
+                try activity.acquire(shared: false, timeout: remaining)
                 try gate.acquire(shared: false, timeout: remaining)
                 // Older clients do not hold activity leases. Never restart over their visible queue.
                 guard try scheduler.snapshot().tasks.isEmpty else {
