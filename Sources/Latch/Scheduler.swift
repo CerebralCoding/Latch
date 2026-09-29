@@ -5,10 +5,12 @@ struct TaskReservation {
     let id: String
     let lease: FileLatch
     let gate: FileLatch
+    var updatePermit: FileLatch?
 
     func inheritAcrossExec() throws {
         try lease.inheritAcrossExec()
         try gate.inheritAcrossExec()
+        try updatePermit?.inheritAcrossExec()
     }
 }
 
@@ -33,8 +35,9 @@ final class Scheduler {
         }
     }
 
-    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false, ownerPID: Int32? = nil) throws -> TaskReservation {
+    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false, ownerPID: Int32? = nil, inheritedUpdatePermit: Bool = false) throws -> TaskReservation {
         try requirements.validate()
+        let updatePermit = inheritedUpdatePermit ? nil : try UpdateDrain.admit(in: directory)
         if useService {
             _ = try SchedulerService.requireRunning(in: directory)
         }
@@ -98,7 +101,7 @@ final class Scheduler {
                 view = state
             }
             if admitted {
-                return TaskReservation(id: id, lease: lease, gate: gate)
+                return TaskReservation(id: id, lease: lease, gate: gate, updatePermit: updatePermit)
             }
             let remaining = deadline.map { max(0, $0 - ProcessInfo.processInfo.systemUptime) }
             if let remaining, remaining <= 0 {

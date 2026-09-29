@@ -12,7 +12,11 @@ swift test -c release
 swift run -c release latch service install
 ```
 
-Installation copies the executable to `~/Library/Application Support/Latch/bin/latch`, links it as `~/.local/bin/latch`, installs `~/Library/LaunchAgents/dev.latch.scheduler.plist`, and starts a login LaunchAgent for the current user. It starts again at login and launchd restarts it after an unexpected exit. Re-run `service install` from a newly built binary to update it. Installation refuses to replace an unrelated command at the link path.
+Installation copies the executable to `~/Library/Application Support/Latch/bin/latch`, links it as `~/.local/bin/latch`, installs `~/Library/LaunchAgents/dev.latch.scheduler.plist`, and starts a login LaunchAgent for the current user. It starts again at login and launchd restarts it after an unexpected exit. `service install` is for initial setup and refuses to replace an existing installation or unrelated command link.
+
+To update, an operator runs the newly built executable with `update --timeout 600`. It rejects new submissions while accepted work drains, atomically replaces the installed binary, and retains `latch.previous` with a SHA-256 installation receipt. A loaded service restarts only if its recorded service revision differs (or is unknown), or `--restart-service` is given; a stopped service stays stopped. Service changes must increment `BuildIdentity.serviceRevision`; MCP-only changes keep that revision. `latch rollback` uses the same drain to restore the previous binary. A failed service start restores the original binary and attempts to restart the original service. Both commands use the latch path in the installed LaunchAgent, ignoring `LATCH_FILE`; `--file` is not accepted. Never run an update inside a scheduled workload, which would wait for itself.
+
+After updating, retrieve retained results and reconnect each MCP host to negotiate the new capabilities. Existing endpoints keep serving their results and identical submission retries, but reject new work once their generation changes. Updating never disconnects hosts automatically. **For the first upgrade from a version without update guards, quiesce older clients first**; they cannot honor the drain. Drain timeout leaves the installed version unchanged and releases the submission block. Process termination also releases the drain locks; recovery from an interrupted replacement may require operator intervention.
 
 Ensure `~/.local/bin` is on your shell and agent `PATH` (for zsh, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` if needed). The installer reports when this directory is missing from its current `PATH`. Subsequent examples use `latch` directly. Avoid `swift run` for performance-sensitive work: building the wrapper itself can disturb the machine.
 
@@ -44,13 +48,14 @@ Starting this endpoint uses the existing user service; it never installs, starts
 
 | Tool | Purpose |
 | --- | --- |
+| `latch_execute` | Submit the same arguments as `latch_submit` and wait for the final result in one call. Supports optional MCP task execution on capable hosts. |
 | `latch_submit` | Submit `requestKey`, `name`, absolute `executable`, literal `arguments`, and absolute `workingDirectory`; optionally set `measurement: true` for benchmarks/profiling. Returns a job ID immediately. |
 | `latch_wait` | Wait on `jobID`, returning status and bounded stdout/stderr. Defaults to 25 seconds per call; `timeoutSeconds` can be 0–600 to suit the MCP host's call timeout. |
 | `latch_cancel` | Cancel an owned job and its process group, escalating TERM to KILL after two seconds. |
 | `latch_view` | Optional diagnostics: cached scheduler state and jobs owned by this connection. No sensor sampling or planning prerequisite. |
 | `latch_forget` | Discard a completed job's retained output and retry key. |
 
-Example `latch_submit` arguments:
+Example `latch_execute` (or `latch_submit`) arguments:
 
 ```json
 {
@@ -62,7 +67,11 @@ Example `latch_submit` arguments:
 }
 ```
 
-Submit once, then call `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. Reuse `requestKey` only to retry the identical submission on the same connection. A changed submission with that key is rejected. Once forgotten, a key can submit new work again. Each connection retains at most 64 jobs and 128 pending waits; forget completed jobs when their results are no longer needed.
+Prefer `latch_execute` when the host supports long requests or MCP tasks. For hosts with short call timeouts, use `latch_submit`, then `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. Reuse `requestKey` only to retry the identical submission on the same connection. A changed submission with that key is rejected. Once forgotten, a key can submit new work again. Each connection retains at most 64 jobs and 128 pending waits; forget completed jobs when their results are no longer needed.
+
+Hosts can request `notifications/progress` with `_meta.progressToken` on `tools/call`. Latch reports observed state changes (queued, running, cancelling, completed), using increasing counters without an invented percentage or heartbeat. A pending request sleeps on OS events and leaves other requests responsive. Hosts still control request timeouts and how notifications reach the agent.
+
+For protocol `2025-11-25`, `latch_execute` advertises `execution.taskSupport: "optional"`. Adding `task: {}` to its `tools/call` parameters returns a task handle immediately. The host can call `tasks/result` once to await the final tool result, while receiving `notifications/tasks/status` and any requested progress notifications. `tasks/get`, `tasks/list`, and `tasks/cancel` are also supported. Status notifications are optional in MCP; hosts must retain result retrieval/recovery logic. Host-side waiting or polling need not consume model turns. Task IDs equal job IDs and are distinct from scheduler reservation IDs. Retention overrides requested TTL to `null`: results remain until `latch_forget` or connection closure, subject to the same 64-job limit. Tasks are connection-local and cannot be recovered after reconnecting.
 
 Latch's current automatic policy batches recognized `swift build` commands without explicit worker flags, adds its own `--jobs` limit (at most four and at most half the machine's cores, with a minimum of one), and reserves up to 1 GiB per worker capped at one quarter of physical memory. Tests, arbitrary commands, and commands with explicit worker settings run in isolation because Latch has no trustworthy concurrency contract for them. These use all-core reservations and one quarter of physical memory. Reservations remain advisory estimates, not OS-enforced limits. Ordinary guards require <=55 C for five seconds; measurements require <=50 C for ten seconds plus the quiet window. Admission times out after ten minutes. The selected `plan` is exposed in job results for diagnosis; agents do not supply it.
 
@@ -70,7 +79,9 @@ The endpoint calls the scheduler directly in Swift. It does not invoke a shell o
 
 Results contain `complete`, `state`, and, after completion, `succeeded`, `exitCode`, `terminationReason`, and `phase` (`admission`, `execution`, or `command`). This distinguishes a command returning 75 from an admission failure. Tool failures set `isError`; malformed protocol calls use JSON-RPC errors. Both text content and `structuredContent` contain the result. Cancellation of a pending MCP wait only cancels that wait; `latch_cancel` cancels the job. Jobs can only be waited on or cancelled by their submitting connection. A normal disconnect/TERM cancels its active jobs. On an abrupt server kill, queued workers notice owner loss; already executing commands retain their process-scoped reservations until exit. Job IDs/results are connection-local, not recoverable across reconnects.
 
-The dependency-free implementation supports [MCP stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), initialization, ping, tool discovery/calls, and cancellation for protocol versions `2025-11-25` and `2025-06-18`. It advertises only tools, with read/write annotations. HTTP, protocol task extensions, resources, and service lifecycle tools are not exposed. Incoming frames are limited to 1 MiB and pending protocol output to 4 MiB. The endpoint runs with its launching user's permissions; it is not an execution sandbox.
+Cancelling a non-task `latch_execute` request cancels its workload. Cancelling `latch_wait` or `tasks/result` only stops waiting. Use `tasks/cancel` to cancel task execution; it responds after process-group cleanup with terminal `cancelled` status and rejects already terminal tasks. Requested progress tokens remain active through task completion, even after the initial handle is returned.
+
+The dependency-free implementation supports [MCP stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), initialization, ping, tool discovery/calls, progress, and cancellation for protocol versions `2025-11-25` and `2025-06-18`, plus [experimental tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) for `2025-11-25`. HTTP, resources, and service lifecycle tools are not exposed. Incoming frames are limited to 1 MiB and pending protocol output to 4 MiB. The endpoint runs with its launching user's permissions; it is not an execution sandbox.
 
 ## CLI for humans
 

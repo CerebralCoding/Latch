@@ -31,6 +31,10 @@ struct Latch {
                 try printJSON(NativeSensors.sample())
                 return
             }
+            if options.command == .update || options.command == .rollback {
+                try ServiceInstallation.update(rollback: options.command == .rollback, timeout: options.timeout ?? 600, restartService: options.restartService)
+                return
+            }
 
             let path = try options.resolvedPath()
             if options.command == .mcp {
@@ -69,8 +73,11 @@ struct Latch {
             let latch = try FileLatch(path: path)
             switch options.command {
             case .run:
+                let updatePermit = try UpdateDrain.admit(in: Scheduler(path: path).directory)
+                defer { withExtendedLifetime(updatePermit) {} }
                 try latch.acquire(shared: options.shared, timeout: options.timeout)
                 try withExtendedLifetime(latch) {
+                    try updatePermit.inheritAcrossExec()
                     try latch.inheritAcrossExec()
                     try execute(options.childArguments)
                 }
@@ -84,7 +91,7 @@ struct Latch {
                     print("held")
                     exit(75)
                 }
-            case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp:
+            case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback:
                 break
             }
         } catch let error as LatchError {

@@ -6,6 +6,7 @@ enum SchedulerService {
         var running: Bool
         var pid: Int32?
         var path: String
+        var serviceRevision: Int?
     }
 
     static func status(in directory: URL) throws -> Status {
@@ -47,7 +48,7 @@ enum SchedulerService {
                 $0.sensors = nil
                 $0.lastSensorAttempt = nil
             }
-            let status = Status(running: true, pid: getpid(), path: path)
+            let status = Status(running: true, pid: getpid(), path: path, serviceRevision: BuildIdentity.serviceRevision)
             try JSONEncoder().encode(status).write(to: scheduler.directory.appendingPathComponent("service.json"), options: .atomic)
             while true {
                 let state = try scheduler.snapshot()
@@ -109,6 +110,9 @@ enum ServiceInstallation {
             }
         case .install:
             let manager = FileManager.default
+            guard !manager.fileExists(atPath: executable.path), !manager.fileExists(atPath: plist.path) else {
+                throw LatchError("Latch is already installed; run the new binary with update (or service start to start it)")
+            }
             try manager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try manager.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
             let logs = root.appendingPathComponent("logs")
@@ -155,6 +159,33 @@ enum ServiceInstallation {
                 try FileManager.default.removeItem(at: executable)
             }
         }
+    }
+
+    static func installedPath() throws -> String {
+        let config = try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), format: nil) as? [String: Any]
+        guard let arguments = config?["ProgramArguments"] as? [String], arguments.count == 5,
+              arguments[0] == executable.path, Array(arguments[1 ... 3]) == ["service", "run", "--file"],
+              arguments[4].hasPrefix("/")
+        else {
+            throw LatchError("invalid installed service configuration", exitCode: 74)
+        }
+        return arguments[4]
+    }
+
+    static func update(rollback: Bool, timeout: Double, restartService: Bool) throws {
+        let path = try installedPath()
+        let scheduler = try Scheduler(path: path)
+        let source = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
+        let restarted = try ServiceUpdate.apply(source: source, target: executable, scheduler: scheduler, rollback: rollback,
+                                                timeout: timeout, restartService: restartService,
+                                                service: UpdateServiceControl(loaded: isLoaded,
+                                                                              revision: { try SchedulerService.status(in: scheduler.directory).serviceRevision },
+                                                                              stop: stopIfLoaded,
+                                                                              start: {
+                                                                                  try launchctl(["bootstrap", domain, plist.path])
+                                                                                  try waitUntilRunning(path: path)
+                                                                              }))
+        print("\(rollback ? "Rolled back" : "Updated") \(executable.path)\nService: \(restarted ? "restarted" : "unchanged")\nRetrieve retained results, then reconnect MCP hosts before submitting new work.")
     }
 
     static func installCommandLink(at link: URL, target: URL) throws {

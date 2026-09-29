@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 final class FileLatch {
-    private let descriptor: Int32
+    let descriptor: Int32
 
     init(path: String) throws {
         let opened = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, mode_t(0o600))
@@ -73,5 +73,9 @@ final class FileLatch {
         guard fcntl(descriptor, F_SETFD, 0) == 0 else {
             throw LatchError.system("inherit latch descriptor")
         }
+    }
+
+    func release() {
+        _ = flock(descriptor, LOCK_UN)
     }
 }

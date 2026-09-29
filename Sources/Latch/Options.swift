@@ -2,7 +2,7 @@ import Foundation
 
 struct Options {
     enum Command: String {
-        case run, wait, status, schedule, tasks, sensors, service, view, mcp, `guard`, help
+        case run, wait, status, schedule, tasks, sensors, service, view, mcp, update, rollback, `guard`, help
     }
 
     enum ServiceAction: String { case run, install, start, stop, status, uninstall }
@@ -16,6 +16,7 @@ struct Options {
     var requirements = TaskRequirements()
     var standalone = false
     var serviceAction: ServiceAction?
+    var restartService = false
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
@@ -49,7 +50,7 @@ struct Options {
                 self.command = .help
                 return
             case "--file":
-                guard command != .sensors, file == nil, index < arguments.count, !arguments[index].isEmpty else {
+                guard ![.sensors, .update, .rollback].contains(command), file == nil, index < arguments.count, !arguments[index].isEmpty else {
                     throw LatchError("--file requires one nonempty path")
                 }
                 file = arguments[index]
@@ -60,7 +61,7 @@ struct Options {
                 }
                 shared = true
             case "--timeout":
-                guard [.run, .wait, .schedule, .guard].contains(command), timeout == nil, index < arguments.count,
+                guard [.run, .wait, .schedule, .guard, .update, .rollback].contains(command), timeout == nil, index < arguments.count,
                       let value = Double(arguments[index]), value.isFinite,
                       value >= 0, value <= Double(Int32.max)
                 else {
@@ -68,6 +69,9 @@ struct Options {
                 }
                 timeout = value
                 index += 1
+            case "--restart-service":
+                guard [.update, .rollback].contains(command) else { throw LatchError("--restart-service is only valid for update or rollback") }
+                restartService = true
             case "--no-wait":
                 guard [.run, .wait, .schedule, .guard].contains(command), timeout == nil else {
                     throw LatchError("--no-wait cannot be repeated, combined with --timeout, or used with status")
@@ -175,9 +179,17 @@ struct Options {
       latch view [--file PATH]
       latch sensors
       latch mcp [--file PATH]
+      latch update|rollback [--timeout SECONDS] [--restart-service]
 
     mcp       Serve agent tools over newline-delimited JSON-RPC on stdin/stdout.
               Uses the existing service. No installation or lifecycle changes.
+    update    Run from the newly built binary to drain work and atomically update
+              the installed executable, retaining the previous binary for rollback.
+              Restarts a loaded service only when its revision differs or when
+              --restart-service is explicit. A stopped service stays stopped.
+    rollback  Drain and restore the previous installed binary. Both commands use
+              the installed service's latch path. Drain timeout defaults to 600s.
+              Existing MCP hosts retain results; reconnect them before new work.
     schedule  Queue a named task until reservations and native sensors allow it.
               Defaults: isolated, 1 CPU core, 512 MiB. Batch tasks may overlap
               within CPU/memory budgets; GPU, I/O, and bandwidth are exclusive

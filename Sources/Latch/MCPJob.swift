@@ -6,6 +6,7 @@ struct MCPWorkerRequest: Codable {
     var latchPath: String
     var parentPID: Int32
     var statusPath: String
+    var updateDescriptor: Int32
 }
 
 struct MCPWorkerStatus: Codable {
@@ -27,13 +28,17 @@ enum MCPWorker {
             }
             let decoded = try JSONDecoder().decode(MCPWorkerRequest.self, from: Data(contentsOf: URL(fileURLWithPath: requestPath)))
             request = decoded
+            guard decoded.updateDescriptor > STDERR_FILENO, fcntl(decoded.updateDescriptor, F_GETFD) >= 0 else {
+                throw LatchError("missing inherited update permit", exitCode: 74)
+            }
+            guard fcntl(decoded.updateDescriptor, F_SETFD, 0) == 0 else { throw LatchError.system("inherit update permit") }
             let scheduler = try Scheduler(path: decoded.latchPath)
             let submission = decoded.submission
             let plan = TaskPlanner.plan(executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
             status.plan = plan
             try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
             let reservation = try scheduler.reserve(name: submission.name, arguments: [submission.executable] + plan.arguments,
-                                                    requirements: plan.requirements, timeout: plan.admissionTimeout, useService: true, ownerPID: decoded.parentPID)
+                                                    requirements: plan.requirements, timeout: plan.admissionTimeout, useService: true, ownerPID: decoded.parentPID, inheritedUpdatePermit: true)
             defer { try? scheduler.withdraw(reservation.id) }
             try withExtendedLifetime(reservation) {
                 guard getppid() == decoded.parentPID else { throw LatchError("MCP connection owner exited", exitCode: 69) }
@@ -76,16 +81,17 @@ final class MCPJob {
     var exitedAt: Double?
     var complete = false
 
-    init(submission: MCPSubmission, directory: URL, path: String, executable: URL) throws {
+    init(submission: MCPSubmission, directory: URL, path: String, executable: URL, updatePermit: FileLatch) throws {
         self.submission = submission
         statusURL = directory.appendingPathComponent(id + ".status.json")
         requestURL = directory.appendingPathComponent(id + ".request.json")
-        let request = MCPWorkerRequest(submission: submission, latchPath: path, parentPID: getpid(), statusPath: statusURL.path)
+        let request = MCPWorkerRequest(submission: submission, latchPath: path, parentPID: getpid(), statusPath: statusURL.path, updateDescriptor: updatePermit.descriptor)
         try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
         try Self.check(posix_spawn_file_actions_init(&actions))
         defer { posix_spawn_file_actions_destroy(&actions) }
+        try Self.check(posix_spawn_file_actions_addinherit_np(&actions, updatePermit.descriptor))
         try Self.check(posix_spawnattr_init(&attributes))
         defer { posix_spawnattr_destroy(&attributes) }
         try Self.check(posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0))
