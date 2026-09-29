@@ -5,7 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "Latch",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v26)],
     products: [
         .executable(name: "latch", targets: ["Latch"]),
     ],

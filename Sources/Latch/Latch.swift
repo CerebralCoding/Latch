@@ -1,9 +1,5 @@
+import Darwin
 import Foundation
-#if canImport(Darwin)
-    import Darwin
-#else
-    import Glibc
-#endif
 
 struct LatchError: Error, CustomStringConvertible {
     let description: String
@@ -28,8 +24,29 @@ struct Latch {
                 print(Options.usage)
                 return
             }
+            if options.command == .sensors {
+                try printJSON(NativeSensors.sample())
+                return
+            }
 
             let path = try options.resolvedPath()
+            if options.command == .tasks {
+                try printJSON(Scheduler(path: path).snapshot())
+                return
+            }
+            if options.command == .schedule {
+                let scheduler = try Scheduler(path: path)
+                let reservation = try scheduler.reserve(
+                    name: options.taskName ?? options.childArguments[0], arguments: options.childArguments,
+                    requirements: options.requirements, timeout: options.timeout,
+                )
+                defer { try? scheduler.withdraw(reservation.id) }
+                try withExtendedLifetime(reservation) {
+                    try reservation.inheritAcrossExec()
+                    try execute(options.childArguments)
+                }
+                return
+            }
             let latch = try FileLatch(path: path)
             switch options.command {
             case .run:
@@ -48,7 +65,7 @@ struct Latch {
                     print("held")
                     exit(75)
                 }
-            case .help:
+            case .help, .schedule, .tasks, .sensors:
                 break
             }
         } catch let error as LatchError {
@@ -58,6 +75,15 @@ struct Latch {
             FileHandle.standardError.write(Data("latch: \(error.localizedDescription)\n".utf8))
             exit(74)
         }
+    }
+
+    static func printJSON(_ value: some Encodable) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(value)
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data([10]))
     }
 
     static func execute(_ arguments: [String]) throws {

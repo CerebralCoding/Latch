@@ -1,11 +1,7 @@
+import Darwin
 import Foundation
 @testable import Latch
 import Testing
-#if canImport(Darwin)
-    import Darwin
-#else
-    import Glibc
-#endif
 
 @Test func `parses command without changing arguments`() throws {
     let options = try Options(arguments: ["run", "--shared", "--timeout", "0.25", "--", "printf", "a b", "", "--help"])
@@ -157,7 +153,7 @@ func `rejects invalid arguments`(arguments: [String]) {
     #expect(try fixture.finish(free) == 0)
 }
 
-private final class Child {
+final class Child {
     let process = Process()
     let stdout = Pipe()
     let stderr = Pipe()
@@ -170,7 +166,7 @@ private final class Child {
     }
 }
 
-private final class Fixture {
+final class Fixture {
     let directory: URL
     let executable: URL
     var children: [Child] = []
