@@ -2,8 +2,10 @@ import Foundation
 
 struct Options {
     enum Command: String {
-        case run, wait, status, schedule, tasks, sensors, help
+        case run, wait, status, schedule, tasks, sensors, service, view, `guard`, help
     }
+
+    enum ServiceAction: String { case run, install, start, stop, status, uninstall }
 
     var command: Command
     var file: String?
@@ -12,6 +14,8 @@ struct Options {
     var childArguments: [String] = []
     var taskName: String?
     var requirements = TaskRequirements()
+    var standalone = false
+    var serviceAction: ServiceAction?
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
@@ -26,6 +30,9 @@ struct Options {
             throw LatchError("unknown command '\(first)'; see latch --help")
         }
         self.command = command
+        if command == .schedule || command == .guard {
+            requirements.temperatureGuard = TemperatureGuard()
+        }
         var index = 1
         var seen: Set<String> = []
         while index < arguments.count {
@@ -35,6 +42,9 @@ struct Options {
                 throw LatchError("duplicate option '\(argument)'")
             }
             switch argument {
+            case let action where command == .service && ServiceAction(rawValue: action) != nil:
+                guard serviceAction == nil else { throw LatchError("service accepts one action") }
+                serviceAction = ServiceAction(rawValue: action)
             case "--help", "-h":
                 self.command = .help
                 return
@@ -50,7 +60,7 @@ struct Options {
                 }
                 shared = true
             case "--timeout":
-                guard [.run, .wait, .schedule].contains(command), timeout == nil, index < arguments.count,
+                guard [.run, .wait, .schedule, .guard].contains(command), timeout == nil, index < arguments.count,
                       let value = Double(arguments[index]), value.isFinite,
                       value >= 0, value <= Double(Int32.max)
                 else {
@@ -59,13 +69,13 @@ struct Options {
                 timeout = value
                 index += 1
             case "--no-wait":
-                guard [.run, .wait, .schedule].contains(command), timeout == nil else {
+                guard [.run, .wait, .schedule, .guard].contains(command), timeout == nil else {
                     throw LatchError("--no-wait cannot be repeated, combined with --timeout, or used with status")
                 }
                 timeout = 0
             case "--name", "--mode", "--cpu", "--memory-mib":
-                guard command == .schedule, index < arguments.count else {
-                    throw LatchError("\(argument) requires a value and is only valid for schedule")
+                guard [.schedule, .guard].contains(command), index < arguments.count else {
+                    throw LatchError("\(argument) requires a value and is only valid for schedule or guard")
                 }
                 let value = arguments[index]
                 index += 1
@@ -94,6 +104,25 @@ struct Options {
                 if argument == "--bandwidth" {
                     requirements.bandwidth = true
                 }
+            case "--standalone":
+                guard [.schedule, .guard].contains(command) else { throw LatchError("--standalone is only valid for schedule or guard") }
+                standalone = true
+            case "--max-cpu-temp", "--max-gpu-temp", "--cooldown":
+                guard [.schedule, .guard].contains(command), index < arguments.count,
+                      let value = Double(arguments[index]), value.isFinite
+                else {
+                    throw LatchError("\(argument) requires a finite number for schedule or guard")
+                }
+                index += 1
+                if argument == "--max-cpu-temp" {
+                    requirements.temperatureGuard?.maxCPU = value
+                }
+                if argument == "--max-gpu-temp" {
+                    requirements.temperatureGuard?.maxGPU = value
+                }
+                if argument == "--cooldown" {
+                    requirements.temperatureGuard?.cooldown = value
+                }
             case "--":
                 guard command == .run || command == .schedule else { throw LatchError("only run and schedule accept a command") }
                 childArguments = Array(arguments[index...])
@@ -105,7 +134,10 @@ struct Options {
         if command == .run || command == .schedule, childArguments.isEmpty || childArguments[0].isEmpty {
             throw LatchError("\(command.rawValue) requires -- followed by a command")
         }
-        if command == .schedule {
+        if command == .service, serviceAction == nil {
+            throw LatchError("service requires run, install, start, stop, status, or uninstall")
+        }
+        if command == .schedule || command == .guard {
             try requirements.validate()
         }
     }
@@ -131,8 +163,16 @@ struct Options {
       latch status [--file PATH]
       latch schedule [--file PATH] [--name NAME] [--mode isolated|batch]
                      [--cpu CORES] [--memory-mib MIB] [--gpu] [--io] [--bandwidth]
+                     [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
+                     [--standalone]
                      [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
+      latch guard [--file PATH] [--name NAME] [--mode isolated|batch]
+                  [--cpu CORES] [--memory-mib MIB]
+                  [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
+                  [--standalone] [--timeout SECONDS | --no-wait]
+      latch service install|start|stop|status|uninstall|run [--file PATH]
       latch tasks [--file PATH]
+      latch view [--file PATH]
       latch sensors
 
     schedule  Queue a named task until reservations and native sensors allow it.
@@ -140,10 +180,26 @@ struct Options {
               within CPU/memory budgets; GPU, I/O, and bandwidth are exclusive
               resources when requested. Declare the command's peak requirements.
               FIFO admission prevents new work overtaking a waiting measurement.
+              Requires the service unless --standalone is explicit.
+    guard     Queue a checkpoint, print an admitted JSON snapshot, then release.
+              It does not protect subsequent work; prefer schedule for commands.
+    service   install copies this binary and starts a per-user login LaunchAgent.
+              start/stop control the installed service; status prints JSON.
+              run serves in the foreground; uninstall retains queue data/logs.
     tasks     JSON snapshot of queued/running tasks, PIDs, reservations, sensors,
               and waiting reasons. Completed/crashed tasks are pruned by leases.
+    view      JSON planning snapshot: service, latch holders, FIFO order, current
+              blocking reasons, cooldowns, resource headroom and sensor freshness.
+              Uses cached readings; it does not sample or reserve resources.
     sensors   Sample native macOS CPU, GPU, ANE, memory, thermal, and disk sensors
-              and print JSON. No macmon executable, daemon, or root access needed.
+              plus CPU/GPU temperatures, and print JSON. No root access needed.
+
+    Temperature defaults for schedule/guard: hottest CPU and GPU <=55 C for
+    5 consecutive seconds. --cooldown accepts 0–3600 seconds; limits 1–125 C.
+    Missing temperatures block admission. Cooldowns reset when running tasks
+    finish, sensors fail/go stale, or the service restarts. Guards only gate
+    starts; admitted tasks run uninterrupted. Limits are workflow preferences,
+    not hardware safety limits.
 
     Isolated tasks require no running Latch tasks and two seconds of quiet:
     CPU <=5% overall / <=25% busiest core, GPU <=2%, ANE <=0.1 W,
@@ -155,11 +211,12 @@ struct Options {
 
     Scheduler state lives beside the latch in PATH.queue (private to this user).
     Queue changes/process exits wake waiters; sensor eligibility is rechecked at
-    most once per second by one waiting agent. Automatic sampling stops behind
+    most once per second by the service while work is queued. Sampling stops behind
     an exclusive latch. Sensors observe background load, but cannot prevent an
     unrelated process from starting later. Use isolated mode for measurements.
-    A schedule timeout includes admission/sampling. A no-wait attempt may sample
-    once; it does not wait for a quiet window. run retains its original behavior.
+    A schedule timeout bounds admission, not command runtime. --no-wait uses
+    cached service readings and never waits for a cooldown/quiet window.
+    --standalone lets the queue head collect readings without a service.
 
     run     Hold an exclusive latch for a command. --shared lets cooperating
             background work overlap while excluding exclusive work.
@@ -174,17 +231,20 @@ struct Options {
     Explicit paths require an existing parent directory. All agents must use
     the same file on a local filesystem. Never delete or replace a latch file.
 
-    run replaces itself with COMMAND, preserving arguments, streams, signals,
+    run/schedule replace themselves with COMMAND, preserving arguments, streams, signals,
     and exit status. The lock descriptor is inherited by the command and its
     children; it releases when the last copy closes, including on process exit.
     Commands that close inherited descriptors can release the latch early.
     Coordination is advisory; every participant must cooperate. Waiters are
-    not guaranteed FIFO ordering. No daemon or external dependencies.
+    not guaranteed FIFO ordering for run/wait. No external dependencies.
 
-    Exit codes: 64 usage, 74 I/O, 75 busy/timeout, 126 cannot execute,
-                127 command not found. run otherwise returns COMMAND's status.
+    Exit codes: 64 usage, 69 service unavailable, 71 allocation failure,
+                74 I/O, 75 busy/timeout, 126 cannot execute, 127 command not found.
+                run/schedule otherwise return COMMAND's status.
 
     Examples:
+      latch service install
+      latch service status
       latch run -- swift test
       latch run --shared -- swift build
       latch run --timeout 30 -- ./benchmark

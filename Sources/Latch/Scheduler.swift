@@ -33,8 +33,11 @@ final class Scheduler {
         }
     }
 
-    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?) throws -> TaskReservation {
+    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false) throws -> TaskReservation {
         try requirements.validate()
+        if useService {
+            _ = try SchedulerService.requireRunning(in: directory)
+        }
         let started = ProcessInfo.processInfo.systemUptime
         let deadline = timeout.map { started + $0 }
         let watcher = try QueueWatcher(directory: directory.path)
@@ -52,9 +55,10 @@ final class Scheduler {
             state.tasks.append(ScheduledTask(id: id, name: name, pid: getpid(), arguments: arguments, requirements: requirements))
         }
         while true {
+            let servicePID = useService ? try SchedulerService.requireRunning(in: directory) : nil
             var view = try snapshot()
             var samplingBlocked = false
-            if view.tasks.first(where: { $0.state == .queued })?.id == id,
+            if !useService, view.tasks.first(where: { $0.state == .queued })?.id == id,
                !view.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),
                !(requirements.mode == .isolated && view.tasks.contains(where: { $0.state == .running }))
             {
@@ -98,7 +102,9 @@ final class Scheduler {
                 throw LatchError(reason, exitCode: 75)
             }
             let isolatedRunning = view.tasks.contains { $0.state == .running && $0.requirements.mode == .isolated }
-            if isolatedRunning || blockedByLatch || samplingBlocked {
+            if useService {
+                watcher.wait(seconds: remaining ?? 3600, pids: view.tasks.map(\.pid) + [servicePID!])
+            } else if isolatedRunning || blockedByLatch || samplingBlocked {
                 // Park behind an exclusive workload without sampling or periodic wakeups.
                 let checkpoint = try FileLatch(path: path)
                 try checkpoint.acquire(shared: isolatedRunning || requirements.mode == .batch, timeout: remaining)
@@ -113,7 +119,12 @@ final class Scheduler {
     }
 
     func withdraw(_ id: String) throws {
-        try transaction { state in state.tasks.removeAll { $0.id == id } }
+        try transaction { state in
+            if state.tasks.contains(where: { $0.id == id && $0.state == .running }) {
+                state.resetCooldowns()
+            }
+            state.tasks.removeAll { $0.id == id }
+        }
         try? FileManager.default.removeItem(atPath: leasePath(id))
     }
 
@@ -140,6 +151,7 @@ final class Scheduler {
                         $0.sensorError = String(describing: error)
                         $0.lastSensorAttempt = ProcessInfo.processInfo.systemUptime
                         $0.quietSince = nil
+                        $0.resetCooldowns()
                     }
                 }
                 return true
@@ -166,8 +178,11 @@ final class Scheduler {
                     try? FileManager.default.removeItem(atPath: leasePath(task.id))
                 } catch let error as LatchError where error.exitCode == 75 { live.append(task) }
             }
-            if live.count != state.tasks.count {
+            if state.tasks.contains(where: { task in task.state == .running && !live.contains(where: { $0.id == task.id }) }) {
                 state.quietSince = nil
+                for index in live.indices {
+                    live[index].coolSince = nil
+                }
             }
             state.tasks = live
             let result = try body(&state)

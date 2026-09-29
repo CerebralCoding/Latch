@@ -4,6 +4,7 @@ import Foundation
 final class QueueWatcher {
     private let queue: Int32
     private let directory: Int32
+    private var watchedPIDs: Set<Int32> = []
 
     init(directory path: String) throws {
         let descriptor = open(path, O_EVTONLY | O_CLOEXEC)
@@ -30,9 +31,12 @@ final class QueueWatcher {
     }
 
     func wait(seconds: Double, pids: [Int32]) {
-        for pid in pids where pid > 0 {
+        watchedPIDs.formIntersection(pids)
+        for pid in pids where pid > 0 && watchedPIDs.insert(pid).inserted {
             var process = kevent(ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT), fflags: UInt32(NOTE_EXIT), data: 0, udata: nil)
-            _ = kevent(queue, &process, 1, nil, 0, nil)
+            if kevent(queue, &process, 1, nil, 0, nil) != 0 {
+                return
+            }
         }
         var event = kevent()
         var timeout = timespec(tv_sec: Int(seconds), tv_nsec: Int((seconds - floor(seconds)) * 1_000_000_000))

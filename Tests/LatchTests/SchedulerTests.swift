@@ -19,7 +19,7 @@ private func task(_ mode: TaskRequirements.Mode = .batch, cores: Int = 1, gpu: B
 @Test func `scheduler options preserve command and validate resources`() throws {
     let options = try Options(arguments: ["schedule", "--name", "inference", "--mode", "batch", "--gpu", "--bandwidth", "--cpu", "2", "--memory-mib", "4096", "--", "model", "--gpu"])
     #expect(options.taskName == "inference")
-    #expect(options.requirements == TaskRequirements(mode: .batch, cpuCores: 2, memoryMiB: 4096, gpu: true, bandwidth: true))
+    #expect(options.requirements == TaskRequirements(mode: .batch, cpuCores: 2, memoryMiB: 4096, gpu: true, bandwidth: true, temperatureGuard: TemperatureGuard()))
     #expect(options.childArguments == ["model", "--gpu"])
     #expect(try Options(arguments: ["schedule", "--", "true"]).requirements.mode == .isolated)
 }
@@ -230,7 +230,7 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     let holder = try FileLatch(path: fixture.lockPath)
     try holder.acquire(shared: false, timeout: 0)
     try withExtendedLifetime(holder) {
-        let child = try fixture.launch(["schedule", "--name", "parked-agent", "--", "/usr/bin/true"])
+        let child = try fixture.launch(["schedule", "--standalone", "--name", "parked-agent", "--", "/usr/bin/true"])
         let scheduler = try Scheduler(path: fixture.lockPath, collect: { idleSensors() })
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while try scheduler.snapshot().tasks.isEmpty, ContinuousClock.now < deadline {

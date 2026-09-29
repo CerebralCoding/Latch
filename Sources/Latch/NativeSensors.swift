@@ -2,22 +2,37 @@ import Darwin
 import Foundation
 import IOKit
 
-enum NativeSensors {
-    static func sample() throws -> SensorSnapshot {
-        let report: NativeIOReport?
-        var unavailable: [String] = []
+final class NativeSensors {
+    private let report: NativeIOReport?
+    private let temperatures: NativeSMC?
+    private var initializationErrors: [String] = []
+
+    init() {
         do { report = try NativeIOReport() }
         catch {
             report = nil
-            unavailable.append(String(describing: error))
+            initializationErrors.append(String(describing: error))
         }
-        let firstCPU = try cpuTicks()
-        let firstDisk = diskBytes()
+        do { temperatures = try NativeSMC() }
+        catch {
+            temperatures = nil
+            initializationErrors.append(String(describing: error))
+        }
+    }
+
+    static func sample() throws -> SensorSnapshot {
+        try NativeSensors().read()
+    }
+
+    func read() throws -> SensorSnapshot {
+        var unavailable = initializationErrors
+        let firstCPU = try Self.cpuTicks()
+        let firstDisk = Self.diskBytes()
         let firstReport = report?.sample()
         let started = ProcessInfo.processInfo.systemUptime
         Thread.sleep(forTimeInterval: 0.2)
-        let secondCPU = try cpuTicks()
-        let secondDisk = diskBytes()
+        let secondCPU = try Self.cpuTicks()
+        let secondDisk = Self.diskBytes()
         let secondReport = report?.sample()
         let now = ProcessInfo.processInfo.systemUptime
         let elapsed = now - started
@@ -45,7 +60,14 @@ enum NativeSensors {
             disk = nil
             unavailable.append("disk I/O")
         }
-        let memory = try availableMemory()
+        let memory = try Self.availableMemory()
+        let temperature = temperatures?.temperatures()
+        if temperature?.cpu == nil {
+            unavailable.append("CPU temperature")
+        }
+        if temperature?.gpu == nil {
+            unavailable.append("GPU temperature")
+        }
         var pressure: Int32 = 0
         var size = MemoryLayout.size(ofValue: pressure)
         let pressureResult = sysctlbyname("kern.memorystatus_vm_pressure_level", &pressure, &size, nil, 0)
@@ -68,6 +90,7 @@ enum NativeSensors {
             memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
             memoryPressure: pressureName, thermalState: thermal,
             diskBytesPerSecond: disk, unavailable: unavailable,
+            cpuTemperature: temperature?.cpu, gpuTemperature: temperature?.gpu,
         )
     }
 

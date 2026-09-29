@@ -30,18 +30,30 @@ struct Latch {
             }
 
             let path = try options.resolvedPath()
+            if options.command == .service {
+                try ServiceInstallation.perform(options.serviceAction!, path: path)
+                return
+            }
             if options.command == .tasks {
                 try printJSON(Scheduler(path: path).snapshot())
                 return
             }
-            if options.command == .schedule {
+            if options.command == .view {
+                try printJSON(SchedulerView(scheduler: Scheduler(path: path)))
+                return
+            }
+            if options.command == .schedule || options.command == .guard {
                 let scheduler = try Scheduler(path: path)
                 let reservation = try scheduler.reserve(
-                    name: options.taskName ?? options.childArguments[0], arguments: options.childArguments,
-                    requirements: options.requirements, timeout: options.timeout,
+                    name: options.taskName ?? options.childArguments.first ?? "temperature guard", arguments: options.childArguments,
+                    requirements: options.requirements, timeout: options.timeout, useService: !options.standalone,
                 )
                 defer { try? scheduler.withdraw(reservation.id) }
                 try withExtendedLifetime(reservation) {
+                    if options.command == .guard {
+                        try printJSON(scheduler.snapshot())
+                        return
+                    }
                     try reservation.inheritAcrossExec()
                     try execute(options.childArguments)
                 }
@@ -65,7 +77,7 @@ struct Latch {
                     print("held")
                     exit(75)
                 }
-            case .help, .schedule, .tasks, .sensors:
+            case .help, .schedule, .tasks, .sensors, .guard, .service, .view:
                 break
             }
         } catch let error as LatchError {

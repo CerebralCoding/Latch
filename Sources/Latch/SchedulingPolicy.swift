@@ -9,8 +9,10 @@ struct TaskRequirements: Codable, Equatable {
     var gpu = false
     var io = false
     var bandwidth = false
+    var temperatureGuard: TemperatureGuard?
 
     func validate() throws {
+        try temperatureGuard?.validate()
         guard cpuCores > 0, cpuCores <= ProcessInfo.processInfo.activeProcessorCount else {
             throw LatchError("--cpu must fit this machine's available core count")
         }
@@ -34,6 +36,8 @@ struct SensorSnapshot: Codable, Equatable {
     var thermalState: String
     var diskBytesPerSecond: Double?
     var unavailable: [String]
+    var cpuTemperature: Double?
+    var gpuTemperature: Double?
 
     var quiet: Bool {
         guard let gpuActive, let aneWatts, let diskBytesPerSecond else { return false }
@@ -55,6 +59,7 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
     var queuedAt = Date()
     var startedAt: Date?
     var waitingFor: String?
+    var coolSince: Double?
 }
 
 struct SchedulerState: Codable, Equatable {
@@ -65,11 +70,28 @@ struct SchedulerState: Codable, Equatable {
     var lastSensorAttempt: Double?
     var quietSince: Double?
 
+    mutating func resetCooldowns() {
+        quietSince = nil
+        for index in tasks.indices {
+            tasks[index].coolSince = nil
+        }
+    }
+
     mutating func record(_ snapshot: SensorSnapshot) {
         let previous = sensors
         sensors = snapshot
         sensorError = nil
         lastSensorAttempt = snapshot.uptime
+        for index in tasks.indices where tasks[index].state == .queued {
+            guard let guardrail = tasks[index].requirements.temperatureGuard else { continue }
+            if !guardrail.satisfied(by: snapshot) {
+                tasks[index].coolSince = nil
+            } else if tasks[index].coolSince == nil || previous == nil
+                || snapshot.uptime < previous!.uptime || snapshot.uptime - previous!.uptime > SchedulingPolicy.maximumSampleAge
+            {
+                tasks[index].coolSince = snapshot.uptime
+            }
+        }
         if !snapshot.quiet {
             quietSince = nil
         } else if quietSince == nil || previous == nil
@@ -107,6 +129,11 @@ enum SchedulingPolicy {
         }
         guard sensors.thermalState == "nominal" else { return "thermal state is \(sensors.thermalState)" }
         guard sensors.memoryPressure == "normal" else { return "memory pressure is \(sensors.memoryPressure)" }
+        if let guardrail = request.temperatureGuard,
+           let reason = guardrail.reason(sensors: sensors, since: task.coolSince)
+        {
+            return reason
+        }
 
         let reservedCPU = running.reduce(0) { $0 + $1.requirements.cpuCores }
         let reservedMemory = running.reduce(0) { $0 + $1.requirements.memoryMiB }
