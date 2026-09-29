@@ -3,12 +3,15 @@ import Foundation
 
 final class MCPServer {
     private struct Waiter {
-        enum Kind { case tool, execute, taskResult, taskCancel }
+        enum Kind { case tool, execute, taskResult, taskCancel, control, output }
         var requestID: MCPValue
         var jobID: String
         var deadline: Double?
         var kind: Kind = .tool
         var progress: MCPProgress?
+        var controlID: String?
+        var stdoutOffset = 0
+        var stderrOffset = 0
     }
 
     private let scheduler: Scheduler
@@ -267,6 +270,8 @@ final class MCPServer {
                 try reportProgress(progress, job: job)
                 try toolResult(id: id, value: job.result(includeOutput: false))
             }
+        case "latch_signal", "latch_input", "latch_resize", "latch_control", "latch_read":
+            try interactiveCall(name, arguments: arguments, id: id)
         case "latch_wait", "latch_cancel", "latch_forget":
             let input = try MCPArguments(arguments, allowed: name == "latch_wait" ? ["jobID", "timeoutSeconds"] : ["jobID"])
             let jobID = try input.text("jobID", maximum: 128)
@@ -351,6 +356,50 @@ final class MCPServer {
         guard waiters.count < 128 else { throw MCPFailure.invalid("Too many pending waits") }
     }
 
+    private func interactiveCall(_ name: String, arguments: MCPValue?, id: MCPValue) throws {
+        let fields: Set<String> = switch name {
+        case "latch_signal": ["jobID", "requestKey", "signal"]
+        case "latch_input": ["jobID", "requestKey", "text", "base64", "eof"]
+        case "latch_resize": ["jobID", "requestKey", "columns", "rows"]
+        case "latch_control": ["jobID", "controlID", "timeoutSeconds", "forget"]
+        default: ["jobID", "stdoutOffset", "stderrOffset", "timeoutSeconds"]
+        }
+        let input = try MCPArguments(arguments, allowed: fields)
+        let jobID = try input.text("jobID", maximum: 128)
+        guard let job = jobs[jobID] else { throw MCPFailure.invalid("Unknown jobID for this owner") }
+        if name == "latch_control" {
+            let controlID = try input.text("controlID", maximum: 128)
+            guard let control = try store.controls(jobID).first(where: { $0.id == controlID }) else { throw MCPFailure.invalid("Unknown controlID") }
+            if try input.flag("forget") {
+                try store.forgetControl(controlID, id: jobID)
+                try toolResult(id: id, value: ["forgotten": true])
+            } else {
+                try requireWaiterSlot()
+                let timeout = try input.number("timeoutSeconds", default: 25, range: 0 ... 600)
+                if control.complete || timeout == 0 {
+                    try toolResult(id: id, value: control.value(jobID: jobID), isError: control.complete && control.state != "delivered")
+                } else {
+                    waiters.append(Waiter(requestID: id, jobID: jobID, deadline: ProcessInfo.processInfo.systemUptime + timeout, kind: .control, controlID: controlID))
+                }
+            }
+        } else if name == "latch_read" {
+            try requireWaiterSlot()
+            let stdout = try Int(input.number("stdoutOffset", default: 0, range: 0 ... 9_007_199_254_740_991, integer: true))
+            let stderr = try Int(input.number("stderrOffset", default: 0, range: 0 ... 9_007_199_254_740_991, integer: true))
+            _ = try readOutput(jobID).value(stdoutOffset: stdout, stderrOffset: stderr, complete: job.complete)
+            let timeout = try input.number("timeoutSeconds", default: 25, range: 0 ... 600)
+            waiters.append(Waiter(requestID: id, jobID: jobID, deadline: ProcessInfo.processInfo.systemUptime + timeout, kind: .output, stdoutOffset: stdout, stderrOffset: stderr))
+        } else {
+            let control = try store.enqueueControl(MCPControl(operation: name, arguments: input), id: jobID, owner: owner)
+            try toolResult(id: id, value: control.value(jobID: jobID), isError: control.complete && control.state != "delivered")
+        }
+    }
+
+    private func readOutput(_ id: String) throws -> MCPLiveOutput {
+        do { return try JSONDecoder().decode(MCPLiveOutput.self, from: Data(contentsOf: store.file(id, "output.json"))) }
+        catch CocoaError.fileReadNoSuchFile { return MCPLiveOutput() }
+    }
+
     private func progress(_ params: MCPValue) throws -> MCPProgress? {
         guard let meta = params["_meta"] else { return nil }
         guard meta.object != nil else { throw MCPFailure.invalid("_meta must be an object") }
@@ -430,7 +479,32 @@ final class MCPServer {
     }
 
     private func finishWaiters(now: Double) throws {
-        let finished = waiters.filter { jobs[$0.jobID]?.complete == true || ($0.deadline.map { $0 <= now } ?? false) }
+        for waiter in waiters where waiter.kind == .control || waiter.kind == .output {
+            guard let job = jobs[waiter.jobID] else { continue }
+            let expired = waiter.deadline.map { $0 <= now } ?? false
+            if waiter.kind == .control {
+                guard let control = try store.controls(waiter.jobID).first(where: { $0.id == waiter.controlID }) else {
+                    waiters.removeAll { $0.requestID == waiter.requestID }
+                    try failure(id: waiter.requestID, code: -32602, message: "Control receipt was forgotten")
+                    continue
+                }
+                if !control.complete, !expired {
+                    continue
+                }
+                waiters.removeAll { $0.requestID == waiter.requestID }
+                try toolResult(id: waiter.requestID, value: control.value(jobID: job.id), isError: control.complete && control.state != "delivered")
+            } else {
+                let output = try readOutput(job.id)
+                if !job.complete, !expired, output.stdoutEnd == waiter.stdoutOffset, output.stderrEnd == waiter.stderrOffset {
+                    continue
+                }
+                waiters.removeAll { $0.requestID == waiter.requestID }
+                var value = try output.value(stdoutOffset: waiter.stdoutOffset, stderrOffset: waiter.stderrOffset, complete: job.complete).object!
+                value["jobID"] = .string(job.id)
+                try toolResult(id: waiter.requestID, value: .object(value))
+            }
+        }
+        let finished = waiters.filter { $0.kind != .control && $0.kind != .output && (jobs[$0.jobID]?.complete == true || ($0.deadline.map { $0 <= now } ?? false)) }
         waiters.removeAll { waiter in finished.contains { $0.requestID == waiter.requestID } }
         for waiter in finished {
             guard let job = jobs[waiter.jobID] else { continue }

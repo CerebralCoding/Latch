@@ -102,6 +102,7 @@ final class DurableJobs {
                 state.jobs?[index].updatedAt = Date()
             }
             if result["complete"] == true {
+                try settleControls(id)
                 state.jobs?[index].complete = true
                 state.jobs?[index].environment = [:]
                 if state.tasks.contains(where: { $0.id == id && $0.state == .running }) {
@@ -121,7 +122,7 @@ final class DurableJobs {
             guard let record = state.jobs?.first(where: { $0.id == id && $0.owner == owner }) else { return }
             guard record.complete else { throw MCPFailure.invalid("Only completed jobs can be forgotten") }
             state.jobs?.removeAll { $0.id == id }
-            for suffix in ["result.json", "cancel", "status.json", "request.json", "supervisor.lock"] {
+            for suffix in ["result.json", "cancel", "status.json", "request.json", "supervisor.lock", "controls.json", "output.json"] {
                 try? FileManager.default.removeItem(at: file(id, suffix))
             }
             let leaseURL = scheduler.directory.appendingPathComponent(id + ".lease")

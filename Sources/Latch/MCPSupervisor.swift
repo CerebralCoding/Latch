@@ -62,12 +62,29 @@ enum MCPSupervisor {
         }
         try? watch(UInt(execution.pid), filter: EVFILT_PROC, flags: EV_ADD | EV_ONESHOT, fflags: UInt32(NOTE_EXIT))
         var previous: MCPValue?
+        var previousOutput = MCPLiveOutput()
+        var writingInput: Int32?
         while true {
             let now = ProcessInfo.processInfo.systemUptime
             if FileManager.default.fileExists(atPath: store.file(execution.id, "cancel").path) {
                 execution.cancel(now: now)
             }
             execution.update(now: now)
+            try execution.applyControls(store.claimControls(execution.id), store: store)
+            if execution.liveOutput != previousOutput {
+                try JSONEncoder().encode(execution.liveOutput).write(to: store.file(execution.id, "output.json"), options: .atomic)
+                previousOutput = execution.liveOutput
+            }
+            let inputFD = execution.pendingInput.isEmpty ? nil : execution.inputDescriptor
+            if writingInput != inputFD {
+                if let writingInput {
+                    try? watch(UInt(writingInput), filter: EVFILT_WRITE, flags: EV_DELETE)
+                }
+                if let inputFD {
+                    try watch(UInt(inputFD), filter: EVFILT_WRITE)
+                }
+                writingInput = inputFD
+            }
             let result = try execution.result(includeOutput: execution.complete)
             if execution.complete {
                 return result

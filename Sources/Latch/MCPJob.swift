@@ -23,12 +23,17 @@ enum MCPWorker {
         var request: MCPWorkerRequest?
         var status = MCPWorkerStatus(admitted: false)
         do {
-            guard setpgid(0, 0) == 0 || getpgrp() == getpid() else { throw LatchError.system("create workload process group") }
             for number in [SIGTERM, SIGINT, SIGPIPE] {
                 signal(number, SIG_DFL)
             }
             let decoded = try JSONDecoder().decode(MCPWorkerRequest.self, from: Data(contentsOf: URL(fileURLWithPath: requestPath)))
             request = decoded
+            if decoded.submission.input == "terminal" {
+                guard setsid() >= 0, ioctl(STDIN_FILENO, TIOCSCTTY, 0) == 0,
+                      tcsetpgrp(STDIN_FILENO, getpid()) == 0 else { throw LatchError.system("attach controlling terminal") }
+            } else {
+                guard setpgid(0, 0) == 0 || getpgrp() == getpid() else { throw LatchError.system("create workload process group") }
+            }
             guard decoded.updateDescriptor > STDERR_FILENO, fcntl(decoded.updateDescriptor, F_GETFD) >= 0 else {
                 throw LatchError("missing inherited update permit", exitCode: 74)
             }
@@ -69,6 +74,11 @@ final class MCPExecution {
     private var terminationStatus: Int32 = 0
     let stdout = Pipe()
     let stderr = Pipe()
+    var terminal: MCPPseudoTerminal?
+    var inputPipe: Pipe?
+    var inputOpen = false
+    var pendingInput: [MCPControl] = []
+    var liveOutput = MCPLiveOutput()
     let statusURL: URL
     let requestURL: URL
     var stdoutOpen = true
@@ -96,9 +106,26 @@ final class MCPExecution {
         try Self.check(posix_spawn_file_actions_addinherit_np(&actions, updateDescriptor))
         try Self.check(posix_spawnattr_init(&attributes))
         defer { posix_spawnattr_destroy(&attributes) }
-        try Self.check(posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0))
-        try Self.check(posix_spawn_file_actions_adddup2(&actions, stdout.fileHandleForWriting.fileDescriptor, STDOUT_FILENO))
-        try Self.check(posix_spawn_file_actions_adddup2(&actions, stderr.fileHandleForWriting.fileDescriptor, STDERR_FILENO))
+        if submission.input == "terminal" {
+            let terminal = try MCPPseudoTerminal(columns: submission.columns, rows: submission.rows)
+            self.terminal = terminal
+            for fd in [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO] {
+                try Self.check(posix_spawn_file_actions_adddup2(&actions, terminal.slave.fileDescriptor, fd))
+            }
+            stderrOpen = false
+        } else {
+            if submission.input == "pipe" {
+                let pipe = Pipe()
+                inputPipe = pipe
+                inputOpen = true
+                _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETFL, O_NONBLOCK)
+                try Self.check(posix_spawn_file_actions_adddup2(&actions, pipe.fileHandleForReading.fileDescriptor, STDIN_FILENO))
+            } else {
+                try Self.check(posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0))
+            }
+            try Self.check(posix_spawn_file_actions_adddup2(&actions, stdout.fileHandleForWriting.fileDescriptor, STDOUT_FILENO))
+            try Self.check(posix_spawn_file_actions_adddup2(&actions, stderr.fileHandleForWriting.fileDescriptor, STDERR_FILENO))
+        }
         try Self.check(posix_spawn_file_actions_addchdir(&actions, submission.workingDirectory))
         try Self.check(posix_spawnattr_setpgroup(&attributes, 0))
         var defaults = sigset_t(0)
@@ -108,7 +135,8 @@ final class MCPExecution {
         var mask = sigset_t(0)
         try Self.check(posix_spawnattr_setsigdefault(&attributes, &defaults))
         try Self.check(posix_spawnattr_setsigmask(&attributes, &mask))
-        try Self.check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)))
+        let groupFlag = submission.input == "terminal" ? 0 : POSIX_SPAWN_SETPGROUP
+        try Self.check(posix_spawnattr_setflags(&attributes, Int16(groupFlag | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)))
         let arguments = [executable.path, "__mcp_worker", requestURL.path].map { strdup($0) }
         defer { arguments.forEach { free($0) } }
         guard arguments.allSatisfy({ $0 != nil }) else { throw LatchError("out of memory", exitCode: 71) }
@@ -118,6 +146,8 @@ final class MCPExecution {
         guard inheritedEnvironment.allSatisfy({ $0 != nil }) else { throw LatchError("out of memory", exitCode: 71) }
         var environment = inheritedEnvironment + [nil]
         try Self.check(posix_spawn(&pid, executable.path, &actions, &attributes, &pointers, &environment))
+        try? terminal?.slave.close()
+        try? inputPipe?.fileHandleForReading.close()
         try? stdout.fileHandleForWriting.close()
         try? stderr.fileHandleForWriting.close()
         for pipe in [stdout, stderr] {
@@ -140,16 +170,17 @@ final class MCPExecution {
     }
 
     var descriptors: [Int32] {
-        (stdoutOpen ? [stdout.fileHandleForReading.fileDescriptor] : []) + (stderrOpen ? [stderr.fileHandleForReading.fileDescriptor] : [])
+        (stdoutOpen ? [outputDescriptor] : []) + (stderrOpen ? [stderr.fileHandleForReading.fileDescriptor] : [])
     }
 
     func drain(_ descriptor: Int32) {
-        let isOutput = stdoutOpen && descriptor == stdout.fileHandleForReading.fileDescriptor
+        let isOutput = stdoutOpen && descriptor == outputDescriptor
         var buffer = [UInt8](repeating: 0, count: 8192)
         // Bound each turn so a noisy command cannot starve protocol input or cancellation.
         for _ in 0 ..< 16 {
             let count = read(descriptor, &buffer, buffer.count)
             if count > 0 {
+                liveOutput.append(Data(buffer.prefix(count)), output: isOutput)
                 if isOutput {
                     let retained = min(count, Self.outputLimit - stdoutData.count)
                     stdoutData.append(contentsOf: buffer.prefix(retained))
@@ -161,7 +192,7 @@ final class MCPExecution {
                 }
             } else if count == 0 || (errno != EAGAIN && errno != EINTR) {
                 if isOutput {
-                    stdoutOpen = false; try? stdout.fileHandleForReading.close()
+                    closeOutput()
                 } else {
                     stderrOpen = false; try? stderr.fileHandleForReading.close()
                 }
@@ -176,6 +207,7 @@ final class MCPExecution {
         guard !complete, cancelAt == nil else { return }
         cancelAt = now
         signalGroup(SIGTERM)
+        signalGroup(SIGCONT)
     }
 
     func update(now: Double) {
@@ -194,7 +226,7 @@ final class MCPExecution {
             }
             if let exitedAt, now - exitedAt >= 2 {
                 if stdoutOpen {
-                    stdoutTruncated = true; stdoutOpen = false; try? stdout.fileHandleForReading.close()
+                    stdoutTruncated = true; closeOutput()
                 }
                 if stderrOpen {
                     stderrTruncated = true; stderrOpen = false; try? stderr.fileHandleForReading.close()
@@ -210,7 +242,15 @@ final class MCPExecution {
     func signalGroup(_ number: Int32) {
         guard pid > 0, !complete else { return }
         // Keep the leader unreaped until completion, so its process-group ID cannot be reused.
-        _ = kill(-pid, number)
+        if let terminal, stdoutOpen {
+            let foreground = tcgetpgrp(terminal.master.fileDescriptor)
+            if foreground > 0, foreground != pid {
+                _ = kill(-foreground, number)
+            }
+        }
+        if kill(-pid, number) != 0, errno == ESRCH {
+            _ = kill(pid, number)
+        }
     }
 
     func result(includeOutput: Bool) throws -> MCPValue {
