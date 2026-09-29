@@ -33,7 +33,7 @@ final class Scheduler {
         }
     }
 
-    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false) throws -> TaskReservation {
+    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false, ownerPID: Int32? = nil) throws -> TaskReservation {
         try requirements.validate()
         if useService {
             _ = try SchedulerService.requireRunning(in: directory)
@@ -55,6 +55,9 @@ final class Scheduler {
             state.tasks.append(ScheduledTask(id: id, name: name, pid: getpid(), arguments: arguments, requirements: requirements))
         }
         while true {
+            if let ownerPID, getppid() != ownerPID {
+                throw LatchError("MCP connection owner exited", exitCode: 69)
+            }
             let servicePID = useService ? try SchedulerService.requireRunning(in: directory) : nil
             var view = try snapshot()
             var samplingBlocked = false
@@ -103,7 +106,7 @@ final class Scheduler {
             }
             let isolatedRunning = view.tasks.contains { $0.state == .running && $0.requirements.mode == .isolated }
             if useService {
-                watcher.wait(seconds: remaining ?? 3600, pids: view.tasks.map(\.pid) + [servicePID!])
+                watcher.wait(seconds: remaining ?? 3600, pids: view.tasks.map(\.pid) + [servicePID!] + (ownerPID.map { [$0] } ?? []))
             } else if isolatedRunning || blockedByLatch || samplingBlocked {
                 // Park behind an exclusive workload without sampling or periodic wakeups.
                 let checkpoint = try FileLatch(path: path)

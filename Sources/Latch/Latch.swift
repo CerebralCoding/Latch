@@ -18,6 +18,9 @@ struct LatchError: Error, CustomStringConvertible {
 @main
 struct Latch {
     static func main() {
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "__mcp_worker" {
+            exit(MCPWorker.run(requestPath: CommandLine.arguments[2]))
+        }
         do {
             let options = try Options(arguments: Array(CommandLine.arguments.dropFirst()))
             if options.command == .help {
@@ -30,6 +33,10 @@ struct Latch {
             }
 
             let path = try options.resolvedPath()
+            if options.command == .mcp {
+                try MCPServer(path: path).run()
+                return
+            }
             if options.command == .service {
                 try ServiceInstallation.perform(options.serviceAction!, path: path)
                 return
@@ -77,7 +84,7 @@ struct Latch {
                     print("held")
                     exit(75)
                 }
-            case .help, .schedule, .tasks, .sensors, .guard, .service, .view:
+            case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp:
                 break
             }
         } catch let error as LatchError {

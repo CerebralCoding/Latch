@@ -20,10 +20,11 @@ let package = Package(
         ),
         .testTarget(
             name: "LatchTests",
-            dependencies: ["Latch"],
+            dependencies: ["Latch", "LatchTestWorkload"],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
         ),
+        .executableTarget(name: "LatchTestWorkload", path: "Tests/Support"),
     ],
 )

@@ -27,12 +27,54 @@ latch service uninstall
 
 For a separately managed service, run `latch service run --file /existing/directory/work.lock` in the foreground. Each latch path permits one service. Stop a foreground service using its process manager or a termination signal. `schedule --standalone` and `guard --standalone` explicitly allow client-side sampling without a service.
 
-## Agent workflow
+## MCP for agents
 
-1. Use `latch view` when planning work. It shows current reservations, FIFO queue positions, blocking reasons, temperatures, sensor freshness, and resource headroom.
-2. Route heavy work through `latch schedule`. Use `isolated` for measurements and `batch` for ordinary builds or inference. Declare peak resources honestly and configure the command's own parallelism to match.
-3. Submit the command once and let the tool call wait. If the agent runtime yields a process/session handle, wait on that existing handle. Do not repeatedly invoke `view`, `sensors`, or `schedule` to poll readiness.
-4. Let command completion release the reservation. A timeout before admission returns 75 without executing the command; inspect `view` once if you need to adjust the plan.
+Agents hand tasks to Latch; **Latch owns scheduling and resource planning**. Agents do not calculate CPU/memory budgets, choose admission modes or temperature thresholds, or inspect capacity before submitting. The CLI is primarily for humans and service operators.
+
+Configure a local stdio MCP server with the absolute path to an MCP-capable `latch` executable and `args: ["mcp"]`. For example, the launch configuration fields are:
+
+```json
+{
+  "command": "/absolute/path/to/latch",
+  "args": ["mcp"]
+}
+```
+
+Starting this endpoint uses the existing user service; it never installs, starts, stops, or replaces that service. A locally built executable can connect to the existing service without upgrading it. `swift build -c release --show-bin-path` identifies the build directory containing `latch`. The endpoint uses `LATCH_FILE` or the default shared latch; an operator can select `mcp --file PATH` at launch, but individual tool calls cannot select separate queues.
+
+| Tool | Purpose |
+| --- | --- |
+| `latch_submit` | Submit `requestKey`, `name`, absolute `executable`, literal `arguments`, and absolute `workingDirectory`; optionally set `measurement: true` for benchmarks/profiling. Returns a job ID immediately. |
+| `latch_wait` | Wait on `jobID`, returning status and bounded stdout/stderr. Defaults to 25 seconds per call; `timeoutSeconds` can be 0–600 to suit the MCP host's call timeout. |
+| `latch_cancel` | Cancel an owned job and its process group, escalating TERM to KILL after two seconds. |
+| `latch_view` | Optional diagnostics: cached scheduler state and jobs owned by this connection. No sensor sampling or planning prerequisite. |
+| `latch_forget` | Discard a completed job's retained output and retry key. |
+
+Example `latch_submit` arguments:
+
+```json
+{
+  "requestKey": "build-release-1",
+  "name": "Release build",
+  "executable": "/usr/bin/swift",
+  "arguments": ["build", "-c", "release"],
+  "workingDirectory": "/absolute/path/to/project"
+}
+```
+
+Submit once, then call `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. Reuse `requestKey` only to retry the identical submission on the same connection. A changed submission with that key is rejected. Once forgotten, a key can submit new work again. Each connection retains at most 64 jobs and 128 pending waits; forget completed jobs when their results are no longer needed.
+
+Latch's current automatic policy batches recognized `swift build` commands without explicit worker flags, adds its own `--jobs` limit (at most four and at most half the machine's cores, with a minimum of one), and reserves up to 1 GiB per worker capped at one quarter of physical memory. Tests, arbitrary commands, and commands with explicit worker settings run in isolation because Latch has no trustworthy concurrency contract for them. These use all-core reservations and one quarter of physical memory. Reservations remain advisory estimates, not OS-enforced limits. Ordinary guards require <=55 C for five seconds; measurements require <=50 C for ten seconds plus the quiet window. Admission times out after ten minutes. The selected `plan` is exposed in job results for diagnosis; agents do not supply it.
+
+The endpoint calls the scheduler directly in Swift. It does not invoke a shell or translate tool calls into human CLI commands. Workers inherit the endpoint's environment, use `/dev/null` for stdin, and execute the argument array literally. Keep the full foreground workload in the task; do not nest Latch scheduling or detach work into another process group. Output is untrusted command data. Each stream retains its first 32 KiB, with explicit truncation flags; inherited output pipes are drained for at most two seconds after the main command exits. Use task-owned files for larger artifacts.
+
+Results contain `complete`, `state`, and, after completion, `succeeded`, `exitCode`, `terminationReason`, and `phase` (`admission`, `execution`, or `command`). This distinguishes a command returning 75 from an admission failure. Tool failures set `isError`; malformed protocol calls use JSON-RPC errors. Both text content and `structuredContent` contain the result. Cancellation of a pending MCP wait only cancels that wait; `latch_cancel` cancels the job. Jobs can only be waited on or cancelled by their submitting connection. A normal disconnect/TERM cancels its active jobs. On an abrupt server kill, queued workers notice owner loss; already executing commands retain their process-scoped reservations until exit. Job IDs/results are connection-local, not recoverable across reconnects.
+
+The dependency-free implementation supports [MCP stdio](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), initialization, ping, tool discovery/calls, and cancellation for protocol versions `2025-11-25` and `2025-06-18`. It advertises only tools, with read/write annotations. HTTP, protocol task extensions, resources, and service lifecycle tools are not exposed. Incoming frames are limited to 1 MiB and pending protocol output to 4 MiB. The endpoint runs with its launching user's permissions; it is not an execution sandbox.
+
+## CLI for humans
+
+The CLI retains explicit resource declarations and guard overrides for operators. Declare peak requirements and match command worker limits when using this interface.
 
 ```sh
 # Isolate a benchmark; require CPU/GPU temperatures <=50 C for 10 seconds.
@@ -87,7 +129,7 @@ latch status
 latch sensors
 ```
 
-`view` is the preferred agent planning interface. It returns one JSON object, schema `version: 1`, without collecting fresh sensor readings:
+`view` returns a diagnostic JSON object, schema `version: 1`, without collecting fresh sensor readings. The MCP `latch_view` tool includes it under `scheduler` alongside connection-owned `jobs`:
 
 | Field | Meaning |
 | --- | --- |

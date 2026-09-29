@@ -2,7 +2,7 @@ import Foundation
 
 struct Options {
     enum Command: String {
-        case run, wait, status, schedule, tasks, sensors, service, view, `guard`, help
+        case run, wait, status, schedule, tasks, sensors, service, view, mcp, `guard`, help
     }
 
     enum ServiceAction: String { case run, install, start, stop, status, uninstall }
@@ -174,7 +174,10 @@ struct Options {
       latch tasks [--file PATH]
       latch view [--file PATH]
       latch sensors
+      latch mcp [--file PATH]
 
+    mcp       Serve agent tools over newline-delimited JSON-RPC on stdin/stdout.
+              Uses the existing service. No installation or lifecycle changes.
     schedule  Queue a named task until reservations and native sensors allow it.
               Defaults: isolated, 1 CPU core, 512 MiB. Batch tasks may overlap
               within CPU/memory budgets; GPU, I/O, and bandwidth are exclusive
