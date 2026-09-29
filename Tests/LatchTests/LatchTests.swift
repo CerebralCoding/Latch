@@ -196,7 +196,7 @@ final class Fixture {
         if let data = try? Data(contentsOf: URL(fileURLWithPath: lockPath + ".queue/state.json")),
            let state = try? JSONDecoder().decode(SchedulerState.self, from: data)
         {
-            for task in state.tasks where task.owner != nil && task.pid > 1 {
+            for task in state.tasks where state.jobs?.contains(where: { $0.id == task.id }) == true && task.pid > 1 {
                 if let lease = try? FileLatch(path: lockPath + ".queue/" + task.id + ".lease") {
                     do { try lease.acquire(shared: false, timeout: 0) }
                     catch let error as LatchError where error.exitCode == 75 { _ = kill(-task.pid, SIGKILL) }

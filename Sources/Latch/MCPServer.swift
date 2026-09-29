@@ -20,7 +20,6 @@ final class MCPServer {
     private let queue: Int32
     private let generation: Data?
     private let executableIdentity: [FileAttributeKey: Any]
-    private let owner: String
     private let store: DurableJobs
     private var input = Data()
     private var output = Data()
@@ -34,8 +33,7 @@ final class MCPServer {
     private var closingAt: Double?
     private var watchingOutput = false
 
-    init(path: String, owner: String = "agents") throws {
-        self.owner = try DurableJobs.validateOwner(owner)
+    init(path: String) throws {
         scheduler = try Scheduler(path: URL(fileURLWithPath: path).standardizedFileURL.path)
         store = try DurableJobs(scheduler: scheduler)
         executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
@@ -251,8 +249,8 @@ final class MCPServer {
         case "latch_view":
             _ = try MCPArguments(arguments, allowed: [])
             try toolResult(id: id, value: ["scheduler": MCPValue.encoded(SchedulerView(scheduler: scheduler)),
-                                           "owner": .string(owner), "ownerOutstandingLimit": .number(Double(DurableJobs.ownerOutstandingLimit)),
                                            "globalOutstandingLimit": .number(Double(DurableJobs.globalOutstandingLimit)),
+                                           "globalRetainedLimit": .number(Double(DurableJobs.globalRetainedLimit)),
                                            "jobs": .array(jobs.values.sorted { $0.id < $1.id }.map { try $0.result(includeOutput: false) })])
         case "latch_submit", "latch_execute":
             if name == "latch_execute", !task {
@@ -260,7 +258,7 @@ final class MCPServer {
             }
             let job = try submit(MCPSubmission(arguments))
             if task {
-                try store.markTask(job.id, owner: owner)
+                try store.markTask(job.id)
                 let record = tasks[job.id] ?? MCPTask(jobID: job.id, progress: progress, createdAt: job.record.createdAt)
                 tasks[job.id] = record
                 try respond(id: id, result: ["task": record.value()])
@@ -278,14 +276,14 @@ final class MCPServer {
             if name == "latch_forget", jobs[jobID] == nil {
                 try toolResult(id: id, value: ["forgotten": false]); return
             }
-            guard let job = jobs[jobID] else { throw MCPFailure.invalid("Unknown jobID for this owner") }
+            guard let job = jobs[jobID] else { throw MCPFailure.invalid("Unknown jobID") }
             if name == "latch_cancel" {
                 try job.cancel(now: ProcessInfo.processInfo.systemUptime)
                 try toolResult(id: id, value: job.result(includeOutput: false))
             } else if name == "latch_forget" {
                 guard job.complete else { throw MCPFailure.invalid("Only completed jobs can be forgotten") }
                 guard !waiters.contains(where: { $0.jobID == jobID }) else { throw MCPFailure.invalid("Job still has pending requests") }
-                try store.forget(jobID, owner: owner)
+                try store.forget(jobID)
                 jobs.removeValue(forKey: jobID)
                 tasks.removeValue(forKey: jobID)
                 try toolResult(id: id, value: ["forgotten": true])
@@ -321,7 +319,7 @@ final class MCPServer {
         guard try SchedulerService.status(in: scheduler.directory).serviceRevision == BuildIdentity.serviceRevision else {
             throw LatchError("durable jobs require the updated scheduler service; ask the operator to update it", exitCode: 69)
         }
-        let record = try store.submit(submission, owner: owner)
+        let record = try store.submit(submission)
         let job = MCPJob(record: record, store: store)
         jobs[job.id] = job
         // The ticket is committed before launch; the service recovers a missed launch after a connection crash.
@@ -330,7 +328,7 @@ final class MCPServer {
     }
 
     private func syncJobs() throws {
-        let records = try store.records(owner: owner)
+        let records = try store.records()
         for record in records {
             let job = jobs[record.id] ?? MCPJob(record: record, store: store)
             job.record = record
@@ -345,7 +343,7 @@ final class MCPServer {
             let forgotten = waiters.filter { $0.jobID == id }
             waiters.removeAll { $0.jobID == id }
             for waiter in forgotten {
-                try failure(id: waiter.requestID, code: -32602, message: "Job was forgotten by another connection for this owner")
+                try failure(id: waiter.requestID, code: -32602, message: "Job was forgotten by another connection")
             }
             jobs.removeValue(forKey: id)
             tasks.removeValue(forKey: id)
@@ -366,7 +364,7 @@ final class MCPServer {
         }
         let input = try MCPArguments(arguments, allowed: fields)
         let jobID = try input.text("jobID", maximum: 128)
-        guard let job = jobs[jobID] else { throw MCPFailure.invalid("Unknown jobID for this owner") }
+        guard let job = jobs[jobID] else { throw MCPFailure.invalid("Unknown jobID") }
         if name == "latch_control" {
             let controlID = try input.text("controlID", maximum: 128)
             guard let control = try store.controls(jobID).first(where: { $0.id == controlID }) else { throw MCPFailure.invalid("Unknown controlID") }
@@ -390,7 +388,7 @@ final class MCPServer {
             let timeout = try input.number("timeoutSeconds", default: 25, range: 0 ... 600)
             waiters.append(Waiter(requestID: id, jobID: jobID, deadline: ProcessInfo.processInfo.systemUptime + timeout, kind: .output, stdoutOffset: stdout, stderrOffset: stderr))
         } else {
-            let control = try store.enqueueControl(MCPControl(operation: name, arguments: input), id: jobID, owner: owner)
+            let control = try store.enqueueControl(MCPControl(operation: name, arguments: input), id: jobID)
             try toolResult(id: id, value: control.value(jobID: jobID), isError: control.complete && control.state != "delivered")
         }
     }
@@ -463,7 +461,7 @@ final class MCPServer {
             return
         }
         let taskID = try input.text("taskId", maximum: 128)
-        guard let task = tasks[taskID], let job = jobs[taskID] else { throw MCPFailure.invalid("Unknown taskId for this owner") }
+        guard let task = tasks[taskID], let job = jobs[taskID] else { throw MCPFailure.invalid("Unknown taskId") }
         if method == "tasks/get" {
             try respond(id: id, result: task.value())
         } else if method == "tasks/cancel" {

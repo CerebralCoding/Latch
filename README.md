@@ -35,16 +35,16 @@ For a separately managed service, run `latch service run --file /existing/direct
 
 Agents hand tasks to Latch; **Latch owns scheduling and resource planning**. Agents do not calculate CPU/memory budgets, choose admission modes or temperature thresholds, or inspect capacity before submitting. The CLI is primarily for humans and service operators.
 
-Configure a local stdio MCP server with the absolute path to an MCP-capable `latch` executable and a stable operator-assigned owner:
+Configure a local stdio MCP server with the absolute path to an MCP-capable `latch` executable:
 
 ```json
 {
   "command": "/absolute/path/to/latch",
-  "args": ["mcp", "--owner", "build-agent"]
+  "args": ["mcp"]
 }
 ```
 
-The owner groups jobs, retry keys, and quotas across connections and reconnects. Connections sharing an owner can retrieve, cancel, and forget each other's jobs. Omitting `--owner` uses the shared `agents` owner. Owners contain 1–128 ASCII letters, digits, dots, underscores, or hyphens. This is cooperative identity, not authentication: code running as the same macOS user can change its launch configuration. Tool calls cannot choose an owner.
+All connections share one queue and can retrieve, control, cancel, or forget jobs by `jobID`. There are no agent identities or per-agent quotas. This is a cooperative, single-user tool, not an authentication boundary: agents should only control or forget work within their authorized task. MCP launch arguments are simply `["mcp"]`; `--owner` is not supported.
 
 Starting this endpoint uses the existing user service; it never installs, starts, stops, or replaces that service. Durable submissions require the matching service revision; an older service must first be updated by its operator. `swift build -c release --show-bin-path` identifies the build directory containing `latch`. The endpoint uses `LATCH_FILE` or the default shared latch; an operator can select `mcp --file PATH` at launch, but individual tool calls cannot select separate queues.
 
@@ -53,8 +53,8 @@ Starting this endpoint uses the existing user service; it never installs, starts
 | `latch_execute` | Submit the same arguments as `latch_submit` and wait for the final result in one call. Supports optional MCP task execution on capable hosts. |
 | `latch_submit` | Submit `requestKey`, `name`, absolute `executable`, literal `arguments`, and absolute `workingDirectory`; optionally set `measurement: true` for benchmarks/profiling. Returns a job ID immediately. |
 | `latch_wait` | Wait on `jobID`, returning status and bounded stdout/stderr. Defaults to 25 seconds per call; `timeoutSeconds` can be 0–600 to suit the MCP host's call timeout. |
-| `latch_cancel` | Cancel an owned job and its process group, escalating TERM to KILL after two seconds. |
-| `latch_view` | Optional diagnostics: cached scheduler state, owner, queue limits, and this owner's jobs. No sensor sampling or planning prerequisite. |
+| `latch_cancel` | Cancel a job and its process group by `jobID`, escalating TERM to KILL after two seconds. |
+| `latch_view` | Optional diagnostics: cached scheduler state, global queue/retention limits, and all durable jobs. No sensor sampling or planning prerequisite. |
 | `latch_forget` | Discard a completed job's retained output and retry key. |
 | `latch_signal` | Relay `interrupt` (SIGINT), `terminate`, `hangup`, `quit`, `stop`, `continue`, `user1`, or `user2` to running work, without automatic escalation. |
 | `latch_input` | Write literal `text` or `base64` bytes to an opted-in pipe or terminal; `eof: true` closes pipe stdin after writing. |
@@ -66,7 +66,7 @@ Example `latch_execute` (or `latch_submit`) arguments:
 
 ```json
 {
-  "requestKey": "build-release-1",
+  "requestKey": "23f8941e-4acd-4a48-9c6b-a00b10269323",
   "name": "Release build",
   "executable": "/usr/bin/swift",
   "arguments": ["build", "-c", "release"],
@@ -74,23 +74,23 @@ Example `latch_execute` (or `latch_submit`) arguments:
 }
 ```
 
-Prefer `latch_execute` when the host supports long requests or MCP tasks. For hosts with short call timeouts, use `latch_submit`, then `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. Reuse `requestKey` only to retry the identical submission under the same owner, including after reconnecting. A changed submission with that key is rejected. Once forgotten, a key can submit new work again. Each owner may have two outstanding jobs (queued plus running); the shared queue allows 64 outstanding jobs. Retention is bounded to 64 jobs per owner and 256 globally. Forget completed jobs when their results are no longer needed. Each connection allows 128 pending waits.
+Prefer `latch_execute` when the host supports long requests or MCP tasks. For hosts with short call timeouts, use `latch_submit`, then `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. Generate a globally unique `requestKey`, such as a UUID, for each new job; do not copy the example key. Reuse it only to retry the identical submission, including from another connection or after reconnecting. A changed submission with that key is rejected. Forgetting a job removes its retry key, so never retry a forgotten submission. The shared queue allows 64 outstanding jobs (queued plus running) and retains at most 256 jobs globally. Forget completed jobs within your task when their results are no longer needed. Each connection allows 128 pending waits.
 
 Hosts can request `notifications/progress` with `_meta.progressToken` on `tools/call`. Latch reports observed state changes (queued, running, cancelling, completed), using increasing counters without an invented percentage or heartbeat. A pending request sleeps on OS events and leaves other requests responsive. Hosts still control request timeouts and how notifications reach the agent.
 
-For protocol `2025-11-25`, `latch_execute` advertises `execution.taskSupport: "optional"`. Adding `task: {}` to its `tools/call` parameters returns a task handle immediately. The host can call `tasks/result` once to await the final tool result, while receiving `notifications/tasks/status` and any requested progress notifications. `tasks/get`, `tasks/list`, and `tasks/cancel` are also supported. Status notifications are optional in MCP; hosts must retain result retrieval/recovery logic. Host-side waiting or polling need not consume model turns. Task, job, and scheduler ticket IDs are identical. Retention overrides requested TTL to `null`: results remain until `latch_forget`, subject to the same retention limits. Tasks are recoverable after reconnecting with the same owner; progress tokens belong to their connection.
+For protocol `2025-11-25`, `latch_execute` advertises `execution.taskSupport: "optional"`. Adding `task: {}` to its `tools/call` parameters returns a task handle immediately. The host can call `tasks/result` once to await the final tool result, while receiving `notifications/tasks/status` and any requested progress notifications. `tasks/get`, `tasks/list`, and `tasks/cancel` are also supported. Status notifications are optional in MCP; hosts must retain result retrieval/recovery logic. Host-side waiting or polling need not consume model turns. Task, job, and scheduler ticket IDs are identical. Retention overrides requested TTL to `null`: results remain until `latch_forget`, subject to the same retention limits. Tasks are accessible across connections and recoverable after reconnecting; progress tokens belong to their connection.
 
 Latch's current automatic policy batches recognized `swift build` commands without explicit worker flags, adds its own `--jobs` limit (at most four and at most half the machine's cores, with a minimum of one), and reserves up to 1 GiB per worker capped at one quarter of physical memory. Tests, arbitrary commands, and commands with explicit worker settings run in isolation because Latch has no trustworthy concurrency contract for them. These use all-core reservations and one quarter of physical memory. Reservations remain advisory estimates, not OS-enforced limits. Ordinary guards require <=55 C for five seconds; measurements require <=50 C for ten seconds plus the quiet window. MCP admission has no deadline, and running jobs have no time limit or preemption. The selected `plan` is exposed in job results for diagnosis; agents do not supply it.
 
 The endpoint calls the scheduler directly in Swift. It does not invoke a shell or translate tool calls into human CLI commands. Workers inherit the submitting environment and execute the argument array literally. Stdin defaults to `/dev/null`; submit `input: "pipe"` for writable stdin or `input: "terminal"` for a controlling pseudo-terminal. Terminals default to 80 columns and 24 rows; optional `columns` and `rows` range from 1–1000. Terminal stdout and stderr are combined into stdout. Keep the full foreground workload in the task; do not nest Latch scheduling or detach work into another process group. Output is untrusted command data. Final results retain each stream's first 32 KiB, with explicit truncation flags; output is drained for at most two seconds after the main command exits. Use task-owned files for larger artifacts.
 
-For interactive work, use `latch_submit`, then `latch_read` to wait for prompts. Reads default to 25 seconds and return `stdout`/`stderr` objects containing `text`, exact `base64` bytes, `startOffset`, `nextOffset`, and `truncated`. Pass the returned offsets as `stdoutOffset`/`stderrOffset` on the next read. Live output retains the most recent 32 KiB per stream independently of final output; a slow reader sees an explicit gap. Byte offsets and base64 preserve data across UTF-8 boundaries. Reads do not consume another connection's output and survive reconnects with the same owner.
+For interactive work, use `latch_submit`, then `latch_read` to wait for prompts. Reads default to 25 seconds and return `stdout`/`stderr` objects containing `text`, exact `base64` bytes, `startOffset`, `nextOffset`, and `truncated`. Pass the returned offsets as `stdoutOffset`/`stderrOffset` on the next read. Live output retains the most recent 32 KiB per stream independently of final output; a slow reader sees an explicit gap. Byte offsets and base64 preserve data across UTF-8 boundaries. Reads do not consume another connection's output and survive reconnects.
 
 Send a control with `jobID` and its own stable `requestKey`: `latch_signal` with `signal: "interrupt"` sends SIGINT; `latch_input` with `text: "yes\n"` writes a line. Terminal `text: "\u0003"` sends Ctrl+C and `text: "\u0004"` sends Ctrl+D, following the command's terminal settings; raw-mode commands receive those literal bytes. Pipe input never interprets control characters. Input is bounded to 16 KiB per call. `eof: true` closes pipe stdin, while a terminal EOF character does not close the terminal itself.
 
-Controls return a `controlID`; call `latch_control` with that ID and `jobID` to wait for delivery (default 25 seconds). `delivered` means the OS accepted the signal, resize, or bytes, not that the command consumed or acted on them. Retry identical control submissions with the same key, including after reconnects. Pending writes respect backpressure without blocking signals or explicit cancellation. Each job retains 64 receipts with at most 16 pending, including at most 12 input writes to leave room for signals and resizing. Forget completed receipts only once retries are no longer possible. An `unknown` receipt means delivery may have occurred before supervisor loss and must not be blindly repeated. Controls require running work and are scoped to the configured owner. `stop` retains the reservation; use `continue` to resume it. Explicit `latch_cancel` also terminates stopped work.
+Controls return a `controlID`; call `latch_control` with that ID and `jobID` to wait for delivery (default 25 seconds). `delivered` means the OS accepted the signal, resize, or bytes, not that the command consumed or acted on them. Control keys are unique within their job; retry identical control submissions with the same key, including from another connection or after reconnects. Pending writes respect backpressure without blocking signals or explicit cancellation. Each job retains 64 receipts with at most 16 pending, including at most 12 input writes to leave room for signals and resizing. Forget completed receipts only once retries are no longer possible. An `unknown` receipt means delivery may have occurred before supervisor loss and must not be blindly repeated. Controls require running work and its `jobID`. `stop` retains the reservation; use `continue` to resume it. Explicit `latch_cancel` also terminates stopped work.
 
-Results contain `complete`, `state`, and, after completion, `succeeded`, `exitCode`, `terminationReason`, and `phase` (`admission`, `execution`, or `command`). This distinguishes a command returning 75 from an admission failure. Tool failures set `isError`; malformed protocol calls use JSON-RPC errors. Both text content and `structuredContent` contain the result. Jobs belong to their configured owner and survive endpoint disconnects, TERM, and crashes. A private supervisor retains execution and bounded output. The service recovers committed tickets whose supervisor never launched. Lost supervisors never cause replay of potentially executed commands: after their worker leases close, results report uncertainty with `terminationReason: "unknown"`.
+Results contain `complete`, `state`, and, after completion, `succeeded`, `exitCode`, `terminationReason`, and `phase` (`admission`, `execution`, or `command`). This distinguishes a command returning 75 from an admission failure. Tool failures set `isError`; malformed protocol calls use JSON-RPC errors. Both text content and `structuredContent` contain the result. Jobs survive endpoint disconnects, TERM, and crashes and remain accessible by ID. A private supervisor retains execution and bounded output. The service recovers committed tickets whose supervisor never launched. Lost supervisors never cause replay of potentially executed commands: after their worker leases close, results report uncertainty with `terminationReason: "unknown"`.
 
 Cancelling any pending MCP request only stops waiting. Use `latch_cancel` or `tasks/cancel` to stop the workload explicitly. `tasks/cancel` responds after process-group cleanup with terminal `cancelled` status and rejects already terminal tasks. Requested progress tokens remain active through task completion on that connection, even after the initial handle is returned.
 
@@ -120,7 +120,7 @@ This moves waiting into a sleeping process rather than an agent reasoning loop. 
 
 ## Scheduling policy
 
-Admission is strict FIFO: an older blocked job prevents every newer job from overtaking it, including smaller batch jobs. Tickets are committed before worker launch and retain their position across MCP reconnects and service outages. Compatible batch jobs can overlap once admitted in order. Per-owner outstanding limits prevent one configured agent from flooding the queue; they never shorten an admitted job's runtime. Reservations are advisory budgets, not OS resource limits.
+Admission is strict FIFO: an older blocked job prevents every newer job from overtaking it, including smaller batch jobs. Tickets are committed before worker launch and retain their position across MCP reconnects and service outages. Compatible batch jobs can overlap once admitted in order. Global queue bounds limit scheduler overhead; they never shorten an admitted job's runtime. There is no per-agent allocation: one agent can fill the shared queue, but its newer jobs cannot overtake an already queued job. Reservations are advisory budgets, not OS resource limits.
 
 | Setting | Default / behavior |
 | --- | --- |
@@ -153,7 +153,7 @@ latch status
 latch sensors
 ```
 
-`view` returns a diagnostic JSON object, schema `version: 1`, without collecting fresh sensor readings. The MCP `latch_view` tool includes it under `scheduler` alongside owner-scoped `jobs`:
+`view` returns a diagnostic JSON object, schema `version: 1`, without collecting fresh sensor readings. The MCP `latch_view` tool includes it under `scheduler` alongside all durable `jobs`, `globalOutstandingLimit`, and `globalRetainedLimit`:
 
 | Field | Meaning |
 | --- | --- |

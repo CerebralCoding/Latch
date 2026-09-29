@@ -35,7 +35,7 @@ final class Scheduler {
         }
     }
 
-    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false, ownerPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil) throws -> TaskReservation {
+    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false, supervisorPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil) throws -> TaskReservation {
         try requirements.validate()
         let updatePermit = inheritedUpdatePermit ? nil : try UpdateDrain.admit(in: directory)
         if useService {
@@ -56,7 +56,8 @@ final class Scheduler {
         }
         try transaction { state in
             if ticketID != nil {
-                guard let index = state.tasks.firstIndex(where: { $0.id == id && $0.state == .queued && $0.owner != nil }) else { throw LatchError("durable admission ticket is missing", exitCode: 74) }
+                guard state.jobs?.contains(where: { $0.id == id && !$0.complete }) == true,
+                      let index = state.tasks.firstIndex(where: { $0.id == id && $0.state == .queued }) else { throw LatchError("durable admission ticket is missing", exitCode: 74) }
                 state.tasks[index].pid = getpid()
             } else {
                 guard state.tasks.count < DurableJobs.globalOutstandingLimit else { throw LatchError("shared queue limit reached", exitCode: 75) }
@@ -64,8 +65,8 @@ final class Scheduler {
             }
         }
         while true {
-            if let ownerPID, getppid() != ownerPID {
-                throw LatchError("MCP connection owner exited", exitCode: 69)
+            if let supervisorPID, getppid() != supervisorPID {
+                throw LatchError("MCP supervisor exited", exitCode: 69)
             }
             let servicePID = useService ? try SchedulerService.requireRunning(in: directory) : nil
             var view = try snapshot()
@@ -115,7 +116,7 @@ final class Scheduler {
             }
             let isolatedRunning = view.tasks.contains { $0.state == .running && $0.requirements.mode == .isolated }
             if useService {
-                watcher.wait(seconds: remaining ?? 3600, pids: view.tasks.map(\.pid) + [servicePID!] + (ownerPID.map { [$0] } ?? []))
+                watcher.wait(seconds: remaining ?? 3600, pids: view.tasks.map(\.pid) + [servicePID!] + (supervisorPID.map { [$0] } ?? []))
             } else if isolatedRunning || blockedByLatch || samplingBlocked {
                 // Park behind an exclusive workload without sampling or periodic wakeups.
                 let checkpoint = try FileLatch(path: path)
@@ -184,7 +185,7 @@ final class Scheduler {
             var live: [ScheduledTask] = []
             for task in state.tasks {
                 guard UUID(uuidString: task.id) != nil else { throw LatchError("invalid task ID in scheduler state", exitCode: 74) }
-                if task.owner != nil {
+                if state.jobs?.contains(where: { $0.id == task.id && !$0.complete }) == true {
                     live.append(task)
                     continue
                 }

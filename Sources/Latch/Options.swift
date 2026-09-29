@@ -17,7 +17,6 @@ struct Options {
     var standalone = false
     var serviceAction: ServiceAction?
     var restartService = false
-    var owner = "agents"
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
@@ -61,10 +60,6 @@ struct Options {
                     throw LatchError("--shared may be specified once for run")
                 }
                 shared = true
-            case "--owner":
-                guard command == .mcp, index < arguments.count else { throw LatchError("--owner requires an operator-assigned identity for mcp") }
-                owner = try DurableJobs.validateOwner(arguments[index])
-                index += 1
             case "--timeout":
                 guard [.run, .wait, .schedule, .guard, .update, .rollback].contains(command), timeout == nil, index < arguments.count,
                       let value = Double(arguments[index]), value.isFinite,
@@ -183,7 +178,7 @@ struct Options {
       latch tasks [--file PATH]
       latch view [--file PATH]
       latch sensors
-      latch mcp [--file PATH] [--owner ID]
+      latch mcp [--file PATH]
       latch update|rollback [--timeout SECONDS] [--restart-service]
 
     mcp       Serve agent tools over newline-delimited JSON-RPC on stdin/stdout.

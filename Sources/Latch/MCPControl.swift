@@ -76,9 +76,9 @@ extension DurableJobs {
         try JSONEncoder().encode(controls).write(to: file(id, "controls.json"), options: .atomic)
     }
 
-    func enqueueControl(_ control: MCPControl, id: String, owner: String) throws -> MCPControl {
+    func enqueueControl(_ control: MCPControl, id: String) throws -> MCPControl {
         try scheduler.transaction { state in
-            guard let job = state.jobs?.first(where: { $0.id == id && $0.owner == owner }) else { throw MCPFailure.invalid("Unknown jobID for this owner") }
+            guard let job = state.jobs?.first(where: { $0.id == id }) else { throw MCPFailure.invalid("Unknown jobID") }
             var controls = try controls(id)
             if let previous = controls.first(where: { $0.requestKey == control.requestKey }) {
                 guard previous.matches(control) else { throw MCPFailure.invalid("control requestKey belongs to different input") }
@@ -177,14 +177,14 @@ struct MCPLiveOutput: Codable, Equatable {
 
 extension MCPTools {
     static let interactiveTools: [MCPValue] = [
-        tool("latch_signal", description: "Relay a signal to a running owned job. interrupt sends SIGINT (Ctrl+C semantics). No automatic escalation or job deadline; stop keeps its reservation until continue or explicit cancellation. Returns a delivery receipt; await it with latch_control. Retry identical calls with the same requestKey.", properties: [
+        tool("latch_signal", description: "Relay a signal to a running job by jobID. interrupt sends SIGINT (Ctrl+C semantics). No automatic escalation or job deadline; stop keeps its reservation until continue or explicit cancellation. Returns a delivery receipt; await it with latch_control. Retry identical calls with the same requestKey.", properties: [
             "jobID": ["type": "string"], "requestKey": ["type": "string"],
             "signal": ["type": "string", "enum": .array(MCPControl.signals.keys.sorted().map(MCPValue.string))],
         ], required: ["jobID", "requestKey", "signal"], readOnly: false),
-        tool("latch_input", description: "Write literal UTF-8 text or base64 bytes (up to 16 KiB) to an owned pipe/terminal job. Terminal control characters follow its line discipline; Ctrl+C is \\u0003, Ctrl+D is \\u0004. eof closes pipe stdin after these bytes. No shell parsing. Returns a receipt; await latch_control. Delivery means bytes written, not consumed. Retry only with the same requestKey.", properties: [
+        tool("latch_input", description: "Write literal UTF-8 text or base64 bytes (up to 16 KiB) to a pipe/terminal job by jobID. Terminal control characters follow its line discipline; Ctrl+C is \\u0003, Ctrl+D is \\u0004. eof closes pipe stdin after these bytes. No shell parsing. Returns a receipt; await latch_control. Delivery means bytes written, not consumed. Retry only with the same requestKey.", properties: [
             "jobID": ["type": "string"], "requestKey": ["type": "string"], "text": ["type": "string"], "base64": ["type": "string"], "eof": ["type": "boolean", "default": false],
         ], required: ["jobID", "requestKey"], readOnly: false, openWorld: true),
-        tool("latch_resize", description: "Resize an owned pseudo-terminal; its foreground process group receives SIGWINCH. Await the delivery receipt with latch_control.", properties: [
+        tool("latch_resize", description: "Resize a pseudo-terminal by jobID; its foreground process group receives SIGWINCH. Await the delivery receipt with latch_control.", properties: [
             "jobID": ["type": "string"], "requestKey": ["type": "string"], "columns": ["type": "integer", "minimum": 1, "maximum": 1000], "rows": ["type": "integer", "minimum": 1, "maximum": 1000],
         ], required: ["jobID", "requestKey", "columns", "rows"], readOnly: false),
         tool("latch_control", description: "Wait for a control receipt, or forget a completed receipt and its retry key with forget=true. Defaults to a 25-second event wait. Pending means wait again with this controlID. unknown means delivery may have happened: never blindly resend. Each job retains 64 receipts, at most 16 pending including at most 12 input writes. Forget only when retries are no longer possible.", properties: [

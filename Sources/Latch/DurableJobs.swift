@@ -3,7 +3,6 @@ import Foundation
 
 struct DurableJobRecord: Codable, Equatable {
     var id: String
-    var owner: String
     var submission: MCPSubmission
     var environment = ProcessInfo.processInfo.environment
     var createdAt = Date()
@@ -15,9 +14,7 @@ struct DurableJobRecord: Codable, Equatable {
 }
 
 final class DurableJobs {
-    static let ownerOutstandingLimit = 2
     static let globalOutstandingLimit = 64
-    static let ownerRetainedLimit = 64
     static let globalRetainedLimit = 256
     let scheduler: Scheduler
     let directory: URL
@@ -35,56 +32,42 @@ final class DurableJobs {
         }
     }
 
-    static func validateOwner(_ owner: String) throws -> String {
-        guard !owner.isEmpty, owner.utf8.count <= 128,
-              owner.utf8.allSatisfy({ (65 ... 90).contains($0) || (97 ... 122).contains($0) || (48 ... 57).contains($0) || [45, 46, 95].contains($0) })
-        else {
-            throw LatchError("owner must contain 1–128 ASCII letters, digits, dots, underscores, or hyphens")
-        }
-        return owner
-    }
-
     func file(_ id: String, _ suffix: String) -> URL {
         directory.appendingPathComponent(id + "." + suffix)
     }
 
-    func records(owner: String? = nil) throws -> [DurableJobRecord] {
-        try (scheduler.snapshot().jobs ?? []).filter { owner == nil || $0.owner == owner }
+    func records() throws -> [DurableJobRecord] {
+        try scheduler.snapshot().jobs ?? []
     }
 
-    func submit(_ submission: MCPSubmission, owner: String) throws -> DurableJobRecord {
+    func submit(_ submission: MCPSubmission) throws -> DurableJobRecord {
         try scheduler.transaction { state in
             var records = state.jobs ?? []
-            if let existing = records.first(where: { $0.owner == owner && $0.submission.requestKey == submission.requestKey }) {
-                guard existing.submission == submission else { throw MCPFailure.invalid("requestKey already belongs to a different submission for this owner") }
+            if let existing = records.first(where: { $0.submission.requestKey == submission.requestKey }) {
+                guard existing.submission == submission else { throw MCPFailure.invalid("requestKey already belongs to a different submission") }
                 return existing
-            }
-            guard records.filter({ $0.owner == owner && !$0.complete }).count < Self.ownerOutstandingLimit else {
-                throw LatchError("owner \(owner) already has \(Self.ownerOutstandingLimit) outstanding jobs; wait for completion or explicitly cancel one", exitCode: 75)
             }
             guard state.tasks.count < Self.globalOutstandingLimit,
                   records.filter({ !$0.complete }).count < Self.globalOutstandingLimit
             else {
                 throw LatchError("shared queue has reached its \(Self.globalOutstandingLimit)-job limit", exitCode: 75)
             }
-            guard records.count < Self.globalRetainedLimit,
-                  records.filter({ $0.owner == owner }).count < Self.ownerRetainedLimit
-            else {
+            guard records.count < Self.globalRetainedLimit else {
                 throw LatchError("retained result limit reached; forget completed jobs", exitCode: 75)
             }
-            let record = DurableJobRecord(id: UUID().uuidString, owner: owner, submission: submission)
+            let record = DurableJobRecord(id: UUID().uuidString, submission: submission)
             let plan = TaskPlanner.plan(executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
             records.append(record)
             state.jobs = records
             state.tasks.append(ScheduledTask(id: record.id, name: submission.name, pid: 0, arguments: [submission.executable] + plan.arguments,
-                                             requirements: plan.requirements, owner: owner))
+                                             requirements: plan.requirements))
             return record
         }
     }
 
-    func markTask(_ id: String, owner: String) throws {
+    func markTask(_ id: String) throws {
         try scheduler.transaction { state in
-            guard let index = state.jobs?.firstIndex(where: { $0.id == id && $0.owner == owner }) else { throw MCPFailure.invalid("Unknown jobID for this owner") }
+            guard let index = state.jobs?.firstIndex(where: { $0.id == id }) else { throw MCPFailure.invalid("Unknown jobID") }
             state.jobs?[index].protocolTask = true
         }
     }
@@ -117,9 +100,9 @@ final class DurableJobs {
         try Data().write(to: file(id, "cancel"), options: .atomic)
     }
 
-    func forget(_ id: String, owner: String) throws {
+    func forget(_ id: String) throws {
         try scheduler.transaction { state in
-            guard let record = state.jobs?.first(where: { $0.id == id && $0.owner == owner }) else { return }
+            guard let record = state.jobs?.first(where: { $0.id == id }) else { return }
             guard record.complete else { throw MCPFailure.invalid("Only completed jobs can be forgotten") }
             state.jobs?.removeAll { $0.id == id }
             for suffix in ["result.json", "cancel", "status.json", "request.json", "supervisor.lock", "controls.json", "output.json"] {
@@ -221,7 +204,7 @@ final class MCPJob {
         submission = record.submission
         self.store = store
         value = ["jobID": .string(record.id), "requestKey": .string(record.submission.requestKey), "name": .string(record.submission.name),
-                 "owner": .string(record.owner), "state": "queued", "complete": false]
+                 "state": "queued", "complete": false]
     }
 
     func update(now _: Double) throws {
@@ -240,7 +223,6 @@ final class MCPJob {
 
     func result(includeOutput: Bool) throws -> MCPValue {
         var result = value.object ?? [:]
-        result["owner"] = .string(record.owner)
         if !includeOutput {
             for key in ["stdout", "stderr", "stdoutTruncated", "stderrTruncated"] {
                 result.removeValue(forKey: key)

@@ -60,7 +60,6 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
     var startedAt: Date?
     var waitingFor: String?
     var coolSince: Double?
-    var owner: String?
 }
 
 struct SchedulerState: Codable, Equatable {

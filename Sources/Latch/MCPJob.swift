@@ -44,10 +44,10 @@ enum MCPWorker {
             status.plan = plan
             try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
             let reservation = try scheduler.reserve(name: submission.name, arguments: [submission.executable] + plan.arguments,
-                                                    requirements: plan.requirements, timeout: nil, useService: true, ownerPID: decoded.parentPID, inheritedUpdatePermit: true, ticketID: decoded.ticketID)
+                                                    requirements: plan.requirements, timeout: nil, useService: true, supervisorPID: decoded.parentPID, inheritedUpdatePermit: true, ticketID: decoded.ticketID)
             defer { try? scheduler.withdraw(reservation.id) }
             try withExtendedLifetime(reservation) {
-                guard getppid() == decoded.parentPID else { throw LatchError("MCP connection owner exited", exitCode: 69) }
+                guard getppid() == decoded.parentPID else { throw LatchError("MCP supervisor exited", exitCode: 69) }
                 status.admitted = true
                 status.taskID = reservation.id
                 try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)

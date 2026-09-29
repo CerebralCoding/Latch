@@ -43,7 +43,7 @@ struct Latch {
 
             let path = try options.resolvedPath()
             if options.command == .mcp {
-                try MCPServer(path: path, owner: options.owner).run()
+                try MCPServer(path: path).run()
                 return
             }
             if options.command == .service {
