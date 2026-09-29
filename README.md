@@ -12,18 +12,18 @@ swift test -c release
 swift run -c release latch service install
 ```
 
-Installation copies the executable to `~/Library/Application Support/Latch/bin/latch`, installs `~/Library/LaunchAgents/dev.latch.scheduler.plist`, and starts a login LaunchAgent for the current user. It starts again at login and launchd restarts it after an unexpected exit. Re-run `service install` from a newly built binary to update it.
+Installation copies the executable to `~/Library/Application Support/Latch/bin/latch`, links it as `~/.local/bin/latch`, installs `~/Library/LaunchAgents/dev.latch.scheduler.plist`, and starts a login LaunchAgent for the current user. It starts again at login and launchd restarts it after an unexpected exit. Re-run `service install` from a newly built binary to update it. Installation refuses to replace an unrelated command at the link path.
 
-Use the installed executable directly, or add its directory to your agent's `PATH`. Subsequent examples assume `latch` resolves to that executable. Avoid `swift run` for performance-sensitive work: building the wrapper itself can disturb the machine.
+Ensure `~/.local/bin` is on your shell and agent `PATH` (for zsh, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` if needed). The installer reports when this directory is missing from its current `PATH`. Subsequent examples use `latch` directly. Avoid `swift run` for performance-sensitive work: building the wrapper itself can disturb the machine.
 
 ```sh
-"$HOME/Library/Application Support/Latch/bin/latch" service status
+latch service status
 latch service stop
 latch service start
 latch service uninstall
 ```
 
-`stop` unloads the login service until `start` or the next login. `uninstall` also removes its plist and installed executable; queue state and logs remain. Logs are in `~/Library/Application Support/Latch/logs/`. `service status` prints JSON and returns 69 when stopped. Lifecycle commands manage the single installed login service.
+`stop` unloads the login service until `start` or the next login. `uninstall` also removes its plist, installed executable, and command link if it still points to Latch; queue state and logs remain. Logs are in `~/Library/Application Support/Latch/logs/`. `service status` prints JSON and returns 69 when stopped. Lifecycle commands manage the single installed login service.
 
 For a separately managed service, run `latch service run --file /existing/directory/work.lock` in the foreground. Each latch path permits one service. Stop a foreground service using its process manager or a termination signal. `schedule --standalone` and `guard --standalone` explicitly allow client-side sampling without a service.
 
