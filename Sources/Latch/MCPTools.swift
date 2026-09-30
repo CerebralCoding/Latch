@@ -1,8 +1,16 @@
 import Foundation
 
 enum MCPTools {
+    static let workloadGuidance = """
+        Submit work with a defined completion condition: builds, single-run tests, finite benchmarks/profiling, or inference/data processing that exits when done. Long but finite jobs are supported without a runtime limit.
+        Do not submit persistent services or sessions: npm run dev, vite, next dev, preview/HTTP servers, watch modes, REPLs, daemons, or persistent model servers. Select a build or single-run mode instead. A persistent job blocks later FIFO work and service updates indefinitely.
+        Do not shell-wrap, detach, or background a persistent service to evade this rule. Manage necessary services separately with their normal lifecycle tools; stop or quiesce services within your authorized task if they interfere with measurements. Never bypass coordination for finite heavy work.
+        Cancel abandoned work or an accidentally submitted persistent job with latch_cancel, then latch_wait to confirm completion. Disconnecting or cancelling a wait does not stop the job.
+        """
+
     static let instructions = """
         Prefer latch_execute for authorized foreground tasks: one call waits until completion, with optional MCP task execution for capable hosts.
+        \(workloadGuidance)
         Latch owns resource budgets, worker limits, isolation, temperature guards, and scheduling.
         Agents must not calculate budgets or inspect the queue to plan admission. Optionally mark performance measurements with measurement=true.
         All MCP commands run exclusively in FIFO order. Measurements additionally require cooling and quiet-window admission.
@@ -33,7 +41,8 @@ enum MCPTools {
         tool(
             "latch_submit",
             description:
-                "Hand an authorized foreground task to Latch. Latch chooses resources and admission timing. Returns a durable jobID immediately. Requires the matching service; never falls back to standalone. A globally unique requestKey deduplicates identical submissions across all connections. The shared queue permits 64 outstanding jobs with no per-agent quota. Jobs have no admission or execution deadline.",
+                "Hand an authorized foreground task to Latch. Latch chooses resources and admission timing. Returns a durable jobID immediately. Requires the matching service; never falls back to standalone. A globally unique requestKey deduplicates identical submissions across all connections. The shared queue permits 64 outstanding jobs with no per-agent quota. Jobs have no admission or execution deadline.\n"
+                + workloadGuidance,
             properties: [
                 "requestKey": [
                     "type": "string", "minLength": 1, "maxLength": 128,
@@ -92,7 +101,9 @@ enum MCPTools {
         var execute = list[1].object!
         execute["name"] = "latch_execute"
         execute["description"] =
-            "Execute an authorized foreground task through Latch and return its final status and bounded output. No agent resource planning. Blocks until completion; hosts supporting MCP tasks may await tasks/result. Request cancellation only stops waiting; explicit job cancellation stops work. Use a globally unique requestKey for each job; identical retries are deduplicated across all connections."
+            .string(
+                "Execute an authorized foreground task through Latch and return its final status and bounded output. No agent resource planning. Blocks until completion; hosts supporting MCP tasks may await tasks/result. Request cancellation only stops waiting; explicit job cancellation stops work. Use a globally unique requestKey for each job; identical retries are deduplicated across all connections.\n"
+                    + workloadGuidance)
         if tasks {
             execute["execution"] = ["taskSupport": "optional"]
         }

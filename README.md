@@ -37,6 +37,17 @@ For a separately managed service, run `latch service run --file /existing/direct
 
 Agents hand tasks to Latch; **Latch owns scheduling and resource planning**. Agents do not calculate CPU/memory budgets, choose admission modes or temperature thresholds, or inspect capacity before submitting. The CLI is primarily for humans and service operators.
 
+### Agent usage: do and don't
+
+Latch is for work with a defined completion condition. An ordinary running job holds exclusive admission until it exits; a persistent server can block every later job and service updates indefinitely. Long but finite work is supported without a runtime limit.
+
+- **Do** submit builds, tests in a mode that exits after one run, finite benchmarks/profiling, and inference or data processing that exits when the requested work finishes. Use `measurement: true` for performance measurements.
+- **Do** keep the complete workload in its foreground process, submit once, and wait on the returned job ID. Use checkpoints only when the executable implements `LatchSession`.
+- **Do** let Latch handle admission and cooling. When your work is abandoned or was accidentally submitted in a persistent mode, use `latch_cancel`, then `latch_wait` to confirm completion.
+- **Don't** submit development servers (`npm run dev`, `vite`, `next dev`), preview/HTTP servers, watch modes (`tsc --watch`, `cargo watch`, test runners in watch mode), REPLs, daemons, or persistent model servers. Choose the tool's build or single-run mode when available.
+- **Don't** wrap a persistent service in a shell, detach it, or background it to make the Latch job appear finished. Interactive input is for completing a task, not for keeping a session open indefinitely.
+- **Don't** use the queue to manage service lifetimes or evade coordination with another queue, nested Latch calls, direct heavy execution, or cooling sleeps. Manage necessary persistent services separately with their normal lifecycle tools; they can still interfere with measurements, so stop or quiesce services within your authorized task when needed.
+
 Configure a local stdio MCP server with the absolute path to an MCP-capable `latch` executable:
 
 ```json
