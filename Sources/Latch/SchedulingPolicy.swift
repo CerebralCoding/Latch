@@ -157,7 +157,6 @@ enum SchedulingPolicy {
 
     static func reason(for task: ScheduledTask, in state: SchedulerState, now: Double) -> String? {
         let running = state.tasks.filter { $0.state == .running }
-        let task = TaskPlanner.allocate(task, in: state)
         let request = task.requirements
         guard state.tasks.first(where: { $0.state == .queued })?.id == task.id else {
             return "waiting for earlier queued tasks"
@@ -167,12 +166,6 @@ enum SchedulingPolicy {
         }
         if request.mode == .isolated, !running.isEmpty {
             return "waiting for running tasks to drain"
-        }
-        if let plan = task.plan, plan.buildPaths != nil {
-            guard running.count < TaskPlanner.maximumConcurrentBuilds else { return "compilation concurrency limit" }
-            if let conflict = running.first(where: { $0.plan.map { TaskPlanner.conflicts(plan, $0) } == true }) {
-                return "build outputs reserved by \(conflict.id)"
-            }
         }
         if let error = state.sensorError {
             return "sensors unavailable: \(error)"
@@ -192,9 +185,6 @@ enum SchedulingPolicy {
 
         let reservedCPU = running.reduce(0) { $0 + $1.requirements.cpuCores }
         let reservedMemory = running.reduce(0) { $0 + $1.requirements.memoryMiB }
-        if task.plan?.buildPaths != nil, reservedCPU + request.cpuCores > max(1, sensors.cpuCores - 1) {
-            return "compilation CPU capacity"
-        }
         guard reservedCPU + request.cpuCores <= sensors.cpuCores else { return "CPU reservation capacity" }
         // Count outstanding reservations conservatively even if some are already resident.
         // Parked allocations are already reflected in available memory; reserve only additional headroom on resume.

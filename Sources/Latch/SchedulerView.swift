@@ -102,7 +102,7 @@ struct SchedulerView: Encodable {
                     nil
                 }
             return Task(
-                task: TaskPlanner.allocate(task, in: state), queuePosition: position, blockedBy: blocked,
+                task: task, queuePosition: position, blockedBy: blocked,
                 cooldownRemainingSeconds: remaining)
         }
     }

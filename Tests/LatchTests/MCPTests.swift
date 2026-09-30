@@ -523,181 +523,46 @@ private func submission(
     ]
 }
 
-@Test func `independent durable builds overlap and drain before a measurement barrier`() throws {
+@Test func `MCP ordinary work serializes and measurements retain bounded admission evidence`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
-    let proxy = fixture.directory.appendingPathComponent("swift")
-    try FileManager.default.createSymbolicLink(
-        at: proxy,
-        withDestinationURL: fixture.executable.deletingLastPathComponent().appendingPathComponent("LatchTestWorkload"))
-    for name in ["a", "b", "c"] {
-        let path = fixture.directory.appendingPathComponent(name)
-        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
-        try Data("// swift-tools-version: 6.4".utf8).write(to: path.appendingPathComponent("Package.swift"))
-    }
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        func build(_ project: String) throws -> String {
-            try jobID(
-                client.tool(
-                    "latch_submit",
-                    arguments: [
-                        "requestKey": .string(UUID().uuidString), "name": .string(project),
-                        "executable": .string(proxy.path),
-                        "arguments": ["build"],
-                        "workingDirectory": .string(fixture.directory.appendingPathComponent(project).path),
-                        "input": "pipe",
-                    ]))
-        }
-        let a = try build("a")
-        let b = try build("b")
-        var measurement = try #require(submission(fixture, mode: "pipe-input").object)
-        measurement["measurement"] = true
-        measurement["input"] = "pipe"
-        let m = try jobID(client.tool("latch_submit", arguments: .object(measurement)))
-        let c = try build("c")
-        try admission(scheduler, expectedTasks: 4)
-        _ = try outputUntil(client, job: a, contains: "build-ready")
-        _ = try outputUntil(client, job: b, contains: "build-ready")
-        let overlapping = try scheduler.snapshot()
-        #expect(overlapping.tasks.filter { $0.state == .running }.map(\.id).sorted() == [a, b].sorted())
-        #expect(try SchedulerView(scheduler: scheduler).drainingForTaskID == m)
-        let pending = try client.tool("latch_wait", arguments: ["jobID": .string(c), "timeoutSeconds": 0])
-        #expect(pending["result"]?["structuredContent"]?["complete"] == false)
-        _ = try client.tool("latch_cancel", arguments: ["jobID": .string(a)])
-        _ = try client.tool("latch_wait", arguments: ["jobID": .string(a), "timeoutSeconds": 4])
+        let ordinary = try interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")
+        let a = try jobID(client.tool("latch_submit", arguments: ordinary))
+        let b = try jobID(
+            client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
+        var measured = try #require(interactiveSubmission(fixture, mode: "pipe-input", input: "pipe").object)
+        measured["measurement"] = true
+        let m = try jobID(client.tool("latch_submit", arguments: .object(measured)))
+        try admission(scheduler, expectedTasks: 3)
+        _ = try outputUntil(client, job: a, contains: "ready")
+        let first = try scheduler.snapshot()
+        #expect(first.tasks.filter { $0.state == .running }.map(\.id) == [a])
+        #expect(first.tasks.filter { $0.state == .queued }.map(\.id) == [b, m])
+        #expect(try SchedulerView(scheduler: scheduler).drainingForTaskID == b)
+        #expect(first.tasks.first { $0.id == a }?.plan?.arguments == ["pipe-input"])
+        #expect(first.tasks.allSatisfy { $0.requirements.mode == .isolated })
+        _ = try delivered(client, job: a, tool: "latch_input", arguments: ["eof": true])
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(a), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
+        try admission(scheduler, expectedTasks: 2)
+        _ = try outputUntil(client, job: b, contains: "ready")
+        #expect(try scheduler.snapshot().tasks.filter { $0.state == .running }.map(\.id) == [b])
         _ = try client.tool("latch_cancel", arguments: ["jobID": .string(b)])
-        _ = try client.tool("latch_wait", arguments: ["jobID": .string(b), "timeoutSeconds": 4])
-        try admission(scheduler, expectedTasks: 2)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(b), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["state"] == "cancelled")
+        try admission(scheduler)
         _ = try outputUntil(client, job: m, contains: "ready")
-        #expect(try scheduler.snapshot().tasks.first { $0.id == c }?.state == .queued)
         _ = try delivered(client, job: m, tool: "latch_input", arguments: ["eof": true])
-        let measured = try client.tool("latch_wait", arguments: ["jobID": .string(m), "timeoutSeconds": 4])
-        #expect(measured["result"]?["structuredContent"]?["succeeded"] == true)
-        #expect(measured["result"]?["structuredContent"]?["admission"]?["quietLimits"] != nil)
-        try admission(scheduler)
-        _ = try outputUntil(client, job: c, contains: "build-ready")
-        let task = try #require(try scheduler.snapshot().tasks.first { $0.id == c })
-        _ = try delivered(client, job: c, tool: "latch_input", arguments: ["text": "x"])
-        let result = try client.tool("latch_wait", arguments: ["jobID": .string(c), "timeoutSeconds": 4])
-        #expect(result["result"]?["structuredContent"]?["succeeded"] == true)
-        let committedPlan = try MCPValue.encoded(task.plan)
-        #expect(result["result"]?["structuredContent"]?["plan"] == committedPlan)
-    }
-}
-
-@Test func `shared build outputs serialize across connections and preserve retry identity`() throws {
-    let fixture = try Fixture()
-    let scheduler = try Scheduler(path: fixture.lockPath)
-    let service = try mcpService(scheduler)
-    let proxy = fixture.directory.appendingPathComponent("swift")
-    try FileManager.default.createSymbolicLink(
-        at: proxy,
-        withDestinationURL: fixture.executable.deletingLastPathComponent().appendingPathComponent("LatchTestWorkload"))
-    try Data("// swift-tools-version: 6.4".utf8).write(to: fixture.directory.appendingPathComponent("Package.swift"))
-    try withExtendedLifetime(service) {
-        let sender = try MCPClient(fixture: fixture)
-        let receiver = try MCPClient(fixture: fixture)
-        let original: MCPValue = [
-            "requestKey": .string(UUID().uuidString), "name": "shared-a", "executable": .string(proxy.path),
-            "arguments": ["build"], "workingDirectory": .string(fixture.directory.path), "input": "pipe",
-        ]
-        let a = try jobID(sender.tool("latch_submit", arguments: original))
-        var second = try #require(original.object)
-        second["requestKey"] = .string(UUID().uuidString)
-        second["name"] = "shared-b"
-        let b = try jobID(receiver.tool("latch_submit", arguments: .object(second)))
-        try admission(scheduler, expectedTasks: 2)
-        _ = try outputUntil(receiver, job: a, contains: "build-ready")
-        let state = try scheduler.snapshot()
-        #expect(state.tasks.first { $0.id == b }?.state == .queued)
-        #expect(
-            try SchedulerView(scheduler: scheduler).tasks.first { $0.task.id == b }?.blockedBy
-                == "build outputs reserved by \(a)")
-        #expect(try jobID(receiver.tool("latch_submit", arguments: original)) == a)
-        #expect(try DurableJobs(scheduler: scheduler).records().first { $0.id == a }?.submission.arguments == ["build"])
-        try sender.input.fileHandleForWriting.close()
-        #expect(try fixture.finish(sender.child) == 0)
-        _ = try receiver.tool("latch_cancel", arguments: ["jobID": .string(a)])
-        _ = try receiver.tool("latch_wait", arguments: ["jobID": .string(a), "timeoutSeconds": 4])
-        try admission(scheduler)
-        _ = try outputUntil(receiver, job: b, contains: "build-ready")
-        _ = try delivered(receiver, job: b, tool: "latch_input", arguments: ["text": "x"])
-        #expect(
-            try receiver.tool("latch_wait", arguments: ["jobID": .string(b), "timeoutSeconds": 4])[
-                "result"]?["structuredContent"]?["succeeded"] == true)
-    }
-}
-
-@Test(.enabled(if: ProcessInfo.processInfo.environment["LATCH_VALIDATE_ADMISSION"] == "1"))
-func validateCompilationOverlap() throws {
-    let fixture = try Fixture()
-    let scheduler = try Scheduler(path: fixture.lockPath)
-    let service = try mcpService(scheduler)
-    for name in ["a", "b"] {
-        let path = fixture.directory.appendingPathComponent(name)
-        let sources = path.appendingPathComponent("Sources/Library")
-        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
-        let manifest = """
-            // swift-tools-version: 6.4
-            import PackageDescription
-            let package = Package(name: "\(name)", targets: [.target(name: "Library")])
-            """
-        try Data(manifest.utf8).write(to: path.appendingPathComponent("Package.swift"))
-        for index in 0..<32 {
-            try Data("public enum Value\(index) { public static let value = \(index) }".utf8)
-                .write(to: sources.appendingPathComponent("Value\(index).swift"))
-        }
-    }
-    try withExtendedLifetime(service) {
-        let client = try MCPClient(fixture: fixture)
-        let ids = try ["a", "b"].map { name in
-            try jobID(
-                client.tool(
-                    "latch_submit",
-                    arguments: [
-                        "requestKey": .string(UUID().uuidString), "name": .string(name), "executable": "/usr/bin/swift",
-                        "arguments": .array(
-                            [
-                                "build", "-v", "-c", "release", "--package-path", name, "--scratch-path",
-                                "\(name)/artifacts",
-                            ]
-                            .map(MCPValue.string)),
-                        "workingDirectory": .string(fixture.directory.path),
-                    ]))
-        }
-        try admission(scheduler, expectedTasks: 2)
-        let deadline = ProcessInfo.processInfo.systemUptime + 120
-        var overlapping = false
-        var results: [MCPValue] = []
-        while results.count < 2, ProcessInfo.processInfo.systemUptime < deadline {
-            let state = try scheduler.snapshot()
-            overlapping = overlapping || state.tasks.filter { $0.state == .running }.count == 2
-            try admission(scheduler, expectedTasks: 0)
-            results = try ids.compactMap { id in
-                let value = try client.tool(
-                    "latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": .number(0.1)])[
-                        "result"]?["structuredContent"]
-                return value?["complete"] == true ? value : nil
-            }
-        }
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent()
-        try JSONEncoder().encode(results).write(
-            to: root.appendingPathComponent(".build/compilation-validation.json"), options: .atomic)
-        #expect(overlapping)
-        #expect(results.count == 2)
-        #expect(results.allSatisfy { $0["succeeded"] == true })
-        for result in results {
-            let output = (result["stdout"]?.string ?? "") + (result["stderr"]?.string ?? "")
-            #expect(output.contains("-num-threads 1"))
-        }
-        for name in ["a", "b"] {
-            #expect(
-                FileManager.default.fileExists(
-                    atPath: fixture.directory.appendingPathComponent("\(name)/artifacts").path))
-        }
+        let result = try client.tool("latch_wait", arguments: ["jobID": .string(m), "timeoutSeconds": 4])["result"]?[
+            "structuredContent"]
+        #expect(result?["succeeded"] == true)
+        #expect(result?["admission"]?["quietLimits"] != nil)
+        #expect(result?["admission"]?["idleBaseline"]?["readings"] == nil)
     }
 }
 
@@ -741,32 +606,26 @@ private func jobID(_ response: MCPValue) throws -> String {
     #expect(try client.request("ping")["result"] == [:])
 }
 
-@Test func `Latch plans resources without asking the agent for budgets`() {
-    let build = TaskPlanner.plan(
-        executable: "/usr/bin/swift", arguments: ["build", "-c", "release"], measurement: false, cpuCount: 12,
-        memoryMiB: 32768)
-    #expect(build.arguments == ["build", "-c", "release", "-Xswiftc", "-num-threads", "-Xswiftc", "1", "--jobs", "4"])
-    #expect(build.requirements.mode == .batch)
-    #expect(build.requirements.cpuCores == 4)
-    #expect(build.requirements.memoryMiB == 4096)
-    #expect(build.requirements.temperatureGuard == TemperatureGuard(maxCPU: 85, maxGPU: 80, cooldown: 0))
-    #expect(build.admissionTimeout == nil)
-    let measurement = TaskPlanner.plan(
-        executable: "/usr/bin/swift", arguments: ["build"], measurement: true, cpuCount: 12, memoryMiB: 32768)
+@Test func `Latch preserves commands and isolates all MCP work without agent budgets`() {
+    for arguments in [
+        ["build", "-c", "release"], ["build", "-j", "8"], ["build-exe", "main.zig"],
+        ["-c", "kernel.metal", "-o", "kernel.air"], ["test"], ["infer"],
+    ] {
+        let plan = TaskPlanner.plan(arguments: arguments, measurement: false, cpuCount: 12, memoryMiB: 32768)
+        #expect(plan.arguments == arguments)
+        #expect(plan.requirements.mode == .isolated)
+        #expect(plan.requirements.cpuCores == 12)
+        #expect(plan.requirements.memoryMiB == 8192)
+        #expect(!plan.requirements.measurement)
+        #expect(plan.requirements.temperatureGuard == TemperatureGuard(maxCPU: 85, maxGPU: 80, cooldown: 0))
+        #expect(plan.admissionTimeout == nil)
+    }
+    let measurement = TaskPlanner.plan(arguments: ["build"], measurement: true, cpuCount: 12, memoryMiB: 32768)
     #expect(measurement.requirements.mode == .isolated)
-    #expect(measurement.requirements.cpuCores == 12)
+    #expect(measurement.requirements.measurement)
     #expect(measurement.arguments == ["build"])
     #expect(measurement.requirements.temperatureGuard == TemperatureGuard(maxCPU: 50, maxGPU: 50, cooldown: 10))
-    for (executable, arguments) in [
-        ("/usr/bin/swift", ["test"]), ("/usr/bin/swift", ["build", "-j", "8"]), ("/model", ["infer"]),
-    ] {
-        let plan = TaskPlanner.plan(
-            executable: executable, arguments: arguments, measurement: false, cpuCount: 8, memoryMiB: 16384)
-        #expect(plan.requirements.mode == .isolated)
-        #expect(plan.arguments == arguments)
-    }
-    let small = TaskPlanner.plan(
-        executable: "/usr/bin/swift", arguments: ["build"], measurement: false, cpuCount: 1, memoryMiB: 2048)
+    let small = TaskPlanner.plan(arguments: ["build"], measurement: false, cpuCount: 1, memoryMiB: 2048)
     #expect(small.requirements.cpuCores == 1)
     #expect(small.requirements.memoryMiB == 512)
 }

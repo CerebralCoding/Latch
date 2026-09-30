@@ -331,7 +331,6 @@ final class MCPExecution {
         }
         if let plan = status?.plan {
             value["plan"] = try MCPValue.encoded(plan)
-            value["planCommitted"] = .bool(status?.admitted == true)
         }
         if let waiting = status?.waitingSeconds { value["waitingSeconds"] = .number(waiting) }
         if let sensors = status?.admissionSensors { value["admissionSensors"] = try .encoded(sensors) }

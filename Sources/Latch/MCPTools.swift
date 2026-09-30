@@ -5,7 +5,7 @@ enum MCPTools {
         Prefer latch_execute for authorized foreground tasks: one call waits until completion, with optional MCP task execution for capable hosts.
         Latch owns resource budgets, worker limits, isolation, temperature guards, and scheduling.
         Agents must not calculate budgets or inspect the queue to plan admission. Optionally mark performance measurements with measurement=true.
-        Recognized independent SwiftPM builds share a bounded allocation in FIFO order; conflicting builds serialize. Measurements drain earlier work before cooling and quiet-window admission.
+        All MCP commands run exclusively in FIFO order. Measurements additionally require cooling and quiet-window admission.
         Set checkpoints=true only for an executable using LatchSession. The executable, not the agent, exchanges iteration permits. Latch owns cooling and FIFO reentry; parked processes retain memory. No runtime limit or automatic replay.
         Keep the full workload in the submitted command. latch_view is optional diagnostics, not a required planning step.
         For hosts with short request timeouts, use latch_submit then latch_wait on the returned jobID; repeat only when pending.

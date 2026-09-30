@@ -101,7 +101,6 @@ final class Scheduler {
                 } else {
                     do {
                         try gate.acquire(shared: requirements.mode == .batch, timeout: 0)
-                        state.tasks[index] = TaskPlanner.allocate(state.tasks[index], in: state)
                         state.tasks[index].admission = AdmissionSnapshot(
                             state: state, measurement: state.tasks[index].requirements.measurement)
                         state.tasks[index].state = .running
