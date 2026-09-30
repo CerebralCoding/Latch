@@ -9,10 +9,12 @@ struct TaskRequirements: Codable, Equatable {
     var gpu = false
     var io = false
     var bandwidth = false
+    var measurement = false
     var temperatureGuard: TemperatureGuard?
 
     func validate() throws {
         try temperatureGuard?.validate()
+        guard !measurement || mode == .isolated else { throw LatchError("measurements require exclusive admission") }
         guard cpuCores > 0, cpuCores <= ProcessInfo.processInfo.activeProcessorCount else {
             throw LatchError("--cpu must fit this machine's available core count")
         }
@@ -41,64 +43,23 @@ struct SensorSnapshot: Codable, Equatable {
 
     func quietBlocker(baseline: IdleBaseline?) -> String? {
         guard let gpuActive, let aneWatts, let diskBytesPerSecond else { return "required sensors unavailable" }
-        let idle = baseline ?? IdleBaseline()
-        guard cpuActive >= 0, cpuActive <= idle.cpuActive + max(0.05, idle.cpuActive * 0.5) else {
+        let limits = QuietLimits(baseline: baseline)
+        guard cpuActive >= 0, cpuActive <= limits.cpuActive else {
             return "background CPU load"
         }
-        guard busiestCore >= 0, busiestCore <= idle.busiestCore + max(0.25, idle.busiestCore * 0.5) else {
+        guard busiestCore >= 0, busiestCore <= limits.busiestCore else {
             return "background single-core CPU load"
         }
-        guard gpuActive >= 0, gpuActive <= idle.gpuActive + max(0.02, idle.gpuActive * 0.5) else {
+        guard gpuActive >= 0, gpuActive <= limits.gpuActive else {
             return "background GPU load"
         }
-        guard aneWatts >= 0, aneWatts <= idle.aneWatts + 0.1 else { return "background ANE load" }
-        guard diskBytesPerSecond >= 0, diskBytesPerSecond <= idle.diskBytesPerSecond + 1_048_576 else {
+        guard aneWatts >= 0, aneWatts <= limits.aneWatts else { return "background ANE load" }
+        guard diskBytesPerSecond >= 0, diskBytesPerSecond <= limits.diskBytesPerSecond else {
             return "background disk I/O"
         }
         guard memoryPressure == "normal" else { return "memory pressure is \(memoryPressure)" }
         guard thermalState == "nominal" else { return "thermal state is \(thermalState)" }
         return nil
-    }
-}
-
-struct IdleBaseline: Codable, Equatable {
-    var cpuActive = 0.0
-    var busiestCore = 0.0
-    var gpuActive = 0.0
-    var aneWatts = 0.0
-    var diskBytesPerSecond = 0.0
-    var uptime = 0.0
-    var calibrationSamples = 0
-
-    init() {}
-
-    init?(_ sensors: SensorSnapshot) {
-        guard let gpu = sensors.gpuActive, let ane = sensors.aneWatts, let disk = sensors.diskBytesPerSecond,
-            (0...0.1).contains(sensors.cpuActive), (0...0.5).contains(sensors.busiestCore),
-            (0...0.1).contains(gpu), (0...0.1).contains(ane), (0...1_048_576).contains(disk),
-            sensors.memoryPressure == "normal", sensors.thermalState == "nominal"
-        else { return nil }
-        cpuActive = sensors.cpuActive
-        busiestCore = sensors.busiestCore
-        gpuActive = gpu
-        aneWatts = ane
-        diskBytesPerSecond = disk
-        uptime = sensors.uptime
-        calibrationSamples = 1
-    }
-
-    mutating func observe(_ sample: IdleBaseline, allowIncrease: Bool) {
-        for field in [\Self.cpuActive, \.busiestCore, \.gpuActive, \.aneWatts, \.diskBytesPerSecond] {
-            let current = self[keyPath: field]
-            let measured = sample[keyPath: field]
-            // Average startup readings; one unusually quiet sample must not collapse the baseline.
-            let weight = calibrationSamples < 3 ? 1 / Double(calibrationSamples + 1) : 0.05
-            if calibrationSamples < 3 || allowIncrease || measured < current {
-                self[keyPath: field] = current + weight * (measured - current)
-            }
-        }
-        uptime = sample.uptime
-        calibrationSamples = min(3, calibrationSamples + 1)
     }
 }
 
@@ -117,6 +78,8 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
     var waitingFor: String?
     var coolSince: Double?
     var residentMemoryMiB: Int?
+    var plan: TaskPlan?
+    var admission: AdmissionSnapshot?
 }
 
 struct SchedulerState: Codable, Equatable {
@@ -127,10 +90,12 @@ struct SchedulerState: Codable, Equatable {
     var sensorError: String?
     var lastSensorAttempt: Double?
     var quietSince: Double?
+    var quietPeak: SensorSnapshot?
     var idleBaseline: IdleBaseline?
 
     mutating func resetCooldowns() {
         quietSince = nil
+        quietPeak = nil
         for index in tasks.indices {
             tasks[index].coolSince = nil
         }
@@ -144,12 +109,9 @@ struct SchedulerState: Codable, Equatable {
         if let baseline = idleBaseline, snapshot.uptime < baseline.uptime {
             idleBaseline = nil
         }
-        if !tasks.contains(where: { $0.state == .running }), let sample = IdleBaseline(snapshot) {
-            if idleBaseline == nil {
-                idleBaseline = sample
-            } else {
-                idleBaseline?.observe(sample, allowIncrease: tasks.isEmpty)
-            }
+        if !tasks.contains(where: { $0.state == .running }), let sample = IdleReading(snapshot) {
+            if idleBaseline == nil { idleBaseline = IdleBaseline() }
+            idleBaseline?.observe(sample, allowIncrease: tasks.isEmpty)
         }
         for index in tasks.indices where tasks[index].state == .queued {
             guard let guardrail = tasks[index].requirements.temperatureGuard else { continue }
@@ -162,12 +124,28 @@ struct SchedulerState: Codable, Equatable {
                 tasks[index].coolSince = snapshot.uptime
             }
         }
-        if snapshot.quietBlocker(baseline: idleBaseline) != nil {
+        if tasks.contains(where: { $0.state == .running }) || snapshot.quietBlocker(baseline: idleBaseline) != nil {
             quietSince = nil
+            quietPeak = nil
         } else if quietSince == nil || previous == nil
             || snapshot.uptime - previous!.uptime > 2 || snapshot.uptime < previous!.uptime
         {
             quietSince = snapshot.uptime
+            quietPeak = snapshot
+        } else {
+            var peak = snapshot
+            let prior = quietPeak ?? previous!
+            peak.cpuActive = max(prior.cpuActive, snapshot.cpuActive)
+            peak.busiestCore = max(prior.busiestCore, snapshot.busiestCore)
+            peak.gpuActive = max(prior.gpuActive ?? 0, snapshot.gpuActive ?? 0)
+            peak.aneWatts = max(prior.aneWatts ?? 0, snapshot.aneWatts ?? 0)
+            peak.diskBytesPerSecond = max(prior.diskBytesPerSecond ?? 0, snapshot.diskBytesPerSecond ?? 0)
+            if peak.quietBlocker(baseline: idleBaseline) != nil {
+                quietSince = snapshot.uptime
+                quietPeak = snapshot
+            } else {
+                quietPeak = peak
+            }
         }
     }
 }
@@ -179,6 +157,7 @@ enum SchedulingPolicy {
 
     static func reason(for task: ScheduledTask, in state: SchedulerState, now: Double) -> String? {
         let running = state.tasks.filter { $0.state == .running }
+        let task = TaskPlanner.allocate(task, in: state)
         let request = task.requirements
         guard state.tasks.first(where: { $0.state == .queued })?.id == task.id else {
             return "waiting for earlier queued tasks"
@@ -188,6 +167,12 @@ enum SchedulingPolicy {
         }
         if request.mode == .isolated, !running.isEmpty {
             return "waiting for running tasks to drain"
+        }
+        if let plan = task.plan, plan.buildPaths != nil {
+            guard running.count < TaskPlanner.maximumConcurrentBuilds else { return "compilation concurrency limit" }
+            if let conflict = running.first(where: { $0.plan.map { TaskPlanner.conflicts(plan, $0) } == true }) {
+                return "build outputs reserved by \(conflict.id)"
+            }
         }
         if let error = state.sensorError {
             return "sensors unavailable: \(error)"
@@ -207,6 +192,9 @@ enum SchedulingPolicy {
 
         let reservedCPU = running.reduce(0) { $0 + $1.requirements.cpuCores }
         let reservedMemory = running.reduce(0) { $0 + $1.requirements.memoryMiB }
+        if task.plan?.buildPaths != nil, reservedCPU + request.cpuCores > max(1, sensors.cpuCores - 1) {
+            return "compilation CPU capacity"
+        }
         guard reservedCPU + request.cpuCores <= sensors.cpuCores else { return "CPU reservation capacity" }
         // Count outstanding reservations conservatively even if some are already resident.
         // Parked allocations are already reflected in available memory; reserve only additional headroom on resume.
@@ -214,7 +202,7 @@ enum SchedulingPolicy {
         guard reservedMemory + additionalMemory <= sensors.memoryAvailableMiB - sensors.memoryTotalMiB / 10 else {
             return "insufficient memory headroom"
         }
-        if request.mode == .isolated {
+        if request.measurement {
             guard sensors.gpuActive != nil, sensors.aneWatts != nil, sensors.diskBytesPerSecond != nil else {
                 return "required sensors unavailable: \(sensors.unavailable.joined(separator: ", "))"
             }
@@ -226,7 +214,7 @@ enum SchedulingPolicy {
             else {
                 return "waiting for a quiet CPU/GPU/ANE/disk window"
             }
-        } else {
+        } else if request.mode == .batch {
             guard sensors.cpuActive <= 0.8 else { return "background CPU load" }
             guard
                 max(Double(reservedCPU), sensors.cpuActive * Double(sensors.cpuCores)) + Double(request.cpuCores)
@@ -247,6 +235,8 @@ enum SchedulingPolicy {
             if request.bandwidth, running.contains(where: \.requirements.bandwidth) {
                 return "memory bandwidth is reserved"
             }
+        } else if !(0...0.8).contains(sensors.cpuActive) {
+            return "background CPU load"
         }
         return nil
     }

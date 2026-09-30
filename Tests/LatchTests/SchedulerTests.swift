@@ -15,7 +15,7 @@ private func idleSensors(at uptime: Double = ProcessInfo.processInfo.systemUptim
 private func task(_ mode: TaskRequirements.Mode = .batch, cores: Int = 1, gpu: Bool = false) -> ScheduledTask {
     ScheduledTask(
         id: UUID().uuidString, name: "test", pid: getpid(), arguments: ["true"],
-        requirements: TaskRequirements(mode: mode, cpuCores: cores, gpu: gpu))
+        requirements: TaskRequirements(mode: mode, cpuCores: cores, gpu: gpu, measurement: mode == .isolated))
 }
 
 @Test func `scheduler options preserve command and validate resources`() throws {
@@ -177,27 +177,28 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     state.record(idleSensors(at: 10))
     var desktop = idleSensors(at: 11)
     desktop.gpuActive = 0.04
-    state.record(desktop)
-    desktop.uptime = 12
-    state.record(desktop)
+    for uptime in 11...15 {
+        desktop.uptime = Double(uptime)
+        state.record(desktop)
+    }
     let idle = state.idleBaseline!
     #expect(idle.gpuActive > 0)
-    #expect(idle.gpuActive < 0.04)
+    #expect(idle.gpuActive <= 0.04)
     state.tasks = [task(.isolated)]
     desktop.gpuActive = 0.08
-    desktop.uptime = 13
+    desktop.uptime = 16
     state.record(desktop)
     #expect(state.idleBaseline?.gpuActive == idle.gpuActive)
     #expect(state.quietSince == nil)
     state.tasks[0].state = .parked
-    desktop.uptime = 14
+    desktop.uptime = 17
     state.record(desktop)
     #expect(state.idleBaseline?.gpuActive == idle.gpuActive)
     state.tasks[0].state = .running
-    state.record(idleSensors(at: 15))
+    state.record(idleSensors(at: 18))
     #expect(state.idleBaseline?.gpuActive == idle.gpuActive)
     state.tasks[0].state = .queued
-    state.record(idleSensors(at: 16))
+    for uptime in 19...23 { state.record(idleSensors(at: Double(uptime))) }
     #expect(state.idleBaseline!.gpuActive < idle.gpuActive)
     #expect(state.idleBaseline!.gpuActive > 0)
 }
@@ -211,8 +212,14 @@ func `rejects invalid scheduler options`(arguments: [String]) {
         desktop.gpuActive = 0.04
         state.record(desktop)
     }
-    #expect(SchedulingPolicy.reason(for: measurement, in: state, now: 12) == nil)
+    #expect(SchedulingPolicy.reason(for: measurement, in: state, now: 12) != nil)
     #expect(state.idleBaseline?.calibrationSamples == 3)
+    for uptime in 13...14 {
+        var desktop = idleSensors(at: Double(uptime))
+        desktop.gpuActive = 0.04
+        state.record(desktop)
+    }
+    #expect(SchedulingPolicy.reason(for: measurement, in: state, now: 14) == nil)
 }
 
 @Test func `idle calibration rejects sustained heavy load and resets after reboot`() {
@@ -310,7 +317,7 @@ func `rejects invalid scheduler options`(arguments: [String]) {
         $0.quietSince = now - 3
     }
     let reservation = try scheduler.reserve(
-        name: "measurement", arguments: ["true"], requirements: TaskRequirements(), timeout: 0)
+        name: "measurement", arguments: ["true"], requirements: TaskRequirements(measurement: true), timeout: 0)
     try withExtendedLifetime(reservation) {
         let state = try scheduler.snapshot()
         #expect(state.tasks.first?.state == .running)
@@ -339,7 +346,8 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     try withExtendedLifetime(holder) {
         #expect(throws: LatchError.self) {
             try scheduler.reserve(
-                name: "measurement", arguments: ["true"], requirements: TaskRequirements(), timeout: 0.05)
+                name: "measurement", arguments: ["true"], requirements: TaskRequirements(measurement: true),
+                timeout: 0.05)
         }
         let remaining = try scheduler.snapshot()
         #expect(remaining.tasks.isEmpty)

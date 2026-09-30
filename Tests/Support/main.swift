@@ -4,6 +4,9 @@ import LatchCheckpoint
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 switch arguments.first {
+case "build":
+    FileHandle.standardOutput.write(Data("build-ready:\(arguments.joined(separator: " "))\n".utf8))
+    _ = try FileHandle.standardInput.read(upToCount: 1)
 case "checkpoints":
     let session = try LatchSession.connect()
     for iteration in 0..<2 {

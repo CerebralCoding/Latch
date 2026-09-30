@@ -156,6 +156,7 @@ struct Options {
             throw LatchError("service requires run, install, start, stop, status, or uninstall")
         }
         if command == .schedule || command == .guard {
+            requirements.measurement = requirements.mode == .isolated
             try requirements.validate()
         }
     }
@@ -230,9 +231,9 @@ struct Options {
         starts; admitted tasks run uninterrupted. Limits are workflow preferences,
         not hardware safety limits.
 
-        Isolated tasks require no running Latch tasks and two seconds of quiet:
-        CPU <=5% overall / <=25% busiest core, GPU <=2%, ANE <=0.1 W,
-        disk <=1 MiB/s, normal memory pressure, and nominal thermal state.
+        Isolated CLI tasks require no running Latch tasks and two seconds of quiet.
+        Quiet limits adapt to measured idle activity with bounded noise allowances;
+        view exposes the baseline, effective limits, and observed sensor values.
         All scheduled tasks leave 10% physical memory headroom. Batch admission also
         requires CPU load <=80%; GPU/I/O requests require those resources to be idle.
         Unknown/stale required sensors block admission. GPU/ANE use private IOReport

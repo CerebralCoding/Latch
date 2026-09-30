@@ -60,13 +60,14 @@ final class DurableJobs {
             }
             let record = DurableJobRecord(id: UUID().uuidString, submission: submission)
             let plan = TaskPlanner.plan(
-                executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
+                executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement,
+                workingDirectory: submission.workingDirectory, environment: record.environment)
             records.append(record)
             state.jobs = records
             state.tasks.append(
                 ScheduledTask(
                     id: record.id, name: submission.name, pid: 0, arguments: [submission.executable] + plan.arguments,
-                    requirements: plan.requirements))
+                    requirements: plan.requirements, plan: plan))
             return record
         }
     }

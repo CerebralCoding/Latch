@@ -19,6 +19,7 @@ struct MCPWorkerStatus: Codable {
     var plan: TaskPlan?
     var admittedAt: Double?
     var admissionSensors: SensorSnapshot?
+    var admission: AdmissionSnapshot?
     var waitingSeconds: Double?
 }
 
@@ -50,8 +51,9 @@ enum MCPWorker {
             }
             let scheduler = try Scheduler(path: decoded.latchPath)
             let submission = decoded.submission
-            let plan = TaskPlanner.plan(
-                executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
+            guard let plan = try scheduler.snapshot().tasks.first(where: { $0.id == decoded.ticketID })?.plan else {
+                throw LatchError("durable execution plan is missing", exitCode: 74)
+            }
             status.plan = plan
             try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
             if let descriptors = decoded.checkpointDescriptors {
@@ -80,11 +82,16 @@ enum MCPWorker {
                 status.admitted = true
                 status.admittedAt = ProcessInfo.processInfo.systemUptime
                 status.waitingSeconds = max(0, status.admittedAt! - queued)
-                status.admissionSensors = try scheduler.snapshot().sensors
+                status.admission = reservation.admission
+                status.admissionSensors = reservation.admission?.sensors
+                guard let committed = reservation.plan else {
+                    throw LatchError("admitted execution plan is missing", exitCode: 74)
+                }
+                status.plan = committed
                 status.taskID = reservation.id
                 try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
                 try reservation.inheritAcrossExec()
-                try Latch.execute([submission.executable] + plan.arguments)
+                try Latch.execute([submission.executable] + committed.arguments)
             }
         } catch {
             status.error = String(describing: error)
@@ -324,9 +331,11 @@ final class MCPExecution {
         }
         if let plan = status?.plan {
             value["plan"] = try MCPValue.encoded(plan)
+            value["planCommitted"] = .bool(status?.admitted == true)
         }
         if let waiting = status?.waitingSeconds { value["waitingSeconds"] = .number(waiting) }
         if let sensors = status?.admissionSensors { value["admissionSensors"] = try .encoded(sensors) }
+        if let admission = status?.admission { value["admission"] = try .encoded(admission) }
         if let started = status?.admittedAt, let exitedAt {
             value["executionSeconds"] = .number(max(0, exitedAt - started))
         }

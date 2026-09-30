@@ -6,6 +6,8 @@ struct TaskReservation {
     let lease: FileLatch
     let gate: FileLatch
     var updatePermit: FileLatch?
+    var plan: TaskPlan?
+    var admission: AdmissionSnapshot?
 
     func inheritAcrossExec() throws {
         try lease.inheritAcrossExec()
@@ -99,6 +101,9 @@ final class Scheduler {
                 } else {
                     do {
                         try gate.acquire(shared: requirements.mode == .batch, timeout: 0)
+                        state.tasks[index] = TaskPlanner.allocate(state.tasks[index], in: state)
+                        state.tasks[index].admission = AdmissionSnapshot(
+                            state: state, measurement: state.tasks[index].requirements.measurement)
                         state.tasks[index].state = .running
                         state.tasks[index].startedAt = Date()
                         state.tasks[index].waitingFor = nil
@@ -116,7 +121,10 @@ final class Scheduler {
                 view = state
             }
             if admitted {
-                return TaskReservation(id: id, lease: lease, gate: gate, updatePermit: updatePermit)
+                let task = view.tasks.first { $0.id == id }
+                return TaskReservation(
+                    id: id, lease: lease, gate: gate, updatePermit: updatePermit,
+                    plan: task?.plan, admission: task?.admission)
             }
             let remaining = deadline.map { max(0, $0 - ProcessInfo.processInfo.systemUptime) }
             if let remaining, remaining <= 0 {

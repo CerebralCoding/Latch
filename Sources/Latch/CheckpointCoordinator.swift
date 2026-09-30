@@ -24,6 +24,7 @@ final class CheckpointCoordinator {
     var started: Double?
     var queued = ProcessInfo.processInfo.systemUptime
     var admission: SensorSnapshot?
+    var admissionSnapshot: AdmissionSnapshot?
     var buffer = Data()
     var error: String?
 
@@ -81,6 +82,8 @@ final class CheckpointCoordinator {
             state.tasks[index].state = .running
             state.tasks[index].startedAt = Date()
             state.tasks[index].waitingFor = nil
+            admissionSnapshot = AdmissionSnapshot(state: state, measurement: true)
+            state.tasks[index].admission = admissionSnapshot
             state.quietSince = nil
             admission = state.sensors
             return true
@@ -154,6 +157,7 @@ final class CheckpointCoordinator {
                 iterations.append([
                     "iteration": .number(Double(iteration)), "executionSeconds": .number(max(0, now - started)),
                     "waitingSeconds": .number(max(0, started - queued)), "admissionSensors": try .encoded(admission),
+                    "admission": try .encoded(admissionSnapshot),
                 ])
                 if iterations.count > 64 { iterations.removeFirst() }
                 completedIterations += 1

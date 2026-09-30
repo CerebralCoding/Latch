@@ -28,6 +28,8 @@ struct SchedulerView: Encodable {
     var sensorsFresh: Bool
     var sensors: SensorSnapshot?
     var idleBaseline: IdleBaseline?
+    var quietLimits: QuietLimits
+    var drainingForTaskID: String?
     var sensorError: String?
     var capacity: Capacity
     var nextTaskID: String?
@@ -41,6 +43,8 @@ struct SchedulerView: Encodable {
         processLatch = try Self.latchState(path: scheduler.path)
         sensors = state.sensors
         idleBaseline = state.idleBaseline
+        idleBaseline?.readings = nil
+        quietLimits = QuietLimits(baseline: state.idleBaseline)
         sensorError = state.sensorError
         sensorAgeSeconds = state.sensors.map { now - $0.uptime }
         sensorsFresh =
@@ -48,6 +52,11 @@ struct SchedulerView: Encodable {
         let running = state.tasks.filter { $0.state == .running }
         isolatedTaskRunning = running.contains { $0.requirements.mode == .isolated }
         nextTaskID = state.tasks.first { $0.state == .queued }?.id
+        if let next = state.tasks.first(where: { $0.state == .queued }), next.requirements.mode == .isolated,
+            !running.isEmpty
+        {
+            drainingForTaskID = next.id
+        }
         let cpu = running.reduce(0) { $0 + $1.requirements.cpuCores }
         let memory = running.reduce(0) { $0 + $1.requirements.memoryMiB }
         capacity = Capacity(
@@ -92,7 +101,9 @@ struct SchedulerView: Encodable {
                 } else {
                     nil
                 }
-            return Task(task: task, queuePosition: position, blockedBy: blocked, cooldownRemainingSeconds: remaining)
+            return Task(
+                task: TaskPlanner.allocate(task, in: state), queuePosition: position, blockedBy: blocked,
+                cooldownRemainingSeconds: remaining)
         }
     }
 
