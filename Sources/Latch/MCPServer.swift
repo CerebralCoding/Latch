@@ -358,15 +358,7 @@ final class MCPServer {
         }
         let updatePermit = try UpdateDrain.admit(in: scheduler.directory)
         defer { withExtendedLifetime(updatePermit) {} }
-        let identity = try FileManager.default.attributesOfItem(atPath: executable.path)
-        guard try UpdateDrain.generation(in: scheduler.directory) == generation,
-            identity[.systemFileNumber] as? NSNumber == executableIdentity[.systemFileNumber] as? NSNumber,
-            identity[.systemNumber] as? NSNumber == executableIdentity[.systemNumber] as? NSNumber
-        else {
-            throw LatchError(
-                "Latch was updated; retrieve retained results, then reconnect this MCP host before submitting new work",
-                exitCode: 69)
-        }
+        try requireCurrentEndpoint()
         _ = try SchedulerService.requireRunning(in: scheduler.directory)
         guard try SchedulerService.status(in: scheduler.directory).serviceRevision == BuildIdentity.serviceRevision
         else {
@@ -381,7 +373,20 @@ final class MCPServer {
         return job
     }
 
+    private func requireCurrentEndpoint() throws {
+        let identity = try FileManager.default.attributesOfItem(atPath: executable.path)
+        guard try UpdateDrain.generation(in: scheduler.directory) == generation,
+            identity[.systemFileNumber] as? NSNumber == executableIdentity[.systemFileNumber] as? NSNumber,
+            identity[.systemNumber] as? NSNumber == executableIdentity[.systemNumber] as? NSNumber
+        else {
+            throw LatchError(
+                "Latch was updated; reconnect this MCP host and retrieve retained results by job ID",
+                exitCode: 69)
+        }
+    }
+
     private func syncJobs() throws {
+        try requireCurrentEndpoint()
         let records = try store.records()
         for record in records {
             let job = jobs[record.id] ?? MCPJob(record: record, store: store)

@@ -27,6 +27,7 @@ struct SchedulerView: Encodable {
     var sensorAgeSeconds: Double?
     var sensorsFresh: Bool
     var sensors: SensorSnapshot?
+    var idleBaseline: IdleBaseline?
     var sensorError: String?
     var capacity: Capacity
     var nextTaskID: String?
@@ -39,6 +40,7 @@ struct SchedulerView: Encodable {
         service = try SchedulerService.status(in: scheduler.directory)
         processLatch = try Self.latchState(path: scheduler.path)
         sensors = state.sensors
+        idleBaseline = state.idleBaseline
         sensorError = state.sensorError
         sensorAgeSeconds = state.sensors.map { now - $0.uptime }
         sensorsFresh =

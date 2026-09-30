@@ -60,14 +60,16 @@ enum SchedulerService {
                 while waitpid(-1, nil, WNOHANG) > 0 {}
                 try jobs.recover(executable: executable)
                 let state = try scheduler.snapshot()
-                if let next = state.tasks.first(where: { $0.state == .queued }),
+                if state.tasks.isEmpty {
+                    try scheduler.refreshSensors()
+                } else if let next = state.tasks.first(where: { $0.state == .queued }),
                     !state.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),
                     !(next.requirements.mode == .isolated && state.tasks.contains(where: { $0.state == .running }))
                 {
                     try scheduler.refreshSensors()
                 }
                 watcher.wait(
-                    seconds: state.tasks.isEmpty ? 3600 : SchedulingPolicy.sampleInterval, pids: state.tasks.map(\.pid))
+                    seconds: state.tasks.isEmpty ? 15 : SchedulingPolicy.sampleInterval, pids: state.tasks.map(\.pid))
             }
         }
     }
@@ -210,7 +212,7 @@ enum ServiceInstallation {
                     try waitUntilRunning(path: path)
                 }))
         print(
-            "\(rollback ? "Rolled back" : "Updated") \(executable.path)\nService: \(restarted ? "restarted" : "unchanged")\nRetrieve retained results, then reconnect MCP hosts before submitting new work."
+            "\(rollback ? "Rolled back" : "Updated") \(executable.path)\nService: \(restarted ? "restarted" : "unchanged")\nReconnect MCP hosts before submitting new work; retrieve retained results by job ID."
         )
     }
 

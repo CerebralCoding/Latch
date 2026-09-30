@@ -454,16 +454,16 @@ func `MCP task result blocks until completion and retains the final result`(mode
                     "structuredContent"]?["succeeded"] == true)
             try drain!.wait(timeout: 1)
             try UpdateDrain.advance(in: scheduler.directory)
-            #expect(
-                try client.tool("latch_wait", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?[
-                    "succeeded"] == true)
+            try client.send(["jsonrpc": "2.0", "id": "wake", "method": "ping"])
+            #expect(try fixture.finish(client.child) == 69)
         }
         drain = nil
-        #expect(
-            try client.tool("latch_submit", arguments: submission(fixture))["result"]?["structuredContent"]?["code"]
-                == 69)
-        #expect(try jobID(client.tool("latch_submit", arguments: arguments)) == id)
         let fresh = try MCPClient(fixture: fixture)
+        #expect(
+            try fresh.tool("latch_wait", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?[
+                "succeeded"]
+                == true)
+        #expect(try jobID(fresh.tool("latch_submit", arguments: arguments)) == id)
         let next = try jobID(fresh.tool("latch_submit", arguments: submission(fixture)))
         try admission(scheduler)
         #expect(

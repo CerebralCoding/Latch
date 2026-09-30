@@ -1,3 +1,5 @@
+Latch is unreleased. Implement only the current contract; do not add legacy migrations, compatibility paths, or tests for obsolete Latch versions.
+
 # Formatting
 
 Latch is an explicit exception to the global `zsh -ic 'format'` workflow. Use the official formatter bundled with the selected Swift 6.4 toolchain, scoped to this repository:

@@ -39,11 +39,66 @@ struct SensorSnapshot: Codable, Equatable {
     var cpuTemperature: Double?
     var gpuTemperature: Double?
 
-    var quiet: Bool {
-        guard let gpuActive, let aneWatts, let diskBytesPerSecond else { return false }
-        return cpuActive <= 0.05 && busiestCore <= 0.25 && gpuActive <= 0.02
-            && aneWatts <= 0.1 && diskBytesPerSecond <= 1_048_576
-            && memoryPressure == "normal" && thermalState == "nominal"
+    func quietBlocker(baseline: IdleBaseline?) -> String? {
+        guard let gpuActive, let aneWatts, let diskBytesPerSecond else { return "required sensors unavailable" }
+        let idle = baseline ?? IdleBaseline()
+        guard cpuActive >= 0, cpuActive <= idle.cpuActive + max(0.05, idle.cpuActive * 0.5) else {
+            return "background CPU load"
+        }
+        guard busiestCore >= 0, busiestCore <= idle.busiestCore + max(0.25, idle.busiestCore * 0.5) else {
+            return "background single-core CPU load"
+        }
+        guard gpuActive >= 0, gpuActive <= idle.gpuActive + max(0.02, idle.gpuActive * 0.5) else {
+            return "background GPU load"
+        }
+        guard aneWatts >= 0, aneWatts <= idle.aneWatts + 0.1 else { return "background ANE load" }
+        guard diskBytesPerSecond >= 0, diskBytesPerSecond <= idle.diskBytesPerSecond + 1_048_576 else {
+            return "background disk I/O"
+        }
+        guard memoryPressure == "normal" else { return "memory pressure is \(memoryPressure)" }
+        guard thermalState == "nominal" else { return "thermal state is \(thermalState)" }
+        return nil
+    }
+}
+
+struct IdleBaseline: Codable, Equatable {
+    var cpuActive = 0.0
+    var busiestCore = 0.0
+    var gpuActive = 0.0
+    var aneWatts = 0.0
+    var diskBytesPerSecond = 0.0
+    var uptime = 0.0
+    var calibrationSamples = 0
+
+    init() {}
+
+    init?(_ sensors: SensorSnapshot) {
+        guard let gpu = sensors.gpuActive, let ane = sensors.aneWatts, let disk = sensors.diskBytesPerSecond,
+            (0...0.1).contains(sensors.cpuActive), (0...0.5).contains(sensors.busiestCore),
+            (0...0.1).contains(gpu), (0...0.1).contains(ane), (0...1_048_576).contains(disk),
+            sensors.memoryPressure == "normal", sensors.thermalState == "nominal"
+        else { return nil }
+        cpuActive = sensors.cpuActive
+        busiestCore = sensors.busiestCore
+        gpuActive = gpu
+        aneWatts = ane
+        diskBytesPerSecond = disk
+        uptime = sensors.uptime
+        calibrationSamples = 1
+    }
+
+    mutating func observe(_ sample: IdleBaseline, allowIncrease: Bool) {
+        for field in [\Self.cpuActive, \.busiestCore, \.gpuActive, \.aneWatts, \.diskBytesPerSecond] {
+            let current = self[keyPath: field]
+            let measured = sample[keyPath: field]
+            // Average startup readings; one unusually quiet sample must not collapse the baseline.
+            let weight = calibrationSamples < 3 ? 1 / Double(calibrationSamples + 1) : 0.05
+            if calibrationSamples < 3 || allowIncrease || measured < current {
+                self[keyPath: field] = current + weight * (measured - current)
+            }
+        }
+        uptime = sample.uptime
+        calibrationSamples = min(3, calibrationSamples + 1)
     }
 }
 
@@ -72,6 +127,7 @@ struct SchedulerState: Codable, Equatable {
     var sensorError: String?
     var lastSensorAttempt: Double?
     var quietSince: Double?
+    var idleBaseline: IdleBaseline?
 
     mutating func resetCooldowns() {
         quietSince = nil
@@ -85,6 +141,16 @@ struct SchedulerState: Codable, Equatable {
         sensors = snapshot
         sensorError = nil
         lastSensorAttempt = snapshot.uptime
+        if let baseline = idleBaseline, snapshot.uptime < baseline.uptime {
+            idleBaseline = nil
+        }
+        if !tasks.contains(where: { $0.state == .running }), let sample = IdleBaseline(snapshot) {
+            if idleBaseline == nil {
+                idleBaseline = sample
+            } else {
+                idleBaseline?.observe(sample, allowIncrease: tasks.isEmpty)
+            }
+        }
         for index in tasks.indices where tasks[index].state == .queued {
             guard let guardrail = tasks[index].requirements.temperatureGuard else { continue }
             if !guardrail.satisfied(by: snapshot) {
@@ -96,7 +162,7 @@ struct SchedulerState: Codable, Equatable {
                 tasks[index].coolSince = snapshot.uptime
             }
         }
-        if !snapshot.quiet {
+        if snapshot.quietBlocker(baseline: idleBaseline) != nil {
             quietSince = nil
         } else if quietSince == nil || previous == nil
             || snapshot.uptime - previous!.uptime > 2 || snapshot.uptime < previous!.uptime
@@ -152,7 +218,10 @@ enum SchedulingPolicy {
             guard sensors.gpuActive != nil, sensors.aneWatts != nil, sensors.diskBytesPerSecond != nil else {
                 return "required sensors unavailable: \(sensors.unavailable.joined(separator: ", "))"
             }
-            guard sensors.quiet, let since = state.quietSince, now >= since,
+            if let blocker = sensors.quietBlocker(baseline: state.idleBaseline) {
+                return "waiting for a quiet window: \(blocker)"
+            }
+            guard let since = state.quietSince, now >= since,
                 sensors.uptime - since >= quietPeriod
             else {
                 return "waiting for a quiet CPU/GPU/ANE/disk window"

@@ -125,6 +125,112 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     #expect(SchedulingPolicy.reason(for: next, in: base, now: 9) == "waiting for fresh sensors")
 }
 
+@Test func `idle desktop activity admits isolated work after the quiet window`() {
+    let measurement = task(.isolated)
+    var state = SchedulerState(tasks: [measurement])
+    for uptime in 10...12 {
+        var sensors = idleSensors(at: Double(uptime))
+        sensors.cpuActive = 0.048
+        sensors.busiestCore = 0.24
+        sensors.gpuActive = 0.04
+        state.record(sensors)
+    }
+    #expect(state.quietSince == 10)
+    #expect(SchedulingPolicy.reason(for: measurement, in: state, now: 12) == nil)
+}
+
+@Test func `busy resources reset the quiet window and identify the blocker`() {
+    let measurement = task(.isolated)
+    let cases: [(WritableKeyPath<SensorSnapshot, Double>, Double, String)] = [
+        (\.cpuActive, 0.11, "background CPU load"),
+        (\.busiestCore, 0.51, "background single-core CPU load"),
+    ]
+    for (resource, activity, blocker) in cases {
+        var state = SchedulerState(tasks: [measurement])
+        state.record(idleSensors(at: 10))
+        var sensors = idleSensors(at: 11)
+        sensors[keyPath: resource] = activity
+        state.record(sensors)
+        #expect(state.quietSince == nil)
+        #expect(
+            SchedulingPolicy.reason(for: measurement, in: state, now: 11) == "waiting for a quiet window: \(blocker)")
+    }
+    let optionalCases: [(WritableKeyPath<SensorSnapshot, Double?>, Double, String)] = [
+        (\.gpuActive, 0.06, "background GPU load"),
+        (\.aneWatts, 0.11, "background ANE load"),
+        (\.diskBytesPerSecond, 1_048_577, "background disk I/O"),
+    ]
+    for (resource, activity, blocker) in optionalCases {
+        var state = SchedulerState(tasks: [measurement])
+        state.record(idleSensors(at: 10))
+        var sensors = idleSensors(at: 11)
+        sensors[keyPath: resource] = activity
+        state.record(sensors)
+        #expect(state.quietSince == nil)
+        #expect(
+            SchedulingPolicy.reason(for: measurement, in: state, now: 11) == "waiting for a quiet window: \(blocker)")
+    }
+}
+
+@Test func `idle baseline adapts only with an empty queue and excludes running workloads`() {
+    var state = SchedulerState()
+    state.record(idleSensors(at: 10))
+    var desktop = idleSensors(at: 11)
+    desktop.gpuActive = 0.04
+    state.record(desktop)
+    desktop.uptime = 12
+    state.record(desktop)
+    let idle = state.idleBaseline!
+    #expect(idle.gpuActive > 0)
+    #expect(idle.gpuActive < 0.04)
+    state.tasks = [task(.isolated)]
+    desktop.gpuActive = 0.08
+    desktop.uptime = 13
+    state.record(desktop)
+    #expect(state.idleBaseline?.gpuActive == idle.gpuActive)
+    #expect(state.quietSince == nil)
+    state.tasks[0].state = .parked
+    desktop.uptime = 14
+    state.record(desktop)
+    #expect(state.idleBaseline?.gpuActive == idle.gpuActive)
+    state.tasks[0].state = .running
+    state.record(idleSensors(at: 15))
+    #expect(state.idleBaseline?.gpuActive == idle.gpuActive)
+    state.tasks[0].state = .queued
+    state.record(idleSensors(at: 16))
+    #expect(state.idleBaseline!.gpuActive < idle.gpuActive)
+    #expect(state.idleBaseline!.gpuActive > 0)
+}
+
+@Test func `startup baseline tolerates one unusually quiet reading`() {
+    let measurement = task(.isolated)
+    var state = SchedulerState(tasks: [measurement])
+    state.record(idleSensors(at: 10))
+    for uptime in 11...12 {
+        var desktop = idleSensors(at: Double(uptime))
+        desktop.gpuActive = 0.04
+        state.record(desktop)
+    }
+    #expect(SchedulingPolicy.reason(for: measurement, in: state, now: 12) == nil)
+    #expect(state.idleBaseline?.calibrationSamples == 3)
+}
+
+@Test func `idle calibration rejects sustained heavy load and resets after reboot`() {
+    var state = SchedulerState()
+    var heavy = idleSensors(at: 10)
+    heavy.gpuActive = 0.8
+    state.record(heavy)
+    #expect(state.idleBaseline == nil)
+    #expect(state.quietSince == nil)
+    var desktop = idleSensors(at: 11)
+    desktop.gpuActive = 0.04
+    state.record(desktop)
+    #expect(state.idleBaseline?.gpuActive == 0.04)
+    state.record(idleSensors(at: 1))
+    #expect(state.idleBaseline?.gpuActive == 0)
+    #expect(state.quietSince == 1)
+}
+
 @Test func `isolation requires continuous recent quiet samples`() {
     let measurement = task(.isolated)
     var state = SchedulerState(tasks: [measurement])
