@@ -6,8 +6,8 @@ struct TemperatureGuard: Codable, Equatable {
     var cooldown = 5.0
 
     func validate() throws {
-        guard maxCPU.isFinite, maxGPU.isFinite, (1 ... 125).contains(maxCPU), (1 ... 125).contains(maxGPU),
-              cooldown.isFinite, (0 ... 3600).contains(cooldown)
+        guard maxCPU.isFinite, maxGPU.isFinite, (1...125).contains(maxCPU), (1...125).contains(maxGPU),
+            cooldown.isFinite, (0...3600).contains(cooldown)
         else {
             throw LatchError("temperature limits must be 1–125 Celsius and cooldown 0–3600 seconds")
         }
@@ -15,7 +15,8 @@ struct TemperatureGuard: Codable, Equatable {
 
     func satisfied(by sensors: SensorSnapshot) -> Bool {
         guard let cpu = sensors.cpuTemperature, let gpu = sensors.gpuTemperature,
-              cpu.isFinite, gpu.isFinite, cpu > 0, gpu > 0 else { return false }
+            cpu.isFinite, gpu.isFinite, cpu > 0, gpu > 0
+        else { return false }
         return cpu <= maxCPU && gpu <= maxGPU && sensors.thermalState == "nominal"
     }
 
@@ -24,7 +25,8 @@ struct TemperatureGuard: Codable, Equatable {
             return "CPU/GPU temperature sensors unavailable"
         }
         guard satisfied(by: sensors) else {
-            return "temperature guard: CPU \(String(format: "%.1f", cpu))/\(maxCPU) C, GPU \(String(format: "%.1f", gpu))/\(maxGPU) C"
+            return
+                "temperature guard: CPU \(String(format: "%.1f", cpu))/\(maxCPU) C, GPU \(String(format: "%.1f", gpu))/\(maxGPU) C"
         }
         if cooldown == 0 {
             return nil

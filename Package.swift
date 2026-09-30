@@ -8,6 +8,7 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .executable(name: "latch", targets: ["Latch"]),
+        .library(name: "LatchCheckpoint", targets: ["LatchCheckpoint"]),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -15,16 +16,17 @@ let package = Package(
         .executableTarget(
             name: "Latch",
             swiftSettings: [
-                .enableUpcomingFeature("ApproachableConcurrency"),
+                .enableUpcomingFeature("ApproachableConcurrency")
             ],
         ),
         .testTarget(
             name: "LatchTests",
             dependencies: ["Latch", "LatchTestWorkload"],
             swiftSettings: [
-                .enableUpcomingFeature("ApproachableConcurrency"),
+                .enableUpcomingFeature("ApproachableConcurrency")
             ],
         ),
-        .executableTarget(name: "LatchTestWorkload", path: "Tests/Support"),
+        .target(name: "LatchCheckpoint"),
+        .executableTarget(name: "LatchTestWorkload", dependencies: ["LatchCheckpoint"], path: "Tests/Support"),
     ],
 )

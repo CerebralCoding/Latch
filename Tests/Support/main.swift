@@ -1,10 +1,21 @@
 import Darwin
 import Foundation
+import LatchCheckpoint
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 switch arguments.first {
+case "checkpoints":
+    let session = try LatchSession.connect()
+    for iteration in 0..<2 {
+        try session.awaitPermit(iteration: iteration)
+        FileHandle.standardOutput.write(Data("iteration:\(iteration)\n".utf8))
+        _ = try FileHandle.standardInput.read(upToCount: 1)
+        try session.finishIteration(iteration: iteration)
+    }
 case "report":
-    let report = ["arguments": Array(arguments.dropFirst()), "workingDirectory": [FileManager.default.currentDirectoryPath]]
+    let report = [
+        "arguments": Array(arguments.dropFirst()), "workingDirectory": [FileManager.default.currentDirectoryPath],
+    ]
     try FileHandle.standardOutput.write(JSONEncoder().encode(report))
     FileHandle.standardError.write(Data("separate stderr".utf8))
     exit(FileHandle.standardInput.readDataToEndOfFile().isEmpty ? 0 : 1)
@@ -23,7 +34,8 @@ case "pipe-input", "ignore-interrupt":
     FileHandle.standardOutput.write(Data(bytes.base64EncodedString().utf8))
 case "terminal", "raw-terminal":
     guard isatty(STDIN_FILENO) == 1, isatty(STDOUT_FILENO) == 1, isatty(STDERR_FILENO) == 1,
-          tcgetpgrp(STDIN_FILENO) == getpgrp() else { exit(65) }
+        tcgetpgrp(STDIN_FILENO) == getpgrp()
+    else { exit(65) }
     if arguments[0] == "raw-terminal" {
         var settings = termios()
         guard tcgetattr(STDIN_FILENO, &settings) == 0 else { exit(66) }
@@ -34,7 +46,9 @@ case "terminal", "raw-terminal":
         var offset = 0
         while offset < bytes.count {
             let remaining = bytes.count - offset
-            let count = bytes.withUnsafeMutableBytes { read(STDIN_FILENO, $0.baseAddress!.advanced(by: offset), remaining) }
+            let count = bytes.withUnsafeMutableBytes {
+                read(STDIN_FILENO, $0.baseAddress!.advanced(by: offset), remaining)
+            }
             guard count > 0 else { exit(67) }
             offset += count
         }
@@ -63,8 +77,11 @@ case "descendant", "orphan":
         signal(SIGTERM, SIG_IGN)
     }
     var child: pid_t = 0
-    var pointers = [strdup(CommandLine.arguments[0]), strdup(arguments[0] == "descendant" ? "descendant-child" : "orphan-child"), strdup(arguments[1]), nil]
-    defer { pointers.forEach { free($0) } }
+    var pointers = [
+        strdup(CommandLine.arguments[0]), strdup(arguments[0] == "descendant" ? "descendant-child" : "orphan-child"),
+        strdup(arguments[1]), nil,
+    ]
+    defer { for pointer in pointers { free(pointer) } }
     var environment: [UnsafeMutablePointer<CChar>?] = [nil]
     guard posix_spawn(&child, CommandLine.arguments[0], nil, nil, &pointers, &environment) == 0 else { exit(1) }
     while true {
@@ -73,7 +90,8 @@ case "descendant", "orphan":
 case "descendant-child", "orphan-child":
     signal(SIGTERM, SIG_IGN)
     if arguments[0] == "orphan-child" {
-        close(STDOUT_FILENO); close(STDERR_FILENO)
+        close(STDOUT_FILENO)
+        close(STDERR_FILENO)
     }
     try Data("\(getpid())".utf8).write(to: URL(fileURLWithPath: arguments[1]))
     while true {

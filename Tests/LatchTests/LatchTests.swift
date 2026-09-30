@@ -1,7 +1,8 @@
 import Darwin
 import Foundation
-@testable import Latch
 import Testing
+
+@testable import Latch
 
 @Test func `parses command without changing arguments`() throws {
     let options = try Options(arguments: ["run", "--shared", "--timeout", "0.25", "--", "printf", "a b", "", "--help"])
@@ -24,10 +25,12 @@ func `rejects invalid arguments`(arguments: [String]) {
 }
 
 @Test func `explicit path overrides environment`() throws {
-    #expect(try Options(arguments: ["wait", "--file", "explicit.lock"])
-        .resolvedPath(environment: ["LATCH_FILE": "environment.lock"]) == "explicit.lock")
-    #expect(try Options(arguments: ["wait"])
-        .resolvedPath(environment: ["LATCH_FILE": "environment.lock"]) == "environment.lock")
+    #expect(
+        try Options(arguments: ["wait", "--file", "explicit.lock"])
+            .resolvedPath(environment: ["LATCH_FILE": "environment.lock"]) == "explicit.lock")
+    #expect(
+        try Options(arguments: ["wait"])
+            .resolvedPath(environment: ["LATCH_FILE": "environment.lock"]) == "environment.lock")
     #expect(throws: LatchError.self) {
         try Options(arguments: ["wait"]).resolvedPath(environment: ["LATCH_FILE": ""])
     }
@@ -107,7 +110,7 @@ func `rejects invalid arguments`(arguments: [String]) {
     let fixture = try Fixture()
     var holder: FileLatch? = try FileLatch(path: fixture.lockPath)
     try holder?.acquire(shared: false, timeout: 0)
-    let waiters = try (0 ..< 4).map { _ in try fixture.launch(["wait"]) }
+    let waiters = try (0..<4).map { _ in try fixture.launch(["wait"]) }
     Thread.sleep(forTimeInterval: 0.1)
     let allParked = waiters.allSatisfy(\.process.isRunning)
     #expect(allParked)
@@ -123,7 +126,9 @@ func `rejects invalid arguments`(arguments: [String]) {
     let fixture = try Fixture()
     let first = try fixture.launch(["run", "--", "/bin/sleep", "30"])
     try fixture.waitUntilHeld()
-    let second = try fixture.launch(["run", "--", "/usr/bin/touch", fixture.directory.appendingPathComponent("ran").path])
+    let second = try fixture.launch([
+        "run", "--", "/usr/bin/touch", fixture.directory.appendingPathComponent("ran").path,
+    ])
     Thread.sleep(forTimeInterval: 0.1)
     #expect(second.process.isRunning)
     #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("ran").path))
@@ -180,7 +185,7 @@ final class Fixture {
         directory = root.appendingPathComponent(".build/latch-tests/\(UUID().uuidString)")
         var candidate = Bundle(for: Fixture.self).bundleURL
         var found: URL?
-        for _ in 0 ..< 6 {
+        for _ in 0..<6 {
             let binary = candidate.appendingPathComponent("latch")
             if FileManager.default.isExecutableFile(atPath: binary.path) {
                 found = binary
@@ -194,22 +199,22 @@ final class Fixture {
 
     deinit {
         if let data = try? Data(contentsOf: URL(fileURLWithPath: lockPath + ".queue/state.json")),
-           let state = try? JSONDecoder().decode(SchedulerState.self, from: data)
+            let state = try? JSONDecoder().decode(SchedulerState.self, from: data)
         {
             for task in state.tasks where state.jobs?.contains(where: { $0.id == task.id }) == true && task.pid > 1 {
                 if let lease = try? FileLatch(path: lockPath + ".queue/" + task.id + ".lease") {
-                    do { try lease.acquire(shared: false, timeout: 0) }
-                    catch let error as LatchError where error.exitCode == 75 { _ = kill(-task.pid, SIGKILL) }
-                    catch {}
+                    do { try lease.acquire(shared: false, timeout: 0) } catch let error as LatchError
+                        where error.exitCode == 75
+                    { _ = kill(-task.pid, SIGKILL) } catch {}
                 }
             }
             for job in state.jobs ?? [] where !job.complete {
                 if let pid = job.supervisorPID, pid > 1,
-                   let lease = try? FileLatch(path: lockPath + ".queue/jobs/" + job.id + ".supervisor.lock")
+                    let lease = try? FileLatch(path: lockPath + ".queue/jobs/" + job.id + ".supervisor.lock")
                 {
-                    do { try lease.acquire(shared: false, timeout: 0) }
-                    catch let error as LatchError where error.exitCode == 75 { _ = kill(-pid, SIGKILL) }
-                    catch {}
+                    do { try lease.acquire(shared: false, timeout: 0) } catch let error as LatchError
+                        where error.exitCode == 75
+                    { _ = kill(-pid, SIGKILL) } catch {}
                 }
             }
         }

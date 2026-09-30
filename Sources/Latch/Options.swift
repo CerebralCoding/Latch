@@ -50,7 +50,9 @@ struct Options {
                 self.command = .help
                 return
             case "--file":
-                guard ![.sensors, .update, .rollback].contains(command), file == nil, index < arguments.count, !arguments[index].isEmpty else {
+                guard ![.sensors, .update, .rollback].contains(command), file == nil, index < arguments.count,
+                    !arguments[index].isEmpty
+                else {
                     throw LatchError("--file requires one nonempty path")
                 }
                 file = arguments[index]
@@ -61,16 +63,20 @@ struct Options {
                 }
                 shared = true
             case "--timeout":
-                guard [.run, .wait, .schedule, .guard, .update, .rollback].contains(command), timeout == nil, index < arguments.count,
-                      let value = Double(arguments[index]), value.isFinite,
-                      value >= 0, value <= Double(Int32.max)
+                guard [.run, .wait, .schedule, .guard, .update, .rollback].contains(command), timeout == nil,
+                    index < arguments.count,
+                    let value = Double(arguments[index]), value.isFinite,
+                    value >= 0, value <= Double(Int32.max)
                 else {
-                    throw LatchError("--timeout requires seconds between 0 and \(Int32.max); cannot combine with --no-wait")
+                    throw LatchError(
+                        "--timeout requires seconds between 0 and \(Int32.max); cannot combine with --no-wait")
                 }
                 timeout = value
                 index += 1
             case "--restart-service":
-                guard [.update, .rollback].contains(command) else { throw LatchError("--restart-service is only valid for update or rollback") }
+                guard [.update, .rollback].contains(command) else {
+                    throw LatchError("--restart-service is only valid for update or rollback")
+                }
                 restartService = true
             case "--no-wait":
                 guard [.run, .wait, .schedule, .guard].contains(command), timeout == nil else {
@@ -85,10 +91,14 @@ struct Options {
                 index += 1
                 switch argument {
                 case "--name":
-                    guard !value.isEmpty, value.count <= 128 else { throw LatchError("task name must contain 1–128 characters") }
+                    guard !value.isEmpty, value.count <= 128 else {
+                        throw LatchError("task name must contain 1–128 characters")
+                    }
                     taskName = value
                 case "--mode":
-                    guard let mode = TaskRequirements.Mode(rawValue: value) else { throw LatchError("mode must be isolated or batch") }
+                    guard let mode = TaskRequirements.Mode(rawValue: value) else {
+                        throw LatchError("mode must be isolated or batch")
+                    }
                     requirements.mode = mode
                 case "--cpu":
                     guard let count = Int(value) else { throw LatchError("--cpu requires an integer core count") }
@@ -109,11 +119,13 @@ struct Options {
                     requirements.bandwidth = true
                 }
             case "--standalone":
-                guard [.schedule, .guard].contains(command) else { throw LatchError("--standalone is only valid for schedule or guard") }
+                guard [.schedule, .guard].contains(command) else {
+                    throw LatchError("--standalone is only valid for schedule or guard")
+                }
                 standalone = true
             case "--max-cpu-temp", "--max-gpu-temp", "--cooldown":
                 guard [.schedule, .guard].contains(command), index < arguments.count,
-                      let value = Double(arguments[index]), value.isFinite
+                    let value = Double(arguments[index]), value.isFinite
                 else {
                     throw LatchError("\(argument) requires a finite number for schedule or guard")
                 }
@@ -128,7 +140,9 @@ struct Options {
                     requirements.temperatureGuard?.cooldown = value
                 }
             case "--":
-                guard command == .run || command == .schedule else { throw LatchError("only run and schedule accept a command") }
+                guard command == .run || command == .schedule else {
+                    throw LatchError("only run and schedule accept a command")
+                }
                 childArguments = Array(arguments[index...])
                 index = arguments.count
             default:
@@ -161,112 +175,112 @@ struct Options {
     }
 
     static let usage = """
-    Usage:
-      latch run [--file PATH] [--shared] [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
-      latch wait [--file PATH] [--timeout SECONDS | --no-wait]
-      latch status [--file PATH]
-      latch schedule [--file PATH] [--name NAME] [--mode isolated|batch]
-                     [--cpu CORES] [--memory-mib MIB] [--gpu] [--io] [--bandwidth]
-                     [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
-                     [--standalone]
-                     [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
-      latch guard [--file PATH] [--name NAME] [--mode isolated|batch]
-                  [--cpu CORES] [--memory-mib MIB]
-                  [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
-                  [--standalone] [--timeout SECONDS | --no-wait]
-      latch service install|start|stop|status|uninstall|run [--file PATH]
-      latch tasks [--file PATH]
-      latch view [--file PATH]
-      latch sensors
-      latch mcp [--file PATH]
-      latch update|rollback [--timeout SECONDS] [--restart-service]
+        Usage:
+          latch run [--file PATH] [--shared] [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
+          latch wait [--file PATH] [--timeout SECONDS | --no-wait]
+          latch status [--file PATH]
+          latch schedule [--file PATH] [--name NAME] [--mode isolated|batch]
+                         [--cpu CORES] [--memory-mib MIB] [--gpu] [--io] [--bandwidth]
+                         [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
+                         [--standalone]
+                         [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
+          latch guard [--file PATH] [--name NAME] [--mode isolated|batch]
+                      [--cpu CORES] [--memory-mib MIB]
+                      [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
+                      [--standalone] [--timeout SECONDS | --no-wait]
+          latch service install|start|stop|status|uninstall|run [--file PATH]
+          latch tasks [--file PATH]
+          latch view [--file PATH]
+          latch sensors
+          latch mcp [--file PATH]
+          latch update|rollback [--timeout SECONDS] [--restart-service]
 
-    mcp       Serve agent tools over newline-delimited JSON-RPC on stdin/stdout.
-              Uses the existing service. No installation or lifecycle changes.
-    update    Run from the newly built binary to drain work and atomically update
-              the installed executable, retaining the previous binary for rollback.
-              Restarts a loaded service only when its revision differs or when
-              --restart-service is explicit. A stopped service stays stopped.
-    rollback  Drain and restore the previous installed binary. Both commands use
-              the installed service's latch path. Drain timeout defaults to 600s.
-              Existing MCP hosts retain results; reconnect them before new work.
-    schedule  Queue a named task until reservations and native sensors allow it.
-              Defaults: isolated, 1 CPU core, 512 MiB. Batch tasks may overlap
-              within CPU/memory budgets; GPU, I/O, and bandwidth are exclusive
-              resources when requested. Declare the command's peak requirements.
-              FIFO admission prevents new work overtaking a waiting measurement.
-              Requires the service unless --standalone is explicit.
-    guard     Queue a checkpoint, print an admitted JSON snapshot, then release.
-              It does not protect subsequent work; prefer schedule for commands.
-    service   install copies this binary and starts a per-user login LaunchAgent.
-              start/stop control the installed service; status prints JSON.
-              run serves in the foreground; uninstall retains queue data/logs.
-    tasks     JSON snapshot of queued/running tasks, PIDs, reservations, sensors,
-              and waiting reasons. Completed/crashed tasks are pruned by leases.
-    view      JSON planning snapshot: service, latch holders, FIFO order, current
-              blocking reasons, cooldowns, resource headroom and sensor freshness.
-              Uses cached readings; it does not sample or reserve resources.
-    sensors   Sample native macOS CPU, GPU, ANE, memory, thermal, and disk sensors
-              plus CPU/GPU temperatures, and print JSON. No root access needed.
+        mcp       Serve agent tools over newline-delimited JSON-RPC on stdin/stdout.
+                  Uses the existing service. No installation or lifecycle changes.
+        update    Run from the newly built binary to drain work and atomically update
+                  the installed executable, retaining the previous binary for rollback.
+                  Restarts a loaded service only when its revision differs or when
+                  --restart-service is explicit. A stopped service stays stopped.
+        rollback  Drain and restore the previous installed binary. Both commands use
+                  the installed service's latch path. Drain timeout defaults to 600s.
+                  Existing MCP hosts retain results; reconnect them before new work.
+        schedule  Queue a named task until reservations and native sensors allow it.
+                  Defaults: isolated, 1 CPU core, 512 MiB. Batch tasks may overlap
+                  within CPU/memory budgets; GPU, I/O, and bandwidth are exclusive
+                  resources when requested. Declare the command's peak requirements.
+                  FIFO admission prevents new work overtaking a waiting measurement.
+                  Requires the service unless --standalone is explicit.
+        guard     Queue a checkpoint, print an admitted JSON snapshot, then release.
+                  It does not protect subsequent work; prefer schedule for commands.
+        service   install copies this binary and starts a per-user login LaunchAgent.
+                  start/stop control the installed service; status prints JSON.
+                  run serves in the foreground; uninstall retains queue data/logs.
+        tasks     JSON snapshot of queued/running tasks, PIDs, reservations, sensors,
+                  and waiting reasons. Completed/crashed tasks are pruned by leases.
+        view      JSON planning snapshot: service, latch holders, FIFO order, current
+                  blocking reasons, cooldowns, resource headroom and sensor freshness.
+                  Uses cached readings; it does not sample or reserve resources.
+        sensors   Sample native macOS CPU, GPU, ANE, memory, thermal, and disk sensors
+                  plus CPU/GPU temperatures, and print JSON. No root access needed.
 
-    Temperature defaults for schedule/guard: hottest CPU and GPU <=55 C for
-    5 consecutive seconds. --cooldown accepts 0–3600 seconds; limits 1–125 C.
-    Missing temperatures block admission. Cooldowns reset when running tasks
-    finish, sensors fail/go stale, or the service restarts. Guards only gate
-    starts; admitted tasks run uninterrupted. Limits are workflow preferences,
-    not hardware safety limits.
+        Temperature defaults for schedule/guard: hottest CPU and GPU <=55 C for
+        5 consecutive seconds. --cooldown accepts 0–3600 seconds; limits 1–125 C.
+        Missing temperatures block admission. Cooldowns reset when running tasks
+        finish, sensors fail/go stale, or the service restarts. Guards only gate
+        starts; admitted tasks run uninterrupted. Limits are workflow preferences,
+        not hardware safety limits.
 
-    Isolated tasks require no running Latch tasks and two seconds of quiet:
-    CPU <=5% overall / <=25% busiest core, GPU <=2%, ANE <=0.1 W,
-    disk <=1 MiB/s, normal memory pressure, and nominal thermal state.
-    All scheduled tasks leave 10% physical memory headroom. Batch admission also
-    requires CPU load <=80%; GPU/I/O requests require those resources to be idle.
-    Unknown/stale required sensors block admission. GPU/ANE use private IOReport
-    APIs and may be unavailable on some Macs. Latch requires macOS 26 or newer.
+        Isolated tasks require no running Latch tasks and two seconds of quiet:
+        CPU <=5% overall / <=25% busiest core, GPU <=2%, ANE <=0.1 W,
+        disk <=1 MiB/s, normal memory pressure, and nominal thermal state.
+        All scheduled tasks leave 10% physical memory headroom. Batch admission also
+        requires CPU load <=80%; GPU/I/O requests require those resources to be idle.
+        Unknown/stale required sensors block admission. GPU/ANE use private IOReport
+        APIs and may be unavailable on some Macs. Latch requires macOS 26 or newer.
 
-    Scheduler state lives beside the latch in PATH.queue (private to this user).
-    Queue changes/process exits wake waiters; sensor eligibility is rechecked at
-    most once per second by the service while work is queued. Sampling stops behind
-    an exclusive latch. Sensors observe background load, but cannot prevent an
-    unrelated process from starting later. Use isolated mode for measurements.
-    A schedule timeout bounds admission, not command runtime. --no-wait uses
-    cached service readings and never waits for a cooldown/quiet window.
-    --standalone lets the queue head collect readings without a service.
+        Scheduler state lives beside the latch in PATH.queue (private to this user).
+        Queue changes/process exits wake waiters; sensor eligibility is rechecked at
+        most once per second by the service while work is queued. Sampling stops behind
+        an exclusive latch. Sensors observe background load, but cannot prevent an
+        unrelated process from starting later. Use isolated mode for measurements.
+        A schedule timeout bounds admission, not command runtime. --no-wait uses
+        cached service readings and never waits for a cooldown/quiet window.
+        --standalone lets the queue head collect readings without a service.
 
-    run     Hold an exclusive latch for a command. --shared lets cooperating
-            background work overlap while excluding exclusive work.
-    wait    Wait until no exclusive holder remains, then exit. This is only a
-            checkpoint; use run to protect the full duration of work.
-    status  Print free (exit 0) or held (exit 75), including shared holders.
-            Status is a snapshot, not a reservation.
+        run     Hold an exclusive latch for a command. --shared lets cooperating
+                background work overlap while excluding exclusive work.
+        wait    Wait until no exclusive holder remains, then exit. This is only a
+                checkpoint; use run to protect the full duration of work.
+        status  Print free (exit 0) or held (exit 75), including shared holders.
+                Status is a snapshot, not a reservation.
 
-    The default is to block without polling. --no-wait fails immediately;
-    --timeout bounds the wait in seconds (fractional values allowed).
-    File: --file, then LATCH_FILE, then ~/.local/state/latch/default.lock.
-    Explicit paths require an existing parent directory. All agents must use
-    the same file on a local filesystem. Never delete or replace a latch file.
+        The default is to block without polling. --no-wait fails immediately;
+        --timeout bounds the wait in seconds (fractional values allowed).
+        File: --file, then LATCH_FILE, then ~/.local/state/latch/default.lock.
+        Explicit paths require an existing parent directory. All agents must use
+        the same file on a local filesystem. Never delete or replace a latch file.
 
-    run/schedule replace themselves with COMMAND, preserving arguments, streams, signals,
-    and exit status. The lock descriptor is inherited by the command and its
-    children; it releases when the last copy closes, including on process exit.
-    Commands that close inherited descriptors can release the latch early.
-    Coordination is advisory; every participant must cooperate. Waiters are
-    not guaranteed FIFO ordering for run/wait. No external dependencies.
+        run/schedule replace themselves with COMMAND, preserving arguments, streams, signals,
+        and exit status. The lock descriptor is inherited by the command and its
+        children; it releases when the last copy closes, including on process exit.
+        Commands that close inherited descriptors can release the latch early.
+        Coordination is advisory; every participant must cooperate. Waiters are
+        not guaranteed FIFO ordering for run/wait. No external dependencies.
 
-    Exit codes: 64 usage, 69 service unavailable, 71 allocation failure,
-                74 I/O, 75 busy/timeout, 126 cannot execute, 127 command not found.
-                run/schedule otherwise return COMMAND's status.
+        Exit codes: 64 usage, 69 service unavailable, 71 allocation failure,
+                    74 I/O, 75 busy/timeout, 126 cannot execute, 127 command not found.
+                    run/schedule otherwise return COMMAND's status.
 
-    Examples:
-      latch service install
-      latch service status
-      latch run -- swift test
-      latch run --shared -- swift build
-      latch run --timeout 30 -- ./benchmark
-      latch wait --no-wait
-      latch schedule --name benchmark -- ./benchmark
-      latch schedule --mode batch --cpu 4 --memory-mib 4096 -- swift build -j 4
-      latch schedule --mode batch --gpu --memory-mib 8192 -- ./inference
-      latch tasks
-    """
+        Examples:
+          latch service install
+          latch service status
+          latch run -- swift test
+          latch run --shared -- swift build
+          latch run --timeout 30 -- ./benchmark
+          latch wait --no-wait
+          latch schedule --name benchmark -- ./benchmark
+          latch schedule --mode batch --cpu 4 --memory-mib 4096 -- swift build -j 4
+          latch schedule --mode batch --gpu --memory-mib 8192 -- ./inference
+          latch tasks
+        """
 }

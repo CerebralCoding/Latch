@@ -8,6 +8,7 @@ struct MCPWorkerRequest: Codable {
     var statusPath: String
     var updateDescriptor: Int32
     var ticketID: String
+    var checkpointDescriptors: [Int32]?
 }
 
 struct MCPWorkerStatus: Codable {
@@ -16,6 +17,9 @@ struct MCPWorkerStatus: Codable {
     var error: String?
     var code: Int32?
     var plan: TaskPlan?
+    var admittedAt: Double?
+    var admissionSensors: SensorSnapshot?
+    var waitingSeconds: Double?
 }
 
 enum MCPWorker {
@@ -26,29 +30,57 @@ enum MCPWorker {
             for number in [SIGTERM, SIGINT, SIGPIPE] {
                 signal(number, SIG_DFL)
             }
-            let decoded = try JSONDecoder().decode(MCPWorkerRequest.self, from: Data(contentsOf: URL(fileURLWithPath: requestPath)))
+            let decoded = try JSONDecoder().decode(
+                MCPWorkerRequest.self, from: Data(contentsOf: URL(fileURLWithPath: requestPath)))
             request = decoded
             if decoded.submission.input == "terminal" {
                 guard setsid() >= 0, ioctl(STDIN_FILENO, TIOCSCTTY, 0) == 0,
-                      tcsetpgrp(STDIN_FILENO, getpid()) == 0 else { throw LatchError.system("attach controlling terminal") }
+                    tcsetpgrp(STDIN_FILENO, getpid()) == 0
+                else { throw LatchError.system("attach controlling terminal") }
             } else {
-                guard setpgid(0, 0) == 0 || getpgrp() == getpid() else { throw LatchError.system("create workload process group") }
+                guard setpgid(0, 0) == 0 || getpgrp() == getpid() else {
+                    throw LatchError.system("create workload process group")
+                }
             }
             guard decoded.updateDescriptor > STDERR_FILENO, fcntl(decoded.updateDescriptor, F_GETFD) >= 0 else {
                 throw LatchError("missing inherited update permit", exitCode: 74)
             }
-            guard fcntl(decoded.updateDescriptor, F_SETFD, 0) == 0 else { throw LatchError.system("inherit update permit") }
+            guard fcntl(decoded.updateDescriptor, F_SETFD, 0) == 0 else {
+                throw LatchError.system("inherit update permit")
+            }
             let scheduler = try Scheduler(path: decoded.latchPath)
             let submission = decoded.submission
-            let plan = TaskPlanner.plan(executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
+            let plan = TaskPlanner.plan(
+                executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
             status.plan = plan
             try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
-            let reservation = try scheduler.reserve(name: submission.name, arguments: [submission.executable] + plan.arguments,
-                                                    requirements: plan.requirements, timeout: nil, useService: true, supervisorPID: decoded.parentPID, inheritedUpdatePermit: true, ticketID: decoded.ticketID)
+            if let descriptors = decoded.checkpointDescriptors {
+                guard descriptors.count == 3, descriptors.allSatisfy({ $0 > 2 && fcntl($0, F_GETFD) >= 0 }),
+                    getppid() == decoded.parentPID
+                else { throw LatchError("checkpoint supervisor unavailable", exitCode: 74) }
+                for fd in descriptors { _ = fcntl(fd, F_SETFD, 0) }
+                setenv("LATCH_CHECKPOINT_FD", String(descriptors[0]), 1)
+                status.admitted = true
+                status.taskID = decoded.ticketID
+                try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
+                try Latch.execute([submission.executable] + plan.arguments)
+                return 0
+            }
+            unsetenv("LATCH_CHECKPOINT_FD")
+            let queued =
+                try scheduler.snapshot().tasks.first { $0.id == decoded.ticketID }?.queuedUptime
+                ?? ProcessInfo.processInfo.systemUptime
+            let reservation = try scheduler.reserve(
+                name: submission.name, arguments: [submission.executable] + plan.arguments,
+                requirements: plan.requirements, timeout: nil, useService: true, supervisorPID: decoded.parentPID,
+                inheritedUpdatePermit: true, ticketID: decoded.ticketID)
             defer { try? scheduler.withdraw(reservation.id) }
             try withExtendedLifetime(reservation) {
                 guard getppid() == decoded.parentPID else { throw LatchError("MCP supervisor exited", exitCode: 69) }
                 status.admitted = true
+                status.admittedAt = ProcessInfo.processInfo.systemUptime
+                status.waitingSeconds = max(0, status.admittedAt! - queued)
+                status.admissionSensors = try scheduler.snapshot().sensors
                 status.taskID = reservation.id
                 try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
                 try reservation.inheritAcrossExec()
@@ -91,19 +123,28 @@ final class MCPExecution {
     var killSent = false
     var exitedAt: Double?
     var complete = false
+    let checkpoints: CheckpointCoordinator?
 
-    init(id: String, submission: MCPSubmission, directory: URL, path: String, executable: URL, updateDescriptor: Int32) throws {
+    init(
+        id: String, submission: MCPSubmission, directory: URL, path: String, executable: URL, updateDescriptor: Int32,
+        checkpoints: CheckpointCoordinator? = nil
+    ) throws {
         self.id = id
         self.submission = submission
+        self.checkpoints = checkpoints
         statusURL = directory.appendingPathComponent(id + ".status.json")
         requestURL = directory.appendingPathComponent(id + ".request.json")
-        let request = MCPWorkerRequest(submission: submission, latchPath: path, parentPID: getpid(), statusPath: statusURL.path, updateDescriptor: updateDescriptor, ticketID: id)
+        let inherited = checkpoints.map { [$0.clientChannel, $0.gate.descriptor, $0.lease.descriptor] }
+        let request = MCPWorkerRequest(
+            submission: submission, latchPath: path, parentPID: getpid(), statusPath: statusURL.path,
+            updateDescriptor: updateDescriptor, ticketID: id, checkpointDescriptors: inherited)
         try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
         try Self.check(posix_spawn_file_actions_init(&actions))
         defer { posix_spawn_file_actions_destroy(&actions) }
         try Self.check(posix_spawn_file_actions_addinherit_np(&actions, updateDescriptor))
+        for fd in inherited ?? [] { try Self.check(posix_spawn_file_actions_addinherit_np(&actions, fd)) }
         try Self.check(posix_spawnattr_init(&attributes))
         defer { posix_spawnattr_destroy(&attributes) }
         if submission.input == "terminal" {
@@ -119,12 +160,15 @@ final class MCPExecution {
                 inputPipe = pipe
                 inputOpen = true
                 _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETFL, O_NONBLOCK)
-                try Self.check(posix_spawn_file_actions_adddup2(&actions, pipe.fileHandleForReading.fileDescriptor, STDIN_FILENO))
+                try Self.check(
+                    posix_spawn_file_actions_adddup2(&actions, pipe.fileHandleForReading.fileDescriptor, STDIN_FILENO))
             } else {
                 try Self.check(posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0))
             }
-            try Self.check(posix_spawn_file_actions_adddup2(&actions, stdout.fileHandleForWriting.fileDescriptor, STDOUT_FILENO))
-            try Self.check(posix_spawn_file_actions_adddup2(&actions, stderr.fileHandleForWriting.fileDescriptor, STDERR_FILENO))
+            try Self.check(
+                posix_spawn_file_actions_adddup2(&actions, stdout.fileHandleForWriting.fileDescriptor, STDOUT_FILENO))
+            try Self.check(
+                posix_spawn_file_actions_adddup2(&actions, stderr.fileHandleForWriting.fileDescriptor, STDERR_FILENO))
         }
         try Self.check(posix_spawn_file_actions_addchdir(&actions, submission.workingDirectory))
         try Self.check(posix_spawnattr_setpgroup(&attributes, 0))
@@ -136,16 +180,20 @@ final class MCPExecution {
         try Self.check(posix_spawnattr_setsigdefault(&attributes, &defaults))
         try Self.check(posix_spawnattr_setsigmask(&attributes, &mask))
         let groupFlag = submission.input == "terminal" ? 0 : POSIX_SPAWN_SETPGROUP
-        try Self.check(posix_spawnattr_setflags(&attributes, Int16(groupFlag | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)))
+        try Self.check(
+            posix_spawnattr_setflags(
+                &attributes,
+                Int16(groupFlag | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)))
         let arguments = [executable.path, "__mcp_worker", requestURL.path].map { strdup($0) }
-        defer { arguments.forEach { free($0) } }
+        defer { for pointer in arguments { free(pointer) } }
         guard arguments.allSatisfy({ $0 != nil }) else { throw LatchError("out of memory", exitCode: 71) }
         var pointers = arguments + [nil]
         let inheritedEnvironment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") }
-        defer { inheritedEnvironment.forEach { free($0) } }
+        defer { for pointer in inheritedEnvironment { free(pointer) } }
         guard inheritedEnvironment.allSatisfy({ $0 != nil }) else { throw LatchError("out of memory", exitCode: 71) }
         var environment = inheritedEnvironment + [nil]
         try Self.check(posix_spawn(&pid, executable.path, &actions, &attributes, &pointers, &environment))
+        try checkpoints?.spawned(pid)
         try? terminal?.slave.close()
         try? inputPipe?.fileHandleForReading.close()
         try? stdout.fileHandleForWriting.close()
@@ -166,7 +214,9 @@ final class MCPExecution {
     }
 
     private static func check(_ result: Int32) throws {
-        guard result == 0 else { throw LatchError("spawn MCP worker: \(String(cString: strerror(result)))", exitCode: 74) }
+        guard result == 0 else {
+            throw LatchError("spawn MCP worker: \(String(cString: strerror(result)))", exitCode: 74)
+        }
     }
 
     var descriptors: [Int32] {
@@ -177,7 +227,7 @@ final class MCPExecution {
         let isOutput = stdoutOpen && descriptor == outputDescriptor
         var buffer = [UInt8](repeating: 0, count: 8192)
         // Bound each turn so a noisy command cannot starve protocol input or cancellation.
-        for _ in 0 ..< 16 {
+        for _ in 0..<16 {
             let count = read(descriptor, &buffer, buffer.count)
             if count > 0 {
                 liveOutput.append(Data(buffer.prefix(count)), output: isOutput)
@@ -194,7 +244,8 @@ final class MCPExecution {
                 if isOutput {
                     closeOutput()
                 } else {
-                    stderrOpen = false; try? stderr.fileHandleForReading.close()
+                    stderrOpen = false
+                    try? stderr.fileHandleForReading.close()
                 }
                 break
             } else {
@@ -226,10 +277,13 @@ final class MCPExecution {
             }
             if let exitedAt, now - exitedAt >= 2 {
                 if stdoutOpen {
-                    stdoutTruncated = true; closeOutput()
+                    stdoutTruncated = true
+                    closeOutput()
                 }
                 if stderrOpen {
-                    stderrTruncated = true; stderrOpen = false; try? stderr.fileHandleForReading.close()
+                    stderrTruncated = true
+                    stderrOpen = false
+                    try? stderr.fileHandleForReading.close()
                 }
             }
             if descriptors.isEmpty, cancelAt == nil || killSent {
@@ -254,11 +308,16 @@ final class MCPExecution {
     }
 
     func result(includeOutput: Bool) throws -> MCPValue {
-        let status = (try? Data(contentsOf: statusURL)).flatMap { try? JSONDecoder().decode(MCPWorkerStatus.self, from: $0) }
+        let status = (try? Data(contentsOf: statusURL)).flatMap {
+            try? JSONDecoder().decode(MCPWorkerStatus.self, from: $0)
+        }
         var value: [String: MCPValue] = [
             "jobID": .string(id), "requestKey": .string(submission.requestKey), "name": .string(submission.name),
             "pid": .number(Double(pid)), "complete": .bool(complete),
-            "state": .string(complete ? (cancelAt == nil ? "completed" : "cancelled") : (cancelAt == nil ? (status?.admitted == true ? "running" : "queued") : "cancelling")),
+            "state": .string(
+                complete
+                    ? (cancelAt == nil ? "completed" : "cancelled")
+                    : (cancelAt == nil ? (status?.admitted == true ? "running" : "queued") : "cancelling")),
         ]
         if let taskID = status?.taskID {
             value["taskID"] = .string(taskID)
@@ -266,8 +325,23 @@ final class MCPExecution {
         if let plan = status?.plan {
             value["plan"] = try MCPValue.encoded(plan)
         }
+        if let waiting = status?.waitingSeconds { value["waitingSeconds"] = .number(waiting) }
+        if let sensors = status?.admissionSensors { value["admissionSensors"] = try .encoded(sensors) }
+        if let started = status?.admittedAt, let exitedAt {
+            value["executionSeconds"] = .number(max(0, exitedAt - started))
+        }
+        if let checkpoints {
+            if !complete, cancelAt == nil { value["state"] = .string(checkpoints.stage) }
+            value["completedIterations"] = .number(Double(checkpoints.completedIterations))
+            value["iterations"] = .array(checkpoints.iterations)
+            value["iterationsTruncated"] = .bool(checkpoints.completedIterations > checkpoints.iterations.count)
+            value["progressMessage"] = .string(
+                "\(value["state"]?.string ?? checkpoints.stage): iteration \(checkpoints.iteration)")
+        }
         if complete {
-            let phase = status?.error != nil || status?.admitted != true ? (status?.admitted == true ? "execution" : "admission") : "command"
+            let phase =
+                status?.error != nil || status?.admitted != true
+                ? (status?.admitted == true ? "execution" : "admission") : "command"
             let signal = terminationStatus & 0x7F
             let code = signal == 0 ? (terminationStatus >> 8) & 0xFF : signal
             value["exitCode"] = .number(Double(code))
@@ -276,6 +350,15 @@ final class MCPExecution {
             value["succeeded"] = .bool(cancelAt == nil && phase == "command" && signal == 0 && code == 0)
             if let error = status?.error {
                 value["error"] = .string(error)
+            }
+            if let checkpoints,
+                let error = checkpoints.error
+                    ?? (cancelAt != nil || (checkpoints.stage == "parked" && checkpoints.completedIterations > 0)
+                        ? nil : "Checkpoint process exited without completing its protocol")
+            {
+                value["succeeded"] = false
+                value["error"] = .string(error)
+                value["phase"] = "checkpoint"
             }
         }
         if includeOutput {

@@ -22,11 +22,12 @@ final class DurableJobs {
     init(scheduler: Scheduler) throws {
         self.scheduler = scheduler
         directory = scheduler.directory.appendingPathComponent("jobs", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
         guard attributes[.type] as? FileAttributeType == .typeDirectory,
-              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid(),
-              (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700
+            (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid(),
+            (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700
         else {
             throw LatchError("job directory must be private and owned by this user", exitCode: 74)
         }
@@ -44,11 +45,13 @@ final class DurableJobs {
         try scheduler.transaction { state in
             var records = state.jobs ?? []
             if let existing = records.first(where: { $0.submission.requestKey == submission.requestKey }) {
-                guard existing.submission == submission else { throw MCPFailure.invalid("requestKey already belongs to a different submission") }
+                guard existing.submission == submission else {
+                    throw MCPFailure.invalid("requestKey already belongs to a different submission")
+                }
                 return existing
             }
             guard state.tasks.count < Self.globalOutstandingLimit,
-                  records.filter({ !$0.complete }).count < Self.globalOutstandingLimit
+                records.filter({ !$0.complete }).count < Self.globalOutstandingLimit
             else {
                 throw LatchError("shared queue has reached its \(Self.globalOutstandingLimit)-job limit", exitCode: 75)
             }
@@ -56,18 +59,23 @@ final class DurableJobs {
                 throw LatchError("retained result limit reached; forget completed jobs", exitCode: 75)
             }
             let record = DurableJobRecord(id: UUID().uuidString, submission: submission)
-            let plan = TaskPlanner.plan(executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
+            let plan = TaskPlanner.plan(
+                executable: submission.executable, arguments: submission.arguments, measurement: submission.measurement)
             records.append(record)
             state.jobs = records
-            state.tasks.append(ScheduledTask(id: record.id, name: submission.name, pid: 0, arguments: [submission.executable] + plan.arguments,
-                                             requirements: plan.requirements))
+            state.tasks.append(
+                ScheduledTask(
+                    id: record.id, name: submission.name, pid: 0, arguments: [submission.executable] + plan.arguments,
+                    requirements: plan.requirements))
             return record
         }
     }
 
     func markTask(_ id: String) throws {
         try scheduler.transaction { state in
-            guard let index = state.jobs?.firstIndex(where: { $0.id == id }) else { throw MCPFailure.invalid("Unknown jobID") }
+            guard let index = state.jobs?.firstIndex(where: { $0.id == id }) else {
+                throw MCPFailure.invalid("Unknown jobID")
+            }
             state.jobs?[index].protocolTask = true
         }
     }
@@ -105,7 +113,10 @@ final class DurableJobs {
             guard let record = state.jobs?.first(where: { $0.id == id }) else { return }
             guard record.complete else { throw MCPFailure.invalid("Only completed jobs can be forgotten") }
             state.jobs?.removeAll { $0.id == id }
-            for suffix in ["result.json", "cancel", "status.json", "request.json", "supervisor.lock", "controls.json", "output.json"] {
+            for suffix in [
+                "result.json", "cancel", "status.json", "request.json", "supervisor.lock", "controls.json",
+                "output.json",
+            ] {
                 try? FileManager.default.removeItem(at: file(id, suffix))
             }
             let leaseURL = scheduler.directory.appendingPathComponent(id + ".lease")
@@ -123,26 +134,39 @@ final class DurableJobs {
 
     func launch(_ id: String, executable: URL) throws {
         let supervisor = try FileLatch(path: file(id, "supervisor.lock").path)
-        do { try supervisor.acquire(shared: false, timeout: 0) }
-        catch let error as LatchError where error.exitCode == 75 { return }
+        do { try supervisor.acquire(shared: false, timeout: 0) } catch let error as LatchError
+            where error.exitCode == 75
+        { return }
         // A lost supervisor never permits replay while its old worker or descendants retain the lease.
         let worker = try FileLatch(path: scheduler.directory.appendingPathComponent(id + ".lease").path)
-        do { try worker.acquire(shared: false, timeout: 0) }
-        catch let error as LatchError where error.exitCode == 75 { return }
+        do { try worker.acquire(shared: false, timeout: 0) } catch let error as LatchError where error.exitCode == 75 {
+            return
+        }
         worker.release()
         guard let record = try records().first(where: { $0.id == id }), !record.complete else { return }
         if let data = try? Data(contentsOf: file(id, "result.json")),
-           let result = try? JSONDecoder().decode(MCPValue.self, from: data), result["complete"] == true
+            let result = try? JSONDecoder().decode(MCPValue.self, from: data), result["complete"] == true
         {
             try publish(id, result: result)
             return
         }
         let task = try scheduler.snapshot().tasks.first { $0.id == id }
-        if task?.state == .running || record.state == "running" || record.state == "cancelling" || task == nil {
-            try publish(id, result: ["jobID": .string(id), "requestKey": .string(record.submission.requestKey), "name": .string(record.submission.name),
-                                     "state": "completed", "complete": true, "succeeded": false, "phase": "execution", "exitCode": 74,
-                                     "terminationReason": "unknown", "error": "Supervisor was lost; execution may have occurred. This job will not be replayed.",
-                                     "stdout": "", "stderr": "", "stdoutTruncated": true, "stderrTruncated": true])
+        if task?.state == .running || task?.residentMemoryMiB != nil || record.state == "running"
+            || record.state == "cancelling" || task == nil
+        {
+            var result =
+                (try? Data(contentsOf: file(id, "result.json")))
+                .flatMap { try? JSONDecoder().decode(MCPValue.self, from: $0).object } ?? [:]
+            result.merge([
+                "jobID": .string(id), "requestKey": .string(record.submission.requestKey),
+                "name": .string(record.submission.name),
+                "state": "completed", "complete": true, "succeeded": false, "phase": "execution", "exitCode": 74,
+                "terminationReason": "unknown",
+                "progressMessage": "completed: execution uncertain after supervisor loss",
+                "error": "Supervisor was lost; execution may have occurred. This job will not be replayed.",
+                "stdout": "", "stderr": "", "stdoutTruncated": true, "stderrTruncated": true,
+            ]) { _, terminal in terminal }
+            try publish(id, result: .object(result))
             return
         }
         let activity = try FileLatch(path: scheduler.directory.appendingPathComponent("activity.lock").path)
@@ -151,14 +175,18 @@ final class DurableJobs {
             var actions: posix_spawn_file_actions_t?
             var attributes: posix_spawnattr_t?
             func check(_ code: Int32) throws {
-                guard code == 0 else { throw LatchError("spawn supervisor: \(String(cString: strerror(code)))", exitCode: 74) }
+                guard code == 0 else {
+                    throw LatchError("spawn supervisor: \(String(cString: strerror(code)))", exitCode: 74)
+                }
             }
             try check(posix_spawn_file_actions_init(&actions))
             defer { posix_spawn_file_actions_destroy(&actions) }
             try check(posix_spawnattr_init(&attributes))
             defer { posix_spawnattr_destroy(&attributes) }
             for fd in [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO] {
-                try check(posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == STDIN_FILENO ? O_RDONLY : O_WRONLY, 0))
+                try check(
+                    posix_spawn_file_actions_addopen(
+                        &actions, fd, "/dev/null", fd == STDIN_FILENO ? O_RDONLY : O_WRONLY, 0))
             }
             for fd in [supervisor.descriptor, activity.descriptor] {
                 try check(posix_spawn_file_actions_addinherit_np(&actions, fd))
@@ -166,11 +194,18 @@ final class DurableJobs {
             try check(posix_spawnattr_setpgroup(&attributes, 0))
             var mask = sigset_t(0)
             try check(posix_spawnattr_setsigmask(&attributes, &mask))
-            try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)))
-            let strings = [executable.path, "__mcp_supervisor", scheduler.path, id, String(supervisor.descriptor), String(activity.descriptor)].map { strdup($0) }
+            try check(
+                posix_spawnattr_setflags(
+                    &attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT)))
+            let strings = [
+                executable.path, "__mcp_supervisor", scheduler.path, id, String(supervisor.descriptor),
+                String(activity.descriptor),
+            ].map { strdup($0) }
             let environment = record.environment.map { strdup("\($0.key)=\($0.value)") }
-            defer { (strings + environment).forEach { free($0) } }
-            guard (strings + environment).allSatisfy({ $0 != nil }) else { throw LatchError("out of memory", exitCode: 71) }
+            defer { for pointer in strings + environment { free(pointer) } }
+            guard (strings + environment).allSatisfy({ $0 != nil }) else {
+                throw LatchError("out of memory", exitCode: 71)
+            }
             var argv = strings + [nil]
             var env = environment + [nil]
             var pid: Int32 = 0
@@ -203,13 +238,17 @@ final class MCPJob {
         id = record.id
         submission = record.submission
         self.store = store
-        value = ["jobID": .string(record.id), "requestKey": .string(record.submission.requestKey), "name": .string(record.submission.name),
-                 "state": "queued", "complete": false]
+        value = [
+            "jobID": .string(record.id), "requestKey": .string(record.submission.requestKey),
+            "name": .string(record.submission.name),
+            "state": "queued", "complete": false,
+        ]
     }
 
     func update(now _: Double) throws {
-        do { value = try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(id, "result.json"))) }
-        catch CocoaError.fileReadNoSuchFile {}
+        do {
+            value = try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(id, "result.json")))
+        } catch CocoaError.fileReadNoSuchFile {}
         if let pid = record.supervisorPID {
             _ = waitpid(pid, nil, WNOHANG)
         }

@@ -1,7 +1,8 @@
 import Darwin
 import Foundation
-@testable import Latch
 import Testing
+
+@testable import Latch
 
 private final class MCPClient {
     let fixture: Fixture
@@ -39,7 +40,12 @@ private final class MCPClient {
 
     @discardableResult
     func handshake(version: String = "2025-11-25") throws -> MCPValue {
-        let response = try request("initialize", params: ["protocolVersion": .string(version), "capabilities": [:], "clientInfo": ["name": "swift-tests", "version": "1"]])
+        let response = try request(
+            "initialize",
+            params: [
+                "protocolVersion": .string(version), "capabilities": [:],
+                "clientInfo": ["name": "swift-tests", "version": "1"],
+            ])
         try send(["jsonrpc": "2.0", "method": "notifications/initialized"])
         return response
     }
@@ -77,7 +83,8 @@ private final class MCPClient {
             if received.contains(where: matching) {
                 continue
             }
-            var descriptor = pollfd(fd: child.stdout.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            var descriptor = pollfd(
+                fd: child.stdout.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
             if poll(&descriptor, 1, 100) > 0 {
                 var bytes = [UInt8](repeating: 0, count: 16384)
                 let count = read(descriptor.fd, &bytes, bytes.count)
@@ -89,15 +96,155 @@ private final class MCPClient {
     }
 }
 
+private func checkpointState(_ client: MCPClient, id: String, state: String, iteration: Int) throws -> MCPValue {
+    let deadline = ProcessInfo.processInfo.systemUptime + 5
+    while ProcessInfo.processInfo.systemUptime < deadline {
+        let result = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": .number(0.02)])[
+            "result"]?["structuredContent"]
+        if result?["state"] == .string(state), result?["completedIterations"] == .number(Double(iteration)) {
+            return result!
+        }
+        if result?["complete"] == true { throw LatchError("checkpoint ended early: \(String(describing: result))") }
+    }
+    throw LatchError("checkpoint did not reach \(state) iteration \(iteration)")
+}
+
+@Test func `checkpoints preserve process memory and rejoin FIFO with a fresh cooldown`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        var arguments = try #require(interactiveSubmission(fixture, mode: "checkpoints", input: "pipe").object)
+        arguments["checkpoints"] = true
+        let id = try jobID(client.tool("latch_submit", arguments: .object(arguments)))
+        try admission(scheduler)
+        _ = try checkpointState(client, id: id, state: "waiting", iteration: 0)
+        let gate = try FileLatch(path: fixture.lockPath)
+        try gate.acquire(shared: false, timeout: 0)
+        gate.release()
+        try admission(scheduler)
+        _ = try outputUntil(client, job: id, contains: "iteration:0")
+        let first = try checkpointState(client, id: id, state: "running", iteration: 0)
+        let other = try jobID(client.tool("latch_submit", arguments: submission(fixture)))
+        _ = try delivered(client, job: id, tool: "latch_input", arguments: ["text": "x"])
+        _ = try checkpointState(client, id: id, state: "waiting", iteration: 1)
+        let state = try scheduler.snapshot()
+        #expect(state.tasks.map(\.id) == [other, id])
+        #expect(state.tasks.last?.coolSince == nil)
+        #expect((state.tasks.last?.residentMemoryMiB ?? 0) > 0)
+        #expect(try SchedulerView(scheduler: scheduler).capacity.parkedResidentMemoryMiB > 0)
+        try admission(scheduler)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(other), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
+        service.release()
+        try admission(scheduler)
+        _ = try checkpointState(client, id: id, state: "waiting", iteration: 1)
+        let restarted = try mcpService(scheduler)
+        defer { withExtendedLifetime(restarted) {} }
+        try admission(scheduler)
+        _ = try outputUntil(client, job: id, contains: "iteration:1")
+        let second = try checkpointState(client, id: id, state: "running", iteration: 1)
+        #expect(first["pid"] == second["pid"])
+        _ = try delivered(client, job: id, tool: "latch_input", arguments: ["text": "x"])
+        let result = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+            "structuredContent"]
+        #expect(result?["succeeded"] == true)
+        #expect(result?["completedIterations"] == 2)
+        #expect(try scheduler.snapshot().tasks.isEmpty)
+    }
+}
+
+@Test(arguments: [true, false])
+func `parked checkpoints survive reconnect and handle cancellation or supervisor loss`(loss: Bool) throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let store = try DurableJobs(scheduler: scheduler)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        var arguments = submission(fixture, mode: "checkpoints").object!
+        arguments["checkpoints"] = true
+        let id = try jobID(client.tool("latch_submit", arguments: .object(arguments)))
+        try admission(scheduler)
+        _ = try checkpointState(client, id: id, state: "waiting", iteration: 0)
+        try admission(scheduler)
+        _ = try checkpointState(client, id: id, state: "waiting", iteration: 1)
+        try client.input.fileHandleForWriting.close()
+        #expect(try fixture.finish(client.child) == 0)
+        let other = try MCPClient(fixture: fixture)
+        _ = try checkpointState(other, id: id, state: "waiting", iteration: 1)
+        if loss {
+            let record = try #require(store.records().first { $0.id == id })
+            #expect(kill(try #require(record.supervisorPID), SIGKILL) == 0)
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while ProcessInfo.processInfo.systemUptime < deadline {
+                try store.recover(executable: fixture.executable)
+                if try store.records().first(where: { $0.id == id })?.complete == true { break }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+        } else {
+            _ = try other.tool("latch_cancel", arguments: ["jobID": .string(id)])
+        }
+        let result = try other.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+            "structuredContent"]
+        #expect(result?["complete"] == true)
+        #expect(result?["succeeded"] == false)
+        #expect(result?["completedIterations"] == 1)
+        if loss {
+            #expect(result?["terminationReason"] == "unknown")
+        } else {
+            #expect(result?["state"] == "cancelled")
+            #expect(result?["phase"] == "command")
+            #expect(result?["error"] == nil)
+        }
+    }
+}
+
+@Test func `checkpoint duplicates never advance twice and malformed messages fail closed`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let store = try DurableJobs(scheduler: scheduler)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let record = try store.submit(MCPSubmission(submission(fixture)))
+        let checkpoint = try CheckpointCoordinator(id: record.id, scheduler: scheduler)
+        checkpoint.pid = getpid()
+        func send(_ message: CheckpointMessage) throws {
+            var bytes = try JSONEncoder().encode(message)
+            bytes.append(10)
+            #expect(bytes.withUnsafeBytes { write(checkpoint.clientChannel, $0.baseAddress, $0.count) } == bytes.count)
+            try checkpoint.receive()
+        }
+        try admission(scheduler)
+        #expect(try checkpoint.admit())
+        try send(CheckpointMessage(kind: "ready", iteration: 0))
+        try send(CheckpointMessage(kind: "ready", iteration: 0))
+        #expect(try scheduler.snapshot().tasks.count == 1)
+        try admission(scheduler)
+        try checkpoint.advance()
+        try send(CheckpointMessage(kind: "finished", iteration: 0))
+        try send(CheckpointMessage(kind: "finished", iteration: 0))
+        #expect(checkpoint.completedIterations == 1)
+        #expect(checkpoint.iteration == 1)
+        #expect(try scheduler.snapshot().tasks.first?.state == .parked)
+        #expect(throws: LatchError.self) { try send(CheckpointMessage(version: 2, kind: "ready", iteration: 1)) }
+    }
+}
+
 @Test func `MCP execution returns once with progress and no model polling`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        try client.send(["jsonrpc": "2.0", "id": "execute", "method": "tools/call", "params": [
-            "name": "latch_execute", "arguments": submission(fixture), "_meta": ["progressToken": 42],
-        ]])
+        try client.send([
+            "jsonrpc": "2.0", "id": "execute", "method": "tools/call",
+            "params": [
+                "name": "latch_execute", "arguments": submission(fixture), "_meta": ["progressToken": 42],
+            ],
+        ])
         let queued = try client.notification("notifications/progress", token: 42)
         #expect(queued["params"]?["message"] == "queued")
         #expect(queued["params"]?["progress"] == 1)
@@ -110,7 +257,10 @@ private final class MCPClient {
         var previous = 1.0
         while true {
             let progress = try client.notification("notifications/progress", token: 42)
-            guard case let .number(value) = progress["params"]?["progress"] else { Issue.record("missing progress"); return }
+            guard case .number(let value) = progress["params"]?["progress"] else {
+                Issue.record("missing progress")
+                return
+            }
             #expect(value > previous)
             previous = value
             if progress["params"]?["message"] == "completed" {
@@ -128,16 +278,26 @@ func `MCP task result blocks until completion and retains the final result`(mode
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
         let arguments = submission(fixture, mode: mode)
-        let created = try client.request("tools/call", params: ["name": "latch_execute", "arguments": arguments, "task": ["ttl": 60000], "_meta": ["progressToken": "task-progress"]])
+        let created = try client.request(
+            "tools/call",
+            params: [
+                "name": "latch_execute", "arguments": arguments, "task": ["ttl": 60000],
+                "_meta": ["progressToken": "task-progress"],
+            ])
         let task = try #require(created["result"]?["task"])
         let id = try #require(task["taskId"]?.string)
         #expect(task["status"] == "working")
         #expect(task["ttl"] == .null)
         #expect(task["createdAt"]?.string != nil)
         #expect(task["lastUpdatedAt"]?.string != nil)
-        #expect(try client.request("tools/call", params: ["name": "latch_execute", "arguments": arguments, "task": [:]])["result"]?["task"]?["taskId"] == .string(id))
+        #expect(
+            try client.request("tools/call", params: ["name": "latch_execute", "arguments": arguments, "task": [:]])[
+                "result"]?["task"]?["taskId"] == .string(id))
         #expect(try client.request("tasks/get", params: ["taskId": .string(id)])["result"]?["status"] == "working")
-        guard case let .array(list) = try client.request("tasks/list")["result"]?["tasks"] else { Issue.record("missing tasks"); return }
+        guard case .array(let list) = try client.request("tasks/list")["result"]?["tasks"] else {
+            Issue.record("missing tasks")
+            return
+        }
         #expect(list.count == 1)
         try client.send(["jsonrpc": "2.0", "id": "result", "method": "tasks/result", "params": ["taskId": .string(id)]])
         #expect(try client.request("ping")["result"] == [:])
@@ -172,11 +332,20 @@ func `MCP task result blocks until completion and retains the final result`(mode
         let client = try MCPClient(fixture: fixture)
         let other = try MCPClient(fixture: fixture)
         let marker = fixture.directory.appendingPathComponent("child-pid")
-        let created = try client.request("tools/call", params: ["name": "latch_execute", "arguments": submission(fixture, mode: "orphan", arguments: [marker.path]), "task": [:]])
+        let created = try client.request(
+            "tools/call",
+            params: [
+                "name": "latch_execute", "arguments": submission(fixture, mode: "orphan", arguments: [marker.path]),
+                "task": [:],
+            ])
         let id = try #require(created["result"]?["task"]?["taskId"]?.string)
         #expect(try other.request("tasks/get", params: ["taskId": .string(id)])["result"]?["status"] == "working")
-        try client.send(["jsonrpc": "2.0", "id": "cancelled-wait", "method": "tasks/result", "params": ["taskId": .string(id)]])
-        try client.send(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "cancelled-wait"]])
+        try client.send([
+            "jsonrpc": "2.0", "id": "cancelled-wait", "method": "tasks/result", "params": ["taskId": .string(id)],
+        ])
+        try client.send([
+            "jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "cancelled-wait"],
+        ])
         try admission(scheduler)
         let running = try client.notification("notifications/tasks/status")
         #expect(running["params"]?["status"] == "working")
@@ -200,15 +369,24 @@ func `MCP task result blocks until completion and retains the final result`(mode
     let fixture = try Fixture()
     let client = try MCPClient(fixture: fixture)
     for task: MCPValue in [false, ["ttl": -1], ["ttl": .number(1.5)], ["surprise": true]] {
-        #expect(try client.request("tools/call", params: ["name": "latch_execute", "arguments": submission(fixture), "task": task])["error"]?["code"] == -32602)
+        #expect(
+            try client.request(
+                "tools/call", params: ["name": "latch_execute", "arguments": submission(fixture), "task": task])[
+                    "error"]?["code"] == -32602)
     }
     #expect(try client.request("tools/call", params: ["name": "latch_view", "task": [:]])["error"]?["code"] == -32601)
-    #expect(try client.request("tools/call", params: ["name": "latch_execute", "arguments": submission(fixture), "_meta": ["progressToken": true]])["error"]?["code"] == -32602)
+    #expect(
+        try client.request(
+            "tools/call",
+            params: ["name": "latch_execute", "arguments": submission(fixture), "_meta": ["progressToken": true]])[
+                "error"]?["code"] == -32602)
     let older = try MCPClient(fixture: fixture, initialize: false)
     #expect(try older.handshake(version: "2025-06-18")["result"]?["capabilities"]?["tasks"] == nil)
     #expect(try older.request("tasks/list")["error"]?["code"] == -32601)
     // A peer without task support must ignore augmentation metadata and return the ordinary result.
-    #expect(try older.request("tools/call", params: ["name": "latch_view", "task": [:]])["result"]?["structuredContent"]?["scheduler"] != nil)
+    #expect(
+        try older.request("tools/call", params: ["name": "latch_view", "task": [:]])["result"]?["structuredContent"]?[
+            "scheduler"] != nil)
 }
 
 @Test func `MCP request cancellation only stops waiting and explicit cancellation stops the job`() throws {
@@ -218,18 +396,36 @@ func `MCP task result blocks until completion and retains the final result`(mode
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
         let arguments = submission(fixture)
-        try client.send(["jsonrpc": "2.0", "id": "execute", "method": "tools/call", "params": ["name": "latch_execute", "arguments": arguments]])
+        try client.send([
+            "jsonrpc": "2.0", "id": "execute", "method": "tools/call",
+            "params": ["name": "latch_execute", "arguments": arguments],
+        ])
         let id = try jobID(client.tool("latch_submit", arguments: arguments))
-        try client.send(["jsonrpc": "2.0", "id": "waiting", "method": "tools/call", "params": [
-            "name": "latch_wait", "arguments": ["jobID": .string(id)], "_meta": ["progressToken": "waiting"],
-        ]])
+        try client.send([
+            "jsonrpc": "2.0", "id": "waiting", "method": "tools/call",
+            "params": [
+                "name": "latch_wait", "arguments": ["jobID": .string(id)], "_meta": ["progressToken": "waiting"],
+            ],
+        ])
         #expect(try client.notification("notifications/progress", token: "waiting")["params"]?["message"] == "queued")
-        #expect(try client.request("tools/call", params: ["name": "latch_wait", "arguments": ["jobID": .string(id)], "_meta": ["progressToken": "waiting"]])["error"]?["code"] == -32602)
+        #expect(
+            try client.request(
+                "tools/call",
+                params: [
+                    "name": "latch_wait", "arguments": ["jobID": .string(id)], "_meta": ["progressToken": "waiting"],
+                ])["error"]?["code"] == -32602)
         try client.send(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "waiting"]])
-        let pending = try client.request("tools/call", params: ["name": "latch_wait", "arguments": ["jobID": .string(id), "timeoutSeconds": .number(0.01)], "_meta": ["progressToken": "waiting"]])
+        let pending = try client.request(
+            "tools/call",
+            params: [
+                "name": "latch_wait", "arguments": ["jobID": .string(id), "timeoutSeconds": .number(0.01)],
+                "_meta": ["progressToken": "waiting"],
+            ])
         #expect(pending["result"]?["structuredContent"]?["state"] == "queued")
         try client.send(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "execute"]])
-        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 0])["result"]?["structuredContent"]?["complete"] == false)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 0])["result"]?[
+                "structuredContent"]?["complete"] == false)
         _ = try client.tool("latch_cancel", arguments: ["jobID": .string(id)])
         let cancelled = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])
         #expect(cancelled["result"]?["structuredContent"]?["state"] == "cancelled")
@@ -247,30 +443,42 @@ func `MCP task result blocks until completion and retains the final result`(mode
         let id = try jobID(client.tool("latch_submit", arguments: arguments))
         var drain: UpdateDrain? = try UpdateDrain(scheduler: scheduler)
         try withExtendedLifetime(drain) {
-            #expect(try client.tool("latch_submit", arguments: submission(fixture))["result"]?["structuredContent"]?["code"] == 75)
+            #expect(
+                try client.tool("latch_submit", arguments: submission(fixture))["result"]?["structuredContent"]?["code"]
+                    == 75)
             #expect(try jobID(client.tool("latch_submit", arguments: arguments)) == id)
             #expect(throws: LatchError.self) { try drain!.wait(timeout: 0) }
             try admission(scheduler)
-            #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+            #expect(
+                try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                    "structuredContent"]?["succeeded"] == true)
             try drain!.wait(timeout: 1)
             try UpdateDrain.advance(in: scheduler.directory)
-            #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?["succeeded"] == true)
+            #expect(
+                try client.tool("latch_wait", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?[
+                    "succeeded"] == true)
         }
         drain = nil
-        #expect(try client.tool("latch_submit", arguments: submission(fixture))["result"]?["structuredContent"]?["code"] == 69)
+        #expect(
+            try client.tool("latch_submit", arguments: submission(fixture))["result"]?["structuredContent"]?["code"]
+                == 69)
         #expect(try jobID(client.tool("latch_submit", arguments: arguments)) == id)
         let fresh = try MCPClient(fixture: fixture)
         let next = try jobID(fresh.tool("latch_submit", arguments: submission(fixture)))
         try admission(scheduler)
-        #expect(try fresh.tool("latch_wait", arguments: ["jobID": .string(next), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try fresh.tool("latch_wait", arguments: ["jobID": .string(next), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
     }
 }
 
 private func mcpService(_ scheduler: Scheduler) throws -> FileLatch {
     let lock = try FileLatch(path: scheduler.directory.appendingPathComponent("service.lock").path)
     try lock.acquire(shared: false, timeout: 0)
-    let status = SchedulerService.Status(running: true, pid: getpid(), path: scheduler.path, serviceRevision: BuildIdentity.serviceRevision)
-    try JSONEncoder().encode(status).write(to: scheduler.directory.appendingPathComponent("service.json"), options: .atomic)
+    let status = SchedulerService.Status(
+        running: true, pid: getpid(), path: scheduler.path, serviceRevision: BuildIdentity.serviceRevision)
+    try JSONEncoder().encode(status).write(
+        to: scheduler.directory.appendingPathComponent("service.json"), options: .atomic)
     return lock
 }
 
@@ -282,20 +490,31 @@ private func admission(_ scheduler: Scheduler, expectedTasks: Int = 1) throws {
     try #require(try scheduler.snapshot().tasks.count >= expectedTasks)
     try scheduler.transaction {
         let now = ProcessInfo.processInfo.systemUptime
-        for seconds in (0 ... 10).reversed() {
-            $0.record(SensorSnapshot(sampledAt: Date(), uptime: now - Double(seconds),
-                                     cpuCores: ProcessInfo.processInfo.activeProcessorCount, cpuActive: 0, busiestCore: 0,
-                                     gpuActive: 0, aneWatts: 0, memoryAvailableMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576) * 8 / 10, memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
-                                     memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
-                                     unavailable: [], cpuTemperature: 30, gpuTemperature: 30))
+        for seconds in (0...10).reversed() {
+            $0.record(
+                SensorSnapshot(
+                    sampledAt: Date(), uptime: now - Double(seconds),
+                    cpuCores: ProcessInfo.processInfo.activeProcessorCount, cpuActive: 0, busiestCore: 0,
+                    gpuActive: 0, aneWatts: 0,
+                    memoryAvailableMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576) * 8 / 10,
+                    memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
+                    memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
+                    unavailable: [], cpuTemperature: 30, gpuTemperature: 30))
         }
     }
 }
 
-private func submission(_ fixture: Fixture, key: String = UUID().uuidString, mode: String = "report", arguments: [String] = []) -> MCPValue {
-    ["requestKey": .string(key), "name": "mcp-test", "executable": .string(fixture.executable.deletingLastPathComponent().appendingPathComponent("LatchTestWorkload").path),
-     "arguments": .array(([mode] + arguments).map(MCPValue.string)), "workingDirectory": .string(fixture.directory.path),
-     "measurement": false]
+private func submission(
+    _ fixture: Fixture, key: String = UUID().uuidString, mode: String = "report", arguments: [String] = []
+) -> MCPValue {
+    [
+        "requestKey": .string(key), "name": "mcp-test",
+        "executable": .string(
+            fixture.executable.deletingLastPathComponent().appendingPathComponent("LatchTestWorkload").path),
+        "arguments": .array(([mode] + arguments).map(MCPValue.string)),
+        "workingDirectory": .string(fixture.directory.path),
+        "measurement": false,
+    ]
 }
 
 private func jobID(_ response: MCPValue) throws -> String {
@@ -312,15 +531,26 @@ private func jobID(_ response: MCPValue) throws -> String {
     #expect(initialized["result"]?["protocolVersion"] == "2025-11-25")
     #expect(initialized["result"]?["capabilities"]?["tools"] != nil)
     let listed = try client.request("tools/list")
-    guard case let .array(tools) = listed["result"]?["tools"] else { Issue.record("missing tools"); return }
-    #expect(tools.compactMap { $0["name"]?.string } == ["latch_view", "latch_submit", "latch_wait", "latch_cancel", "latch_forget", "latch_execute", "latch_signal", "latch_input", "latch_resize", "latch_control", "latch_read"])
+    guard case .array(let tools) = listed["result"]?["tools"] else {
+        Issue.record("missing tools")
+        return
+    }
+    #expect(
+        tools.compactMap { $0["name"]?.string } == [
+            "latch_view", "latch_submit", "latch_wait", "latch_cancel", "latch_forget", "latch_execute", "latch_signal",
+            "latch_input", "latch_resize", "latch_control", "latch_read",
+        ])
     #expect(initialized["result"]?["capabilities"]?["tasks"]?["requests"]?["tools"]?["call"] == [:])
     #expect(tools[5]["execution"]?["taskSupport"] == "optional")
     #expect(tools[0]["annotations"]?["readOnlyHint"] == true)
     #expect(tools[1]["annotations"]?["readOnlyHint"] == false)
     #expect(tools[1]["annotations"]?["openWorldHint"] == true)
     let properties = try #require(tools[1]["inputSchema"]?["properties"]?.object)
-    #expect(Set(properties.keys) == ["requestKey", "name", "executable", "arguments", "workingDirectory", "measurement", "input", "columns", "rows"])
+    #expect(
+        Set(properties.keys) == [
+            "requestKey", "name", "executable", "arguments", "workingDirectory", "measurement", "input", "columns",
+            "rows", "checkpoints",
+        ])
     #expect(try client.request("unknown")["error"]?["code"] == -32601)
     #expect(try client.tool("service_install")["error"]?["code"] == -32602)
     #expect(try client.tool("latch_view", arguments: ["unexpected": true])["error"]?["code"] == -32602)
@@ -328,24 +558,31 @@ private func jobID(_ response: MCPValue) throws -> String {
 }
 
 @Test func `Latch plans resources without asking the agent for budgets`() {
-    let build = TaskPlanner.plan(executable: "/usr/bin/swift", arguments: ["build", "-c", "release"], measurement: false, cpuCount: 12, memoryMiB: 32768)
+    let build = TaskPlanner.plan(
+        executable: "/usr/bin/swift", arguments: ["build", "-c", "release"], measurement: false, cpuCount: 12,
+        memoryMiB: 32768)
     #expect(build.arguments == ["build", "-c", "release", "--jobs", "4"])
     #expect(build.requirements.mode == .batch)
     #expect(build.requirements.cpuCores == 4)
     #expect(build.requirements.memoryMiB == 4096)
     #expect(build.requirements.temperatureGuard == TemperatureGuard())
     #expect(build.admissionTimeout == nil)
-    let measurement = TaskPlanner.plan(executable: "/usr/bin/swift", arguments: ["build"], measurement: true, cpuCount: 12, memoryMiB: 32768)
+    let measurement = TaskPlanner.plan(
+        executable: "/usr/bin/swift", arguments: ["build"], measurement: true, cpuCount: 12, memoryMiB: 32768)
     #expect(measurement.requirements.mode == .isolated)
     #expect(measurement.requirements.cpuCores == 12)
     #expect(measurement.arguments == ["build"])
     #expect(measurement.requirements.temperatureGuard == TemperatureGuard(maxCPU: 50, maxGPU: 50, cooldown: 10))
-    for (executable, arguments) in [("/usr/bin/swift", ["test"]), ("/usr/bin/swift", ["build", "-j", "8"]), ("/model", ["infer"])] {
-        let plan = TaskPlanner.plan(executable: executable, arguments: arguments, measurement: false, cpuCount: 8, memoryMiB: 16384)
+    for (executable, arguments) in [
+        ("/usr/bin/swift", ["test"]), ("/usr/bin/swift", ["build", "-j", "8"]), ("/model", ["infer"]),
+    ] {
+        let plan = TaskPlanner.plan(
+            executable: executable, arguments: arguments, measurement: false, cpuCount: 8, memoryMiB: 16384)
         #expect(plan.requirements.mode == .isolated)
         #expect(plan.arguments == arguments)
     }
-    let small = TaskPlanner.plan(executable: "/usr/bin/swift", arguments: ["build"], measurement: false, cpuCount: 1, memoryMiB: 2048)
+    let small = TaskPlanner.plan(
+        executable: "/usr/bin/swift", arguments: ["build"], measurement: false, cpuCount: 1, memoryMiB: 2048)
     #expect(small.requirements.cpuCores == 1)
     #expect(small.requirements.memoryMiB == 512)
 }
@@ -353,10 +590,12 @@ private func jobID(_ response: MCPValue) throws -> String {
 @Test func `MCP rejects invalid submissions before spawning`() throws {
     let fixture = try Fixture()
     let client = try MCPClient(fixture: fixture)
-    for (key, invalid) in [("cpu", MCPValue.bool(true)), ("cpu", .number(1.5)), ("arguments", .string("echo hi")),
-                           ("executable", .string("relative")), ("arguments", .array([.string("nul\0byte")])),
-                           ("mode", .string("unsafe")), ("cooldownSeconds", .number(-1)), ("workingDirectory", .string("/missing/latch-test"))]
-    {
+    for (key, invalid) in [
+        ("cpu", MCPValue.bool(true)), ("cpu", .number(1.5)), ("arguments", .string("echo hi")),
+        ("executable", .string("relative")), ("arguments", .array([.string("nul\0byte")])),
+        ("mode", .string("unsafe")), ("cooldownSeconds", .number(-1)),
+        ("workingDirectory", .string("/missing/latch-test")),
+    ] {
         var arguments = try #require(submission(fixture).object)
         arguments[key] = invalid
         #expect(try client.tool("latch_submit", arguments: .object(arguments))["error"]?["code"] == -32602)
@@ -376,7 +615,9 @@ private func jobID(_ response: MCPValue) throws -> String {
         let arguments = submission(fixture, key: "same", arguments: ["a b", "$HOME", "", "; false"])
         let id = try jobID(client.tool("latch_submit", arguments: arguments))
         #expect(try jobID(client.tool("latch_submit", arguments: arguments)) == id)
-        #expect(try client.tool("latch_submit", arguments: submission(fixture, key: "same", mode: "fail75"))["error"]?["code"] == -32602)
+        #expect(
+            try client.tool("latch_submit", arguments: submission(fixture, key: "same", mode: "fail75"))["error"]?[
+                "code"] == -32602)
         try admission(scheduler)
         let response = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])
         let result = try #require(response["result"]?["structuredContent"])
@@ -388,9 +629,13 @@ private func jobID(_ response: MCPValue) throws -> String {
         let report = try JSONDecoder().decode([String: [String]].self, from: Data(stdout.utf8))
         #expect(report["arguments"] == ["a b", "$HOME", "", "; false"])
         #expect(report["workingDirectory"] == [fixture.directory.path])
-        #expect(try client.tool("latch_forget", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?["forgotten"] == true)
+        #expect(
+            try client.tool("latch_forget", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?[
+                "forgotten"] == true)
         #expect(!FileManager.default.fileExists(atPath: scheduler.directory.appendingPathComponent(id + ".lease").path))
-        #expect(try client.tool("latch_forget", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?["forgotten"] == false)
+        #expect(
+            try client.tool("latch_forget", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?[
+                "forgotten"] == false)
         #expect(try scheduler.snapshot().tasks.isEmpty)
     }
 }
@@ -402,15 +647,22 @@ private func jobID(_ response: MCPValue) throws -> String {
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
         let id = try jobID(client.tool("latch_submit", arguments: submission(fixture)))
-        try client.send(["jsonrpc": "2.0", "id": "pending-wait", "method": "tools/call", "params": ["name": "latch_wait", "arguments": ["jobID": .string(id), "timeoutSeconds": 60]]])
+        try client.send([
+            "jsonrpc": "2.0", "id": "pending-wait", "method": "tools/call",
+            "params": ["name": "latch_wait", "arguments": ["jobID": .string(id), "timeoutSeconds": 60]],
+        ])
         #expect(try client.request("ping")["result"] == [:])
         #expect(try client.tool("latch_view")["result"]?["isError"] == false)
-        try client.send(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "pending-wait"]])
+        try client.send([
+            "jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "pending-wait"],
+        ])
         let pending = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": .number(0.05)])
         #expect(pending["result"]?["structuredContent"]?["complete"] == false)
         #expect(pending["result"]?["structuredContent"]?["state"] == "queued")
         try admission(scheduler)
-        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
     }
 }
 
@@ -455,8 +707,12 @@ private func jobID(_ response: MCPValue) throws -> String {
         #expect(result["result"]?["structuredContent"]?["state"] == "cancelled")
         #expect(result["result"]?["isError"] == true)
         #expect(try scheduler.snapshot().tasks.isEmpty)
-        #expect(try second.tool("latch_forget", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?["forgotten"] == true)
-        #expect(try first.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 0])["error"]?["code"] == -32602)
+        #expect(
+            try second.tool("latch_forget", arguments: ["jobID": .string(id)])["result"]?["structuredContent"]?[
+                "forgotten"] == true)
+        #expect(
+            try first.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 0])["error"]?["code"]
+                == -32602)
     }
 }
 
@@ -468,7 +724,8 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
         let marker = fixture.directory.appendingPathComponent("child-pid")
-        let id = try jobID(client.tool("latch_submit", arguments: submission(fixture, mode: mode, arguments: [marker.path])))
+        let id = try jobID(
+            client.tool("latch_submit", arguments: submission(fixture, mode: mode, arguments: [marker.path])))
         try admission(scheduler)
         let deadline = ProcessInfo.processInfo.systemUptime + 4
         while !FileManager.default.fileExists(atPath: marker.path), ProcessInfo.processInfo.systemUptime < deadline {
@@ -480,7 +737,9 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
         let response = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])
         #expect(ProcessInfo.processInfo.systemUptime - started >= 2)
         #expect(response["result"]?["structuredContent"]?["complete"] == true)
-        #expect(response["result"]?["structuredContent"]?["exitCode"] == (mode == "descendant" ? MCPValue.number(9) : .number(15)))
+        #expect(
+            response["result"]?["structuredContent"]?["exitCode"]
+                == (mode == "descendant" ? MCPValue.number(9) : .number(15)))
         let releasedBy = ProcessInfo.processInfo.systemUptime + 2
         while try !scheduler.snapshot().tasks.isEmpty, ProcessInfo.processInfo.systemUptime < releasedBy {
             Thread.sleep(forTimeInterval: 0.01)
@@ -505,7 +764,9 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
         let reconnected = try MCPClient(fixture: fixture)
         #expect(try jobID(reconnected.tool("latch_submit", arguments: arguments)) == id)
         try admission(scheduler)
-        #expect(try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
         #expect(try SchedulerService.requireRunning(in: scheduler.directory) == getpid())
     }
 }
@@ -513,9 +774,12 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
 @Test func `MCP handles fragmented requests and the older supported version`() throws {
     let fixture = try Fixture()
     let client = try MCPClient(fixture: fixture, initialize: false)
-    let message: MCPValue = ["jsonrpc": "2.0", "id": "fragment", "method": "initialize", "params": [
-        "protocolVersion": "2025-06-18", "capabilities": [:], "clientInfo": ["name": "test", "version": "1"],
-    ]]
+    let message: MCPValue = [
+        "jsonrpc": "2.0", "id": "fragment", "method": "initialize",
+        "params": [
+            "protocolVersion": "2025-06-18", "capabilities": [:], "clientInfo": ["name": "test", "version": "1"],
+        ],
+    ]
     let data = try JSONEncoder().encode(message)
     try client.input.fileHandleForWriting.write(contentsOf: data.prefix(7))
     try client.input.fileHandleForWriting.write(contentsOf: data.dropFirst(7))
@@ -544,7 +808,9 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
         #expect(try jobID(reconnected.tool("latch_submit", arguments: arguments)) == id)
         #expect(try scheduler.snapshot().tasks.first?.id == id)
         try admission(scheduler)
-        #expect(try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
     }
 }
 
@@ -564,15 +830,22 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
         let fifthID = try jobID(first.tool("latch_submit", arguments: submission(fixture, key: "fifth")))
         let allIDs = [firstID, secondID, thirdID, fourthID, fifthID]
         #expect(try scheduler.snapshot().tasks.map(\.id) == allIDs)
-        #expect(try second.tool("latch_submit", arguments: submission(fixture, key: "first", mode: "fail75"))["error"]?["code"] == -32602)
+        #expect(
+            try second.tool("latch_submit", arguments: submission(fixture, key: "first", mode: "fail75"))["error"]?[
+                "code"] == -32602)
         let view = try second.tool("latch_view")["result"]?["structuredContent"]
         #expect(view?["owner"] == nil)
         #expect(view?["globalOutstandingLimit"] == 64)
         #expect(view?["globalRetainedLimit"] == 256)
-        guard case let .array(jobs) = view?["jobs"] else { Issue.record("missing shared jobs"); return }
+        guard case .array(let jobs) = view?["jobs"] else {
+            Issue.record("missing shared jobs")
+            return
+        }
         #expect(Set(jobs.compactMap { $0["jobID"]?.string }) == Set(allIDs))
         _ = try second.tool("latch_cancel", arguments: ["jobID": .string(firstID)])
-        #expect(try first.tool("latch_wait", arguments: ["jobID": .string(firstID), "timeoutSeconds": 4])["result"]?["structuredContent"]?["complete"] == true)
+        #expect(
+            try first.tool("latch_wait", arguments: ["jobID": .string(firstID), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["complete"] == true)
         #expect(try scheduler.snapshot().tasks.map(\.id) == Array(allIDs.dropFirst()))
     }
 }
@@ -580,7 +853,7 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
 @Test func `durable queue enforces only global outstanding and retention bounds`() throws {
     let fixture = try Fixture()
     let store = try DurableJobs(scheduler: Scheduler(path: fixture.lockPath))
-    for _ in 0 ..< DurableJobs.globalOutstandingLimit {
+    for _ in 0..<DurableJobs.globalOutstandingLimit {
         _ = try store.submit(MCPSubmission(submission(fixture)))
     }
     #expect(throws: LatchError.self) { try store.submit(MCPSubmission(submission(fixture))) }
@@ -588,7 +861,7 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     for record in try store.records() {
         try store.publish(record.id, result: ["state": "completed", "complete": true, "succeeded": true])
     }
-    for index in DurableJobs.globalOutstandingLimit ..< DurableJobs.globalRetainedLimit {
+    for index in DurableJobs.globalOutstandingLimit..<DurableJobs.globalRetainedLimit {
         let record = try store.submit(MCPSubmission(submission(fixture, key: "result-\(index)")))
         try store.publish(record.id, result: ["state": "completed", "complete": true, "succeeded": true])
     }
@@ -613,11 +886,15 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
         try store.recover(executable: fixture.executable)
         try admission(scheduler, expectedTasks: 2)
         let first = try MCPClient(fixture: fixture)
-        #expect(try first.tool("latch_wait", arguments: ["jobID": .string(older.id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try first.tool("latch_wait", arguments: ["jobID": .string(older.id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
         #expect(try store.records().first(where: { $0.id == newer.id })?.complete == false)
         try admission(scheduler)
         let second = try MCPClient(fixture: fixture)
-        #expect(try second.tool("latch_wait", arguments: ["jobID": .string(newer.id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try second.tool("latch_wait", arguments: ["jobID": .string(newer.id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
     }
 }
 
@@ -643,15 +920,18 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        let handle = try client.request("tools/call", params: ["name": "latch_execute", "arguments": submission(fixture), "task": [:]])
+        let handle = try client.request(
+            "tools/call", params: ["name": "latch_execute", "arguments": submission(fixture), "task": [:]])
         let id = try #require(handle["result"]?["task"]?["taskId"]?.string)
         try admission(scheduler)
         let original = try client.request("tasks/result", params: ["taskId": .string(id)])
         try client.input.fileHandleForWriting.close()
         #expect(try fixture.finish(client.child) == 0)
         let reconnected = try MCPClient(fixture: fixture)
-        #expect(try reconnected.request("tasks/result", params: ["taskId": .string(id)])["result"] == original["result"])
-        #expect(try reconnected.request("tasks/get", params: ["taskId": .string(id)])["result"]?["status"] == "completed")
+        #expect(
+            try reconnected.request("tasks/result", params: ["taskId": .string(id)])["result"] == original["result"])
+        #expect(
+            try reconnected.request("tasks/get", params: ["taskId": .string(id)])["result"]?["status"] == "completed")
     }
 }
 
@@ -668,7 +948,9 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     let restarted = try mcpService(scheduler)
     try withExtendedLifetime(restarted) {
         try admission(scheduler)
-        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
     }
 }
 
@@ -683,7 +965,8 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     #expect(recovered.complete)
     #expect(recovered.environment.isEmpty)
     #expect(try store.scheduler.snapshot().tasks.isEmpty)
-    #expect(try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(record.id, "result.json"))) == final)
+    #expect(
+        try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(record.id, "result.json"))) == final)
 }
 
 @Test func `MCP has no owner configuration or submission property`() throws {
@@ -708,7 +991,8 @@ private func delivered(_ client: MCPClient, job: String, tool: String, arguments
     values["requestKey"] = values["requestKey"] ?? .string(UUID().uuidString)
     let receipt = try client.tool(tool, arguments: .object(values))
     let id = try #require(receipt["result"]?["structuredContent"]?["controlID"]?.string)
-    let result = try client.tool("latch_control", arguments: ["jobID": .string(job), "controlID": .string(id), "timeoutSeconds": 4])
+    let result = try client.tool(
+        "latch_control", arguments: ["jobID": .string(job), "controlID": .string(id), "timeoutSeconds": 4])
     let content = try #require(result["result"]?["structuredContent"])
     #expect(content["state"] == "delivered", "Control result: \(String(describing: content))")
     return content
@@ -719,7 +1003,8 @@ private func outputUntil(_ client: MCPClient, job: String, contains text: String
     var output = ""
     var offset: MCPValue = 0
     while !output.contains(text), ProcessInfo.processInfo.systemUptime < deadline {
-        let response = try client.tool("latch_read", arguments: ["jobID": .string(job), "stdoutOffset": offset, "timeoutSeconds": 1])
+        let response = try client.tool(
+            "latch_read", arguments: ["jobID": .string(job), "stdoutOffset": offset, "timeoutSeconds": 1])
         let value = try #require(response["result"]?["structuredContent"])
         output += value["stdout"]?["text"]?.string ?? ""
         offset = value["stdout"]?["nextOffset"] ?? offset
@@ -737,18 +1022,24 @@ private func outputUntil(_ client: MCPClient, job: String, contains text: String
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        let id = try jobID(client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
+        let id = try jobID(
+            client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
         try admission(scheduler)
         _ = try outputUntil(client, job: id, contains: "ready")
         let bytes = Data([0, 3, 4, 255, 10, 65])
-        let values: MCPValue = ["jobID": .string(id), "requestKey": "bytes", "base64": .string(bytes.base64EncodedString())]
+        let values: MCPValue = [
+            "jobID": .string(id), "requestKey": "bytes", "base64": .string(bytes.base64EncodedString()),
+        ]
         let receipt = try delivered(client, job: id, tool: "latch_input", arguments: values)
         try client.input.fileHandleForWriting.close()
         #expect(try fixture.finish(client.child) == 0)
         let reconnected = try MCPClient(fixture: fixture)
         let retry = try reconnected.tool("latch_input", arguments: values)
         #expect(retry["result"]?["structuredContent"]?["controlID"] == receipt["controlID"])
-        #expect(try reconnected.tool("latch_input", arguments: ["jobID": .string(id), "requestKey": "bytes", "text": "different"])["error"]?["code"] == -32602)
+        #expect(
+            try reconnected.tool(
+                "latch_input", arguments: ["jobID": .string(id), "requestKey": "bytes", "text": "different"])["error"]?[
+                    "code"] == -32602)
         _ = try delivered(reconnected, job: id, tool: "latch_input", arguments: ["eof": true])
         let result = try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])
         #expect(result["result"]?["structuredContent"]?["stdout"] == .string("ready\n" + bytes.base64EncodedString()))
@@ -762,14 +1053,18 @@ private func outputUntil(_ client: MCPClient, job: String, contains text: String
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        let id = try jobID(client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "ignore-interrupt", input: "pipe")))
+        let id = try jobID(
+            client.tool(
+                "latch_submit", arguments: interactiveSubmission(fixture, mode: "ignore-interrupt", input: "pipe")))
         try admission(scheduler)
         _ = try outputUntil(client, job: id, contains: "ready")
         _ = try delivered(client, job: id, tool: "latch_signal", arguments: ["signal": "interrupt"])
         let pending = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": .number(2.1)])
         #expect(pending["result"]?["structuredContent"]?["state"] == "running")
         _ = try delivered(client, job: id, tool: "latch_input", arguments: ["eof": true])
-        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
     }
 }
 
@@ -780,7 +1075,11 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        let id = try jobID(client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: mode == "raw" ? "raw-terminal" : "terminal", input: "terminal")))
+        let id = try jobID(
+            client.tool(
+                "latch_submit",
+                arguments: interactiveSubmission(
+                    fixture, mode: mode == "raw" ? "raw-terminal" : "terminal", input: "terminal")))
         try admission(scheduler)
         _ = try outputUntil(client, job: id, contains: "ready")
         if mode == "interrupt" {
@@ -790,7 +1089,8 @@ func `terminal attaches streams and forwards signals and control characters`(mod
             let bytes = mode == "key" ? "\u{3}" : (mode == "eof" ? "\u{4}" : "\u{3}\u{4}\u{0}")
             _ = try delivered(client, job: id, tool: "latch_input", arguments: ["text": .string(bytes)])
         }
-        let result = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]
+        let result = try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+            "structuredContent"]
         #expect(result?["complete"] == true)
         #expect(result?["stderr"] == "")
         if mode == "interrupt" || mode == "key" {
@@ -812,7 +1112,8 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        let id = try jobID(client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "terminal", input: "terminal")))
+        let id = try jobID(
+            client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "terminal", input: "terminal")))
         try admission(scheduler)
         _ = try outputUntil(client, job: id, contains: "terminal-stderr")
         try client.input.fileHandleForWriting.close()
@@ -821,11 +1122,15 @@ func `terminal attaches streams and forwards signals and control characters`(mod
         let receipt = try delivered(other, job: id, tool: "latch_resize", arguments: ["columns": 120, "rows": 45])
         let resumed = try MCPClient(fixture: fixture)
         let controlID = try #require(receipt["controlID"])
-        #expect(try resumed.tool("latch_control", arguments: ["jobID": .string(id), "controlID": controlID])["result"]?["structuredContent"] == receipt)
+        #expect(
+            try resumed.tool("latch_control", arguments: ["jobID": .string(id), "controlID": controlID])["result"]?[
+                "structuredContent"] == receipt)
         _ = try delivered(resumed, job: id, tool: "latch_input", arguments: ["text": "size\n"])
         _ = try outputUntil(resumed, job: id, contains: "size: 120x45")
         _ = try delivered(resumed, job: id, tool: "latch_input", arguments: ["text": "exit\n"])
-        #expect(try resumed.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try resumed.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
     }
 }
 
@@ -835,13 +1140,16 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        let id = try jobID(client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
+        let id = try jobID(
+            client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
         try admission(scheduler)
         _ = try outputUntil(client, job: id, contains: "ready")
         _ = try delivered(client, job: id, tool: "latch_signal", arguments: ["signal": "stop"])
         #expect(try scheduler.snapshot().tasks.first?.state == .running)
         _ = try client.tool("latch_cancel", arguments: ["jobID": .string(id)])
-        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["state"] == "cancelled")
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["state"] == "cancelled")
     }
 }
 
@@ -863,20 +1171,36 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     let service = try mcpService(scheduler)
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
-        let id = try jobID(client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "blocked-input", input: "pipe")))
+        let id = try jobID(
+            client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "blocked-input", input: "pipe"))
+        )
         try admission(scheduler)
         _ = try outputUntil(client, job: id, contains: "ready")
         var receipts: [String] = []
-        for index in 0 ..< 12 {
-            let response = try client.tool("latch_input", arguments: ["jobID": .string(id), "requestKey": .string("chunk-\(index)"), "text": .string(String(repeating: "a", count: 16384))])
+        for index in 0..<12 {
+            let response = try client.tool(
+                "latch_input",
+                arguments: [
+                    "jobID": .string(id), "requestKey": .string("chunk-\(index)"),
+                    "text": .string(String(repeating: "a", count: 16384)),
+                ])
             try receipts.append(#require(response["result"]?["structuredContent"]?["controlID"]?.string))
         }
         let last = try #require(receipts.last)
-        #expect(try client.tool("latch_control", arguments: ["jobID": .string(id), "controlID": .string(last), "timeoutSeconds": 0])["result"]?["structuredContent"]?["complete"] == false)
+        #expect(
+            try client.tool(
+                "latch_control", arguments: ["jobID": .string(id), "controlID": .string(last), "timeoutSeconds": 0])[
+                    "result"]?["structuredContent"]?["complete"] == false)
         _ = try delivered(client, job: id, tool: "latch_signal", arguments: ["signal": "interrupt"])
-        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["exitCode"] == 2)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["exitCode"] == 2)
         for receipt in receipts {
-            #expect(try client.tool("latch_control", arguments: ["jobID": .string(id), "controlID": .string(receipt), "timeoutSeconds": 0])["result"]?["structuredContent"]?["complete"] == true)
+            #expect(
+                try client.tool(
+                    "latch_control",
+                    arguments: ["jobID": .string(id), "controlID": .string(receipt), "timeoutSeconds": 0])["result"]?[
+                        "structuredContent"]?["complete"] == true)
         }
     }
 }
@@ -888,7 +1212,8 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
         let marker = fixture.directory.appendingPathComponent("signal-child")
-        let id = try jobID(client.tool("latch_submit", arguments: submission(fixture, mode: "descendant", arguments: [marker.path])))
+        let id = try jobID(
+            client.tool("latch_submit", arguments: submission(fixture, mode: "descendant", arguments: [marker.path])))
         try admission(scheduler)
         let deadline = ProcessInfo.processInfo.systemUptime + 4
         while !FileManager.default.fileExists(atPath: marker.path), ProcessInfo.processInfo.systemUptime < deadline {
@@ -896,7 +1221,9 @@ func `terminal attaches streams and forwards signals and control characters`(mod
         }
         try #require(FileManager.default.fileExists(atPath: marker.path))
         _ = try delivered(client, job: id, tool: "latch_signal", arguments: ["signal": "interrupt"])
-        #expect(try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?["structuredContent"]?["exitCode"] == 2)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["exitCode"] == 2)
         let gate = try FileLatch(path: fixture.lockPath)
         try gate.acquire(shared: false, timeout: 0)
     }
@@ -909,28 +1236,41 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)
         let id = try jobID(client.tool("latch_submit", arguments: submission(fixture)))
-        #expect(try client.tool("latch_signal", arguments: ["jobID": .string(id), "requestKey": "queued", "signal": "interrupt"])["error"]?["code"] == -32602)
+        #expect(
+            try client.tool(
+                "latch_signal", arguments: ["jobID": .string(id), "requestKey": "queued", "signal": "interrupt"])[
+                    "error"]?["code"] == -32602)
         for extra: MCPValue in [["input": "bad"], ["input": "pipe", "columns": 80], ["input": "terminal", "rows": 0]] {
             var arguments = try #require(submission(fixture).object)
             arguments.merge(extra.object!) { _, new in new }
             #expect(throws: MCPFailure.self) { try MCPSubmission(.object(arguments)) }
         }
-        for values: MCPValue in [["requestKey": "bad", "base64": "!"], ["requestKey": "bad", "text": "a", "base64": "YQ=="],
-                                 ["requestKey": "bad", "text": .string(String(repeating: "a", count: 16385))]]
-        {
-            #expect(throws: MCPFailure.self) { try MCPControl(operation: "latch_input", arguments: MCPArguments(values, allowed: ["requestKey", "base64", "text"])) }
+        for values: MCPValue in [
+            ["requestKey": "bad", "base64": "!"], ["requestKey": "bad", "text": "a", "base64": "YQ=="],
+            ["requestKey": "bad", "text": .string(String(repeating: "a", count: 16385))],
+        ] {
+            #expect(throws: MCPFailure.self) {
+                try MCPControl(
+                    operation: "latch_input",
+                    arguments: MCPArguments(values, allowed: ["requestKey", "base64", "text"]))
+            }
         }
     }
     let separate = try Fixture()
     let store = try DurableJobs(scheduler: Scheduler(path: separate.lockPath))
     let job = try store.submit(MCPSubmission(submission(separate)))
-    try store.scheduler.transaction { $0.jobs?[0].state = "running"; $0.tasks[0].state = .running }
-    let input = try MCPArguments(["requestKey": "interrupt", "signal": "interrupt"], allowed: ["requestKey", "signal"])
+    try store.scheduler.transaction {
+        $0.jobs?[0].state = "running"
+        $0.tasks[0].state = .running
+    }
+    let input = try MCPArguments(
+        ["requestKey": "interrupt", "signal": "interrupt"], allowed: ["requestKey", "signal"])
     let control = try store.enqueueControl(MCPControl(operation: "latch_signal", arguments: input), id: job.id)
     _ = try store.claimControls(job.id)
     try store.recover(executable: separate.executable)
     #expect(try store.controls(job.id).first?.state == "unknown")
-    #expect(try store.enqueueControl(MCPControl(operation: "latch_signal", arguments: input), id: job.id).id == control.id)
+    #expect(
+        try store.enqueueControl(MCPControl(operation: "latch_signal", arguments: input), id: job.id).id == control.id)
     try store.forgetControl(control.id, id: job.id)
     #expect(try store.controls(job.id).isEmpty)
 }
@@ -940,12 +1280,18 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     let store = try DurableJobs(scheduler: Scheduler(path: fixture.lockPath))
     let job = try store.submit(MCPSubmission(interactiveSubmission(fixture, mode: "blocked-input", input: "pipe")))
     try store.scheduler.transaction { $0.jobs?[0].state = "running" }
-    for index in 0 ..< 12 {
-        let input = try MCPArguments(["requestKey": .string("input-\(index)"), "text": "bytes"], allowed: ["requestKey", "text"])
+    for index in 0..<12 {
+        let input = try MCPArguments(
+            ["requestKey": .string("input-\(index)"), "text": "bytes"], allowed: ["requestKey", "text"])
         _ = try store.enqueueControl(MCPControl(operation: "latch_input", arguments: input), id: job.id)
     }
     let extra = try MCPArguments(["requestKey": "extra", "text": "bytes"], allowed: ["requestKey", "text"])
-    #expect(throws: LatchError.self) { try store.enqueueControl(MCPControl(operation: "latch_input", arguments: extra), id: job.id) }
-    let interrupt = try MCPArguments(["requestKey": "interrupt", "signal": "interrupt"], allowed: ["requestKey", "signal"])
-    #expect(try store.enqueueControl(MCPControl(operation: "latch_signal", arguments: interrupt), id: job.id).state == "queued")
+    #expect(throws: LatchError.self) {
+        try store.enqueueControl(MCPControl(operation: "latch_input", arguments: extra), id: job.id)
+    }
+    let interrupt = try MCPArguments(
+        ["requestKey": "interrupt", "signal": "interrupt"], allowed: ["requestKey", "signal"])
+    #expect(
+        try store.enqueueControl(MCPControl(operation: "latch_signal", arguments: interrupt), id: job.id).state
+            == "queued")
 }

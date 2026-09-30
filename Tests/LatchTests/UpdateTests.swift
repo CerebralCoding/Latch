@@ -1,7 +1,8 @@
 import Darwin
 import Foundation
-@testable import Latch
 import Testing
+
+@testable import Latch
 
 private final class UpdateFixture {
     let fixture: Fixture
@@ -23,21 +24,26 @@ private final class UpdateFixture {
     }
 
     var service: UpdateServiceControl {
-        UpdateServiceControl(loaded: { self.loaded }, revision: { self.revision }, stop: {
-            self.events.append("stop")
-            self.loaded = false
-        }, start: {
-            self.events.append("start")
-            if self.failStart {
-                self.failStart = false
-                throw LatchError("injected health check failure")
-            }
-            self.loaded = true
-        })
+        UpdateServiceControl(
+            loaded: { self.loaded }, revision: { self.revision },
+            stop: {
+                self.events.append("stop")
+                self.loaded = false
+            },
+            start: {
+                self.events.append("start")
+                if self.failStart {
+                    self.failStart = false
+                    throw LatchError("injected health check failure")
+                }
+                self.loaded = true
+            })
     }
 
     func apply(rollback: Bool = false, restart: Bool = false, timeout: Double = 0) throws -> Bool {
-        try ServiceUpdate.apply(source: source, target: target, scheduler: scheduler, rollback: rollback, timeout: timeout, restartService: restart, service: service)
+        try ServiceUpdate.apply(
+            source: source, target: target, scheduler: scheduler, rollback: rollback, timeout: timeout,
+            restartService: restart, service: service)
     }
 
     func contents(_ url: URL) throws -> String {
@@ -51,7 +57,10 @@ private final class UpdateFixture {
     #expect(update.timeout == 30)
     #expect(update.restartService)
     #expect(try Options(arguments: ["rollback"]).command == .rollback)
-    for arguments in [["update", "--file", "/other"], ["rollback", "--timeout", "-1"], ["run", "--restart-service", "--", "true"], ["update", "--standalone"]] {
+    for arguments in [
+        ["update", "--file", "/other"], ["rollback", "--timeout", "-1"], ["run", "--restart-service", "--", "true"],
+        ["update", "--standalone"],
+    ] {
         #expect(throws: LatchError.self) { try Options(arguments: arguments) }
     }
 }
@@ -78,7 +87,8 @@ private final class UpdateFixture {
             f.revision = nil
         }
         if mode == "stopped" {
-            f.loaded = false; f.revision = nil
+            f.loaded = false
+            f.revision = nil
         }
         #expect(try f.apply(restart: mode == "forced") == (mode != "stopped"))
         #expect(f.events == (mode == "stopped" ? [] : ["stop", "start"]))

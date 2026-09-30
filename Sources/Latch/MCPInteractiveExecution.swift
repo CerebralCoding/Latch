@@ -9,7 +9,9 @@ final class MCPPseudoTerminal {
         var masterFD: Int32 = -1
         var slaveFD: Int32 = -1
         var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(columns), ws_xpixel: 0, ws_ypixel: 0)
-        guard openpty(&masterFD, &slaveFD, nil, nil, &size) == 0 else { throw LatchError.system("open pseudo-terminal") }
+        guard openpty(&masterFD, &slaveFD, nil, nil, &size) == 0 else {
+            throw LatchError.system("open pseudo-terminal")
+        }
         master = FileHandle(fileDescriptor: masterFD, closeOnDealloc: true)
         slave = FileHandle(fileDescriptor: slaveFD, closeOnDealloc: true)
         _ = fcntl(masterFD, F_SETFD, FD_CLOEXEC)
@@ -49,20 +51,28 @@ extension MCPExecution {
         // Signals and resizing must remain responsive even while stdin is backpressured.
         for var control in controls {
             if control.operation == "latch_input" {
-                pendingInput.append(control); continue
+                pendingInput.append(control)
+                continue
             }
             do {
-                guard !complete, exitedAt == nil, cancelAt == nil else { throw LatchError("command is no longer accepting controls") }
+                guard !complete, exitedAt == nil, cancelAt == nil else {
+                    throw LatchError("command is no longer accepting controls")
+                }
                 if let name = control.signal, let number = MCPControl.signals[name] {
                     try relay(number)
                 } else if let terminal, stdoutOpen, let columns = control.columns, let rows = control.rows {
                     var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(columns), ws_xpixel: 0, ws_ypixel: 0)
-                    guard ioctl(terminal.master.fileDescriptor, TIOCSWINSZ, &size) == 0 else { throw LatchError.system("resize terminal") }
+                    guard ioctl(terminal.master.fileDescriptor, TIOCSWINSZ, &size) == 0 else {
+                        throw LatchError.system("resize terminal")
+                    }
                 } else {
                     throw LatchError("terminal unavailable")
                 }
                 control.state = "delivered"
-            } catch { control.state = "failed"; control.error = String(describing: error) }
+            } catch {
+                control.state = "failed"
+                control.error = String(describing: error)
+            }
             try store.acknowledge(control, id: id)
         }
         try flushInput(store: store)
@@ -72,10 +82,15 @@ extension MCPExecution {
         while !pendingInput.isEmpty {
             var control = pendingInput[0]
             do {
-                guard !complete, exitedAt == nil, cancelAt == nil, let fd = inputDescriptor else { throw LatchError("stdin is closed or command is exiting") }
+                guard !complete, exitedAt == nil, cancelAt == nil, let fd = inputDescriptor else {
+                    throw LatchError("stdin is closed or command is exiting")
+                }
                 let bytes = control.data ?? Data()
                 if control.bytesWritten < bytes.count {
-                    let count = bytes.withUnsafeBytes { write(fd, $0.baseAddress!.advanced(by: control.bytesWritten), bytes.count - control.bytesWritten) }
+                    let count = bytes.withUnsafeBytes {
+                        write(
+                            fd, $0.baseAddress!.advanced(by: control.bytesWritten), bytes.count - control.bytesWritten)
+                    }
                     if count < 0, errno == EAGAIN || errno == EINTR {
                         return
                     }
@@ -91,7 +106,10 @@ extension MCPExecution {
                     inputOpen = false
                 }
                 control.state = "delivered"
-            } catch { control.state = "failed"; control.error = String(describing: error) }
+            } catch {
+                control.state = "failed"
+                control.error = String(describing: error)
+            }
             pendingInput.removeFirst()
             try store.acknowledge(control, id: id)
         }

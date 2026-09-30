@@ -1,7 +1,12 @@
 import Foundation
 
 enum MCPValue: Codable, Equatable, Sendable {
-    case null, bool(Bool), number(Double), string(String), array([MCPValue]), object([String: MCPValue])
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([MCPValue])
+    case object([String: MCPValue])
 
     init(from decoder: any Decoder) throws {
         let value = try decoder.singleValueContainer()
@@ -24,31 +29,33 @@ enum MCPValue: Codable, Equatable, Sendable {
         var value = encoder.singleValueContainer()
         switch self {
         case .null: try value.encodeNil()
-        case let .bool(flag): try value.encode(flag)
-        case let .number(number): try value.encode(number)
-        case let .string(text): try value.encode(text)
-        case let .array(array): try value.encode(array)
-        case let .object(object): try value.encode(object)
+        case .bool(let flag): try value.encode(flag)
+        case .number(let number): try value.encode(number)
+        case .string(let text): try value.encode(text)
+        case .array(let array): try value.encode(array)
+        case .object(let object): try value.encode(object)
         }
     }
 
     subscript(_ key: String) -> MCPValue? {
-        if case let .object(object) = self {
+        if case .object(let object) = self {
             return object[key]
         }
         return nil
     }
 
     var string: String? {
-        if case let .string(value) = self {
+        if case .string(let value) = self {
             return value
-        }; return nil
+        }
+        return nil
     }
 
     var object: [String: MCPValue]? {
-        if case let .object(value) = self {
+        if case .object(let value) = self {
             return value
-        }; return nil
+        }
+        return nil
     }
 
     static func encoded(_ value: some Encodable) throws -> MCPValue {
@@ -58,7 +65,9 @@ enum MCPValue: Codable, Equatable, Sendable {
     }
 }
 
-extension MCPValue: ExpressibleByStringLiteral, ExpressibleByIntegerLiteral, ExpressibleByBooleanLiteral, ExpressibleByArrayLiteral, ExpressibleByDictionaryLiteral {
+extension MCPValue: ExpressibleByStringLiteral, ExpressibleByIntegerLiteral, ExpressibleByBooleanLiteral,
+    ExpressibleByArrayLiteral, ExpressibleByDictionaryLiteral
+{
     init(stringLiteral value: String) {
         self = .string(value)
     }
@@ -102,15 +111,20 @@ struct MCPArguments {
         if values[key] == nil, let fallback {
             return fallback
         }
-        guard let value = values[key]?.string, !value.isEmpty, value.utf8.count <= maximum, !value.utf8.contains(0) else {
+        guard let value = values[key]?.string, !value.isEmpty, value.utf8.count <= maximum, !value.utf8.contains(0)
+        else {
             throw MCPFailure.invalid("\(key) requires a nonempty string of at most \(maximum) bytes without NUL")
         }
         return value
     }
 
-    func number(_ key: String, default fallback: Double, range: ClosedRange<Double>, integer: Bool = false) throws -> Double {
+    func number(_ key: String, default fallback: Double, range: ClosedRange<Double>, integer: Bool = false) throws
+        -> Double
+    {
         guard let value = values[key] else { return fallback }
-        guard case let .number(number) = value, number.isFinite, range.contains(number), !integer || number.rounded() == number else {
+        guard case .number(let number) = value, number.isFinite, range.contains(number),
+            !integer || number.rounded() == number
+        else {
             throw MCPFailure.invalid("\(key) requires \(integer ? "an integer" : "a number") in \(range)")
         }
         return number
@@ -118,7 +132,7 @@ struct MCPArguments {
 
     func flag(_ key: String) throws -> Bool {
         guard let value = values[key] else { return false }
-        guard case let .bool(flag) = value else { throw MCPFailure.invalid("\(key) requires a boolean") }
+        guard case .bool(let flag) = value else { throw MCPFailure.invalid("\(key) requires a boolean") }
         return flag
     }
 }

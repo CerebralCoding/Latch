@@ -1,7 +1,8 @@
 import Darwin
 import Foundation
-@testable import Latch
 import Testing
+
+@testable import Latch
 
 private func idleSensors(at uptime: Double = ProcessInfo.processInfo.systemUptime) -> SensorSnapshot {
     SensorSnapshot(
@@ -12,14 +13,22 @@ private func idleSensors(at uptime: Double = ProcessInfo.processInfo.systemUptim
 }
 
 private func task(_ mode: TaskRequirements.Mode = .batch, cores: Int = 1, gpu: Bool = false) -> ScheduledTask {
-    ScheduledTask(id: UUID().uuidString, name: "test", pid: getpid(), arguments: ["true"],
-                  requirements: TaskRequirements(mode: mode, cpuCores: cores, gpu: gpu))
+    ScheduledTask(
+        id: UUID().uuidString, name: "test", pid: getpid(), arguments: ["true"],
+        requirements: TaskRequirements(mode: mode, cpuCores: cores, gpu: gpu))
 }
 
 @Test func `scheduler options preserve command and validate resources`() throws {
-    let options = try Options(arguments: ["schedule", "--name", "inference", "--mode", "batch", "--gpu", "--bandwidth", "--cpu", "2", "--memory-mib", "4096", "--", "model", "--gpu"])
+    let options = try Options(arguments: [
+        "schedule", "--name", "inference", "--mode", "batch", "--gpu", "--bandwidth", "--cpu", "2", "--memory-mib",
+        "4096", "--", "model", "--gpu",
+    ])
     #expect(options.taskName == "inference")
-    #expect(options.requirements == TaskRequirements(mode: .batch, cpuCores: 2, memoryMiB: 4096, gpu: true, bandwidth: true, temperatureGuard: TemperatureGuard()))
+    #expect(
+        options.requirements
+            == TaskRequirements(
+                mode: .batch, cpuCores: 2, memoryMiB: 4096, gpu: true, bandwidth: true,
+                temperatureGuard: TemperatureGuard()))
     #expect(options.childArguments == ["model", "--gpu"])
     #expect(try Options(arguments: ["schedule", "--", "true"]).requirements.mode == .isolated)
 }
@@ -63,6 +72,25 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     #expect(SchedulingPolicy.reason(for: measurement, in: state, now: 10) == nil)
     state.tasks[0].state = .running
     #expect(SchedulingPolicy.reason(for: newcomer, in: state, now: 10) == "isolated task is running")
+}
+
+@Test func `resuming memory is not reserved twice and parked work leaves CPU available`() {
+    var parked = task(.isolated, cores: 8)
+    parked.state = .parked
+    parked.residentMemoryMiB = 8000
+    parked.requirements.memoryMiB = 8000
+    var resumed = parked
+    resumed.id = UUID().uuidString
+    resumed.state = .queued
+    var sensors = idleSensors(at: 10)
+    sensors.memoryAvailableMiB = 4000
+    var state = SchedulerState(tasks: [parked, resumed], sensors: sensors, quietSince: 7)
+    #expect(SchedulingPolicy.reason(for: resumed, in: state, now: 10) == nil)
+    resumed.residentMemoryMiB = nil
+    state.tasks[1] = resumed
+    #expect(SchedulingPolicy.reason(for: resumed, in: state, now: 10) == "insufficient memory headroom")
+    state.sensors?.memoryPressure = "warning"
+    #expect(SchedulingPolicy.reason(for: resumed, in: state, now: 10) == "memory pressure is warning")
 }
 
 @Test func `gpu IO and bandwidth reservations conflict`() {
@@ -122,8 +150,10 @@ func `rejects invalid scheduler options`(arguments: [String]) {
 @Test func `reservations remain visible until their leases close`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath, collect: { idleSensors() })
-    var first: TaskReservation? = try scheduler.reserve(name: "cpu", arguments: ["true"], requirements: TaskRequirements(mode: .batch, cpuCores: 2), timeout: 0)
-    let second = try scheduler.reserve(name: "gpu", arguments: ["true"], requirements: TaskRequirements(mode: .batch, gpu: true), timeout: 0)
+    var first: TaskReservation? = try scheduler.reserve(
+        name: "cpu", arguments: ["true"], requirements: TaskRequirements(mode: .batch, cpuCores: 2), timeout: 0)
+    let second = try scheduler.reserve(
+        name: "gpu", arguments: ["true"], requirements: TaskRequirements(mode: .batch, gpu: true), timeout: 0)
     try withExtendedLifetime(second) {
         #expect(try scheduler.snapshot().tasks.count == 2)
         withExtendedLifetime(first) {}
@@ -132,7 +162,9 @@ func `rejects invalid scheduler options`(arguments: [String]) {
         #expect(state.tasks.count == 1)
         #expect(state.tasks.first?.name == "gpu")
         #expect(throws: LatchError.self) {
-            try scheduler.reserve(name: "another GPU", arguments: ["true"], requirements: TaskRequirements(mode: .batch, gpu: true), timeout: 0)
+            try scheduler.reserve(
+                name: "another GPU", arguments: ["true"], requirements: TaskRequirements(mode: .batch, gpu: true),
+                timeout: 0)
         }
         #expect(try scheduler.snapshot().tasks.count == 1)
     }
@@ -171,7 +203,8 @@ func `rejects invalid scheduler options`(arguments: [String]) {
         $0.record(idleSensors(at: now))
         $0.quietSince = now - 3
     }
-    let reservation = try scheduler.reserve(name: "measurement", arguments: ["true"], requirements: TaskRequirements(), timeout: 0)
+    let reservation = try scheduler.reserve(
+        name: "measurement", arguments: ["true"], requirements: TaskRequirements(), timeout: 0)
     try withExtendedLifetime(reservation) {
         let state = try scheduler.snapshot()
         #expect(state.tasks.first?.state == .running)
@@ -179,7 +212,8 @@ func `rejects invalid scheduler options`(arguments: [String]) {
         #expect(state.quietSince == nil)
         #expect(collections == 0)
         #expect(throws: LatchError.self) {
-            try scheduler.reserve(name: "batch", arguments: ["true"], requirements: TaskRequirements(mode: .batch), timeout: 0)
+            try scheduler.reserve(
+                name: "batch", arguments: ["true"], requirements: TaskRequirements(mode: .batch), timeout: 0)
         }
         let legacy = try FileLatch(path: fixture.lockPath)
         #expect(throws: LatchError.self) { try legacy.acquire(shared: true, timeout: 0) }
@@ -198,7 +232,8 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     try holder.acquire(shared: true, timeout: 0)
     try withExtendedLifetime(holder) {
         #expect(throws: LatchError.self) {
-            try scheduler.reserve(name: "measurement", arguments: ["true"], requirements: TaskRequirements(), timeout: 0.05)
+            try scheduler.reserve(
+                name: "measurement", arguments: ["true"], requirements: TaskRequirements(), timeout: 0.05)
         }
         let remaining = try scheduler.snapshot()
         #expect(remaining.tasks.isEmpty)
@@ -209,7 +244,8 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath) { throw LatchError("sensor failure") }
     #expect(throws: LatchError.self) {
-        try scheduler.reserve(name: "blocked", arguments: ["true"], requirements: TaskRequirements(mode: .batch), timeout: 0)
+        try scheduler.reserve(
+            name: "blocked", arguments: ["true"], requirements: TaskRequirements(mode: .batch), timeout: 0)
     }
     let state = try scheduler.snapshot()
     #expect(state.sensorError == "sensor failure")

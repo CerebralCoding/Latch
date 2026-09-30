@@ -8,13 +8,11 @@ final class NativeSensors {
     private var initializationErrors: [String] = []
 
     init() {
-        do { report = try NativeIOReport() }
-        catch {
+        do { report = try NativeIOReport() } catch {
             report = nil
             initializationErrors.append(String(describing: error))
         }
-        do { temperatures = try NativeSMC() }
-        catch {
+        do { temperatures = try NativeSMC() } catch {
             temperatures = nil
             initializationErrors.append(String(describing: error))
         }
@@ -42,7 +40,7 @@ final class NativeSensors {
             return total > 0 ? Double(total - UInt64(delta[Int(CPU_STATE_IDLE)])) / Double(total) : 0
         }
         guard !activities.isEmpty, activities.count == firstCPU.count,
-              firstCPU.count == secondCPU.count, elapsed > 0
+            firstCPU.count == secondCPU.count, elapsed > 0
         else {
             throw LatchError("CPU sampling failed", exitCode: 74)
         }
@@ -71,17 +69,21 @@ final class NativeSensors {
         var pressure: Int32 = 0
         var size = MemoryLayout.size(ofValue: pressure)
         let pressureResult = sysctlbyname("kern.memorystatus_vm_pressure_level", &pressure, &size, nil, 0)
-        let pressureName = pressureResult == 0 ? [1: "normal", 2: "warning", 4: "critical"][Int(pressure)] ?? "unknown" : "unknown"
+        let pressureName =
+            pressureResult == 0 ? [1: "normal", 2: "warning", 4: "critical"][Int(pressure)] ?? "unknown" : "unknown"
         if pressureName == "unknown" {
-            unavailable.append(pressureResult == 0 ? "memory pressure value \(pressure)" : "memory pressure: \(String(cString: strerror(errno)))")
+            unavailable.append(
+                pressureResult == 0
+                    ? "memory pressure value \(pressure)" : "memory pressure: \(String(cString: strerror(errno)))")
         }
-        let thermal = switch ProcessInfo.processInfo.thermalState {
-        case .nominal: "nominal"
-        case .fair: "fair"
-        case .serious: "serious"
-        case .critical: "critical"
-        @unknown default: "unknown"
-        }
+        let thermal =
+            switch ProcessInfo.processInfo.thermalState {
+            case .nominal: "nominal"
+            case .fair: "fair"
+            case .serious: "serious"
+            case .critical: "critical"
+            @unknown default: "unknown"
+            }
         return SensorSnapshot(
             sampledAt: Date(), uptime: now, cpuCores: activities.count,
             cpuActive: activities.reduce(0, +) / Double(activities.count),
@@ -101,10 +103,11 @@ final class NativeSensors {
         var info: processor_info_array_t?
         var size: mach_msg_type_number_t = 0
         guard host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &count, &info, &size) == KERN_SUCCESS,
-              let info else { throw LatchError("cannot read CPU counters", exitCode: 74) }
+            let info
+        else { throw LatchError("cannot read CPU counters", exitCode: 74) }
         defer { vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: info)), vm_size_t(size) * 4) }
-        return (0 ..< Int(count)).map { core in
-            (0 ..< Int(CPU_STATE_MAX)).map { UInt32(bitPattern: info[core * Int(CPU_STATE_MAX) + $0]) }
+        return (0..<Int(count)).map { core in
+            (0..<Int(CPU_STATE_MAX)).map { UInt32(bitPattern: info[core * Int(CPU_STATE_MAX) + $0]) }
         }
     }
 
@@ -129,7 +132,10 @@ final class NativeSensors {
 
     private static func diskBytes() -> UInt64? {
         var iterator: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOBlockStorageDriver"), &iterator) == KERN_SUCCESS else { return nil }
+        guard
+            IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOBlockStorageDriver"), &iterator)
+                == KERN_SUCCESS
+        else { return nil }
         defer { IOObjectRelease(iterator) }
         var sum: UInt64 = 0
         var found = false
@@ -139,9 +145,10 @@ final class NativeSensors {
                 break
             }
             defer { IOObjectRelease(service) }
-            if let stats = IORegistryEntryCreateCFProperty(service, "Statistics" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any],
-               let read = stats["Bytes (Read)"] as? NSNumber,
-               let written = stats["Bytes (Write)"] as? NSNumber
+            if let stats = IORegistryEntryCreateCFProperty(service, "Statistics" as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? [String: Any],
+                let read = stats["Bytes (Read)"] as? NSNumber,
+                let written = stats["Bytes (Write)"] as? NSNumber
             {
                 sum += read.uint64Value + written.uint64Value
                 found = true

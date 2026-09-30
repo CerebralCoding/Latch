@@ -24,18 +24,22 @@ final class Scheduler {
         self.collect = collect
         directory = URL(fileURLWithPath: path + ".queue", isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         } catch CocoaError.fileWriteFileExists {}
         let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
         guard attributes[.type] as? FileAttributeType == .typeDirectory,
-              (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid(),
-              (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700
+            (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid(),
+            (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700
         else {
             throw LatchError("scheduler directory must be owned by this user with permissions 0700", exitCode: 74)
         }
     }
 
-    func reserve(name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false, supervisorPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil) throws -> TaskReservation {
+    func reserve(
+        name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false,
+        supervisorPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil
+    ) throws -> TaskReservation {
         try requirements.validate()
         let updatePermit = inheritedUpdatePermit ? nil : try UpdateDrain.admit(in: directory)
         if useService {
@@ -57,11 +61,15 @@ final class Scheduler {
         try transaction { state in
             if ticketID != nil {
                 guard state.jobs?.contains(where: { $0.id == id && !$0.complete }) == true,
-                      let index = state.tasks.firstIndex(where: { $0.id == id && $0.state == .queued }) else { throw LatchError("durable admission ticket is missing", exitCode: 74) }
+                    let index = state.tasks.firstIndex(where: { $0.id == id && $0.state == .queued })
+                else { throw LatchError("durable admission ticket is missing", exitCode: 74) }
                 state.tasks[index].pid = getpid()
             } else {
-                guard state.tasks.count < DurableJobs.globalOutstandingLimit else { throw LatchError("shared queue limit reached", exitCode: 75) }
-                state.tasks.append(ScheduledTask(id: id, name: name, pid: getpid(), arguments: arguments, requirements: requirements))
+                guard state.tasks.count < DurableJobs.globalOutstandingLimit else {
+                    throw LatchError("shared queue limit reached", exitCode: 75)
+                }
+                state.tasks.append(
+                    ScheduledTask(id: id, name: name, pid: getpid(), arguments: arguments, requirements: requirements))
             }
         }
         while true {
@@ -72,8 +80,8 @@ final class Scheduler {
             var view = try snapshot()
             var samplingBlocked = false
             if !useService, view.tasks.first(where: { $0.state == .queued })?.id == id,
-               !view.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),
-               !(requirements.mode == .isolated && view.tasks.contains(where: { $0.state == .running }))
+                !view.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),
+                !(requirements.mode == .isolated && view.tasks.contains(where: { $0.state == .running }))
             {
                 samplingBlocked = try !refreshSensors()
             }
@@ -116,13 +124,16 @@ final class Scheduler {
             }
             let isolatedRunning = view.tasks.contains { $0.state == .running && $0.requirements.mode == .isolated }
             if useService {
-                watcher.wait(seconds: remaining ?? 3600, pids: view.tasks.map(\.pid) + [servicePID!] + (supervisorPID.map { [$0] } ?? []))
+                watcher.wait(
+                    seconds: remaining ?? 3600,
+                    pids: view.tasks.map(\.pid) + [servicePID!] + (supervisorPID.map { [$0] } ?? []))
             } else if isolatedRunning || blockedByLatch || samplingBlocked {
                 // Park behind an exclusive workload without sampling or periodic wakeups.
                 let checkpoint = try FileLatch(path: path)
                 try checkpoint.acquire(shared: isolatedRunning || requirements.mode == .batch, timeout: remaining)
             } else {
-                watcher.wait(seconds: min(remaining ?? 1, 1), pids: view.tasks.filter { $0.state == .running }.map(\.pid))
+                watcher.wait(
+                    seconds: min(remaining ?? 1, 1), pids: view.tasks.filter { $0.state == .running }.map(\.pid))
             }
         }
     }
@@ -144,12 +155,13 @@ final class Scheduler {
     @discardableResult
     func refreshSensors() throws -> Bool {
         let collector = try FileLatch(path: directory.appendingPathComponent("sensors.lock").path)
-        do { try collector.acquire(shared: false, timeout: 0) }
-        catch let error as LatchError where error.exitCode == 75 { return true }
+        do { try collector.acquire(shared: false, timeout: 0) } catch let error as LatchError where error.exitCode == 75
+        { return true }
         return try withExtendedLifetime(collector) {
             let gate = try FileLatch(path: path)
-            do { try gate.acquire(shared: true, timeout: 0) }
-            catch let error as LatchError where error.exitCode == 75 { return false }
+            do { try gate.acquire(shared: true, timeout: 0) } catch let error as LatchError where error.exitCode == 75 {
+                return false
+            }
             return try withExtendedLifetime(gate) {
                 let state = try snapshot()
                 let now = ProcessInfo.processInfo.systemUptime
@@ -178,13 +190,14 @@ final class Scheduler {
         return try withExtendedLifetime(mutex) {
             let file = directory.appendingPathComponent("state.json")
             let previous: Data?
-            do { previous = try Data(contentsOf: file) }
-            catch CocoaError.fileReadNoSuchFile { previous = nil }
+            do { previous = try Data(contentsOf: file) } catch CocoaError.fileReadNoSuchFile { previous = nil }
             var state = try previous.map { try JSONDecoder().decode(SchedulerState.self, from: $0) } ?? SchedulerState()
             guard state.version == 1 else { throw LatchError("unsupported scheduler state version", exitCode: 74) }
             var live: [ScheduledTask] = []
             for task in state.tasks {
-                guard UUID(uuidString: task.id) != nil else { throw LatchError("invalid task ID in scheduler state", exitCode: 74) }
+                guard UUID(uuidString: task.id) != nil else {
+                    throw LatchError("invalid task ID in scheduler state", exitCode: 74)
+                }
                 if state.jobs?.contains(where: { $0.id == task.id && !$0.complete }) == true {
                     live.append(task)
                     continue
@@ -195,7 +208,9 @@ final class Scheduler {
                     try? FileManager.default.removeItem(atPath: leasePath(task.id))
                 } catch let error as LatchError where error.exitCode == 75 { live.append(task) }
             }
-            if state.tasks.contains(where: { task in task.state == .running && !live.contains(where: { $0.id == task.id }) }) {
+            if state.tasks.contains(where: { task in
+                task.state == .running && !live.contains(where: { $0.id == task.id })
+            }) {
                 state.quietSince = nil
                 for index in live.indices {
                     live[index].coolSince = nil

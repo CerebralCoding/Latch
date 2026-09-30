@@ -19,9 +19,11 @@ struct LatchError: Error, CustomStringConvertible {
 struct Latch {
     static func main() {
         if CommandLine.arguments.count == 6, CommandLine.arguments[1] == "__mcp_supervisor",
-           let lease = Int32(CommandLine.arguments[4]), let activity = Int32(CommandLine.arguments[5])
+            let lease = Int32(CommandLine.arguments[4]), let activity = Int32(CommandLine.arguments[5])
         {
-            exit(MCPSupervisor.run(path: CommandLine.arguments[2], id: CommandLine.arguments[3], lease: lease, activity: activity))
+            exit(
+                MCPSupervisor.run(
+                    path: CommandLine.arguments[2], id: CommandLine.arguments[3], lease: lease, activity: activity))
         }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "__mcp_worker" {
             exit(MCPWorker.run(requestPath: CommandLine.arguments[2]))
@@ -37,7 +39,9 @@ struct Latch {
                 return
             }
             if options.command == .update || options.command == .rollback {
-                try ServiceInstallation.update(rollback: options.command == .rollback, timeout: options.timeout ?? 600, restartService: options.restartService)
+                try ServiceInstallation.update(
+                    rollback: options.command == .rollback, timeout: options.timeout ?? 600,
+                    restartService: options.restartService)
                 return
             }
 
@@ -61,7 +65,8 @@ struct Latch {
             if options.command == .schedule || options.command == .guard {
                 let scheduler = try Scheduler(path: path)
                 let reservation = try scheduler.reserve(
-                    name: options.taskName ?? options.childArguments.first ?? "temperature guard", arguments: options.childArguments,
+                    name: options.taskName ?? options.childArguments.first ?? "temperature guard",
+                    arguments: options.childArguments,
                     requirements: options.requirements, timeout: options.timeout, useService: !options.standalone,
                 )
                 defer { try? scheduler.withdraw(reservation.id) }
@@ -119,7 +124,7 @@ struct Latch {
 
     static func execute(_ arguments: [String]) throws {
         var pointers: [UnsafeMutablePointer<CChar>?] = []
-        defer { pointers.forEach { free($0) } }
+        defer { for pointer in pointers { free(pointer) } }
         for argument in arguments {
             guard let pointer = strdup(argument) else {
                 throw LatchError("out of memory", exitCode: 71)

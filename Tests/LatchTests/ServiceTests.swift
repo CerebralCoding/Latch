@@ -1,7 +1,8 @@
 import Darwin
 import Foundation
-@testable import Latch
 import Testing
+
+@testable import Latch
 
 @Test func `command link installation is repeatable and preserves unrelated files`() throws {
     let fixture = try Fixture()
@@ -24,10 +25,11 @@ import Testing
 }
 
 private func coolSensors(at uptime: Double) -> SensorSnapshot {
-    SensorSnapshot(sampledAt: Date(), uptime: uptime, cpuCores: 8, cpuActive: 0, busiestCore: 0,
-                   gpuActive: 0, aneWatts: 0, memoryAvailableMiB: 24000, memoryTotalMiB: 32000,
-                   memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
-                   unavailable: [], cpuTemperature: 40, gpuTemperature: 38)
+    SensorSnapshot(
+        sampledAt: Date(), uptime: uptime, cpuCores: 8, cpuActive: 0, busiestCore: 0,
+        gpuActive: 0, aneWatts: 0, memoryAvailableMiB: 24000, memoryTotalMiB: 32000,
+        memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
+        unavailable: [], cpuTemperature: 40, gpuTemperature: 38)
 }
 
 @Test func `temperature cooldown requires consecutive cool readings and resets after gaps`() {
@@ -52,7 +54,8 @@ private func coolSensors(at uptime: Double) -> SensorSnapshot {
     var missing = coolSensors(at: 10)
     missing.gpuTemperature = nil
     state.record(missing)
-    #expect(SchedulingPolicy.reason(for: state.tasks[0], in: state, now: 10) == "CPU/GPU temperature sensors unavailable")
+    #expect(
+        SchedulingPolicy.reason(for: state.tasks[0], in: state, now: 10) == "CPU/GPU temperature sensors unavailable")
     #expect(TemperatureGuard(cooldown: 0).reason(sensors: coolSensors(at: 10), since: nil) == nil)
     #expect(TemperatureGuard(cooldown: 0).reason(sensors: missing, since: nil) != nil)
 }
@@ -67,13 +70,17 @@ private func coolSensors(at uptime: Double) -> SensorSnapshot {
 }
 
 @Test func `service and guard options validate temperature limits`() throws {
-    let options = try Options(arguments: ["guard", "--mode", "batch", "--max-cpu-temp", "48", "--max-gpu-temp", "49", "--cooldown", "3.5", "--timeout", "60"])
+    let options = try Options(arguments: [
+        "guard", "--mode", "batch", "--max-cpu-temp", "48", "--max-gpu-temp", "49", "--cooldown", "3.5", "--timeout",
+        "60",
+    ])
     #expect(options.requirements.temperatureGuard == TemperatureGuard(maxCPU: 48, maxGPU: 49, cooldown: 3.5))
     #expect(try Options(arguments: ["service", "install"]).serviceAction == .install)
-    for arguments in [["service"], ["service", "start", "stop"], ["guard", "--cooldown", "nan"],
-                      ["guard", "--cooldown", "-1"], ["guard", "--max-cpu-temp", "126"],
-                      ["guard", "--max-gpu-temp", "0"], ["guard", "--", "true"], ["tasks", "--standalone"]]
-    {
+    for arguments in [
+        ["service"], ["service", "start", "stop"], ["guard", "--cooldown", "nan"],
+        ["guard", "--cooldown", "-1"], ["guard", "--max-cpu-temp", "126"],
+        ["guard", "--max-gpu-temp", "0"], ["guard", "--", "true"], ["tasks", "--standalone"],
+    ] {
         #expect(throws: LatchError.self) { try Options(arguments: arguments) }
     }
 }
@@ -93,7 +100,8 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
     let lease = try FileLatch(path: scheduler.directory.appendingPathComponent("service.lock").path)
     try lease.acquire(shared: false, timeout: 0)
     let status = SchedulerService.Status(running: true, pid: getpid(), path: scheduler.path)
-    try JSONEncoder().encode(status).write(to: scheduler.directory.appendingPathComponent("service.json"), options: .atomic)
+    try JSONEncoder().encode(status).write(
+        to: scheduler.directory.appendingPathComponent("service.json"), options: .atomic)
     return lease
 }
 
@@ -102,7 +110,9 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try fakeService(scheduler)
     try withExtendedLifetime(service) {
-        let child = try fixture.launch(["schedule", "--mode", "batch", "--cooldown", "2", "--", "/usr/bin/printf", "%s", "admitted"])
+        let child = try fixture.launch([
+            "schedule", "--mode", "batch", "--cooldown", "2", "--", "/usr/bin/printf", "%s", "admitted",
+        ])
         try waitForTask(scheduler)
         #expect(child.process.isRunning)
         #expect(try scheduler.snapshot().sensors == nil)
@@ -126,7 +136,9 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
     try withExtendedLifetime(holder) {
         let service = try fixture.launch(["service", "run"])
         let deadline = ProcessInfo.processInfo.systemUptime + 4
-        while (try? SchedulerService.requireRunning(in: scheduler.directory)) == nil, ProcessInfo.processInfo.systemUptime < deadline {
+        while (try? SchedulerService.requireRunning(in: scheduler.directory)) == nil,
+            ProcessInfo.processInfo.systemUptime < deadline
+        {
             Thread.sleep(forTimeInterval: 0.01)
         }
         #expect(try SchedulerService.requireRunning(in: scheduler.directory) == service.process.processIdentifier)
@@ -177,10 +189,14 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
 }
 
 @Test func `launch agent configuration uses stable executable and the selected latch`() throws {
-    let config = ServiceInstallation.configuration(executable: "/path with spaces/latch", path: "/state/custom.lock", logs: "/logs")
+    let config = ServiceInstallation.configuration(
+        executable: "/path with spaces/latch", path: "/state/custom.lock", logs: "/logs")
     let data = try PropertyListSerialization.data(fromPropertyList: config, format: .xml, options: 0)
     let decoded = try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
-    #expect(decoded["ProgramArguments"] as? [String] == ["/path with spaces/latch", "service", "run", "--file", "/state/custom.lock"])
+    #expect(
+        decoded["ProgramArguments"] as? [String] == [
+            "/path with spaces/latch", "service", "run", "--file", "/state/custom.lock",
+        ])
     #expect(decoded["KeepAlive"] as? Bool == true)
     #expect(decoded["RunAtLoad"] as? Bool == true)
     #expect(decoded["UserName"] == nil)
@@ -194,13 +210,18 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
         return coolSensors(at: ProcessInfo.processInfo.systemUptime)
     }
     let service = try fakeService(scheduler)
-    let running = try scheduler.reserve(name: "build", arguments: [], requirements: TaskRequirements(mode: .batch, cpuCores: 2, memoryMiB: 2048), timeout: 0)
+    let running = try scheduler.reserve(
+        name: "build", arguments: [], requirements: TaskRequirements(mode: .batch, cpuCores: 2, memoryMiB: 2048),
+        timeout: 0)
     let id = UUID().uuidString
     let lease = try FileLatch(path: scheduler.directory.appendingPathComponent(id + ".lease").path)
     try lease.acquire(shared: false, timeout: 0)
     try withExtendedLifetime((service, running, lease)) {
         try scheduler.transaction {
-            $0.tasks.append(ScheduledTask(id: id, name: "benchmark", pid: getpid(), arguments: [], requirements: TaskRequirements(temperatureGuard: TemperatureGuard())))
+            $0.tasks.append(
+                ScheduledTask(
+                    id: id, name: "benchmark", pid: getpid(), arguments: [],
+                    requirements: TaskRequirements(temperatureGuard: TemperatureGuard())))
         }
         let view = try SchedulerView(scheduler: scheduler)
         #expect(view.sensorsFresh)
@@ -229,13 +250,17 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
 @Test func `completion of running work restarts queued cooldowns`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath) { coolSensors(at: ProcessInfo.processInfo.systemUptime) }
-    var running: TaskReservation? = try scheduler.reserve(name: "build", arguments: [], requirements: TaskRequirements(mode: .batch), timeout: 0)
+    var running: TaskReservation? = try scheduler.reserve(
+        name: "build", arguments: [], requirements: TaskRequirements(mode: .batch), timeout: 0)
     let id = UUID().uuidString
     let lease = try FileLatch(path: scheduler.directory.appendingPathComponent(id + ".lease").path)
     try lease.acquire(shared: false, timeout: 0)
     try withExtendedLifetime(lease) {
         try scheduler.transaction {
-            $0.tasks.append(ScheduledTask(id: id, name: "next", pid: getpid(), arguments: [], requirements: TaskRequirements(temperatureGuard: TemperatureGuard()), coolSince: 1))
+            $0.tasks.append(
+                ScheduledTask(
+                    id: id, name: "next", pid: getpid(), arguments: [],
+                    requirements: TaskRequirements(temperatureGuard: TemperatureGuard()), coolSince: 1))
         }
         #expect(try scheduler.snapshot().tasks.last?.coolSince == 1)
         withExtendedLifetime(running) {}

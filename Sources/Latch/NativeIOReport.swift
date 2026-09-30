@@ -5,7 +5,11 @@ import Foundation
 /// IOReport channel/residency conventions follow macmon; see LICENSES/macmon.txt.
 final class NativeIOReport {
     private typealias CopyChannels = @convention(c) (UInt64, UInt64) -> Unmanaged<CFDictionary>?
-    private typealias Subscribe = @convention(c) (UnsafeRawPointer?, CFMutableDictionary, UnsafeMutablePointer<Unmanaged<CFMutableDictionary>?>, UInt64, CFTypeRef?) -> Unmanaged<CFTypeRef>?
+    private typealias Subscribe =
+        @convention(c) (
+            UnsafeRawPointer?, CFMutableDictionary, UnsafeMutablePointer<Unmanaged<CFMutableDictionary>?>, UInt64,
+            CFTypeRef?
+        ) -> Unmanaged<CFTypeRef>?
     private typealias Sample = @convention(c) (CFTypeRef, CFMutableDictionary, CFTypeRef?) -> Unmanaged<CFDictionary>?
     private typealias Delta = @convention(c) (CFDictionary, CFDictionary, CFTypeRef?) -> Unmanaged<CFDictionary>?
     private typealias Label = @convention(c) (CFDictionary) -> Unmanaged<CFString>?
@@ -47,8 +51,8 @@ final class NativeIOReport {
             integerValue = try symbol("IOReportSimpleGetIntegerValue", Value.self)
             let group = try symbol("IOReportChannelGetGroup", Label.self)
             guard let all = copy(0, 0)?.takeRetainedValue(),
-                  let items = (all as NSDictionary)["IOReportChannels"] as? [NSDictionary],
-                  let selected = CFDictionaryCreateMutableCopy(nil, 0, all)
+                let items = (all as NSDictionary)["IOReportChannels"] as? [NSDictionary],
+                let selected = CFDictionaryCreateMutableCopy(nil, 0, all)
             else {
                 throw LatchError("IOReport channels unavailable", exitCode: 69)
             }
@@ -61,7 +65,8 @@ final class NativeIOReport {
             }
             let key = "IOReportChannels" as CFString
             let array = selectedItems as CFArray
-            CFDictionarySetValue(selected, Unmanaged.passUnretained(key).toOpaque(), Unmanaged.passUnretained(array).toOpaque())
+            CFDictionarySetValue(
+                selected, Unmanaged.passUnretained(key).toOpaque(), Unmanaged.passUnretained(array).toOpaque())
             var subscribed: Unmanaged<CFMutableDictionary>?
             guard let subscription = subscribe(nil, selected, &subscribed, 0, nil)?.takeRetainedValue() else {
                 throw LatchError("IOReport subscription unavailable", exitCode: 69)
@@ -88,10 +93,12 @@ final class NativeIOReport {
         return createSample(subscription, channels, nil)?.takeRetainedValue()
     }
 
-    func activity(from first: CFDictionary?, to second: CFDictionary?, seconds: Double) -> (gpu: Double?, ane: Double?) {
+    func activity(from first: CFDictionary?, to second: CFDictionary?, seconds: Double) -> (gpu: Double?, ane: Double?)
+    {
         guard let first, let second, seconds > 0,
-              let delta = createDelta(first, second, nil)?.takeRetainedValue(),
-              let items = (delta as NSDictionary)["IOReportChannels"] as? [NSDictionary] else { return (nil, nil) }
+            let delta = createDelta(first, second, nil)?.takeRetainedValue(),
+            let items = (delta as NSDictionary)["IOReportChannels"] as? [NSDictionary]
+        else { return (nil, nil) }
         var gpu: Double?
         var ane: Double?
         for item in items {
@@ -103,7 +110,7 @@ final class NativeIOReport {
                 var active = 0.0
                 var total = 0.0
                 var valid = true
-                for index in 0 ..< count {
+                for index in 0..<count {
                     let value = residency(channel, index)
                     guard value >= 0, let label = stateName(channel, index)?.takeUnretainedValue() as String? else {
                         valid = false

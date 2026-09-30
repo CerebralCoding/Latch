@@ -48,7 +48,7 @@ struct SensorSnapshot: Codable, Equatable {
 }
 
 struct ScheduledTask: Codable, Equatable, Identifiable {
-    enum State: String, Codable { case queued, running }
+    enum State: String, Codable { case queued, running, parked }
 
     var id: String
     var name: String
@@ -57,9 +57,11 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
     var requirements: TaskRequirements
     var state: State = .queued
     var queuedAt = Date()
+    var queuedUptime: Double? = ProcessInfo.processInfo.systemUptime
     var startedAt: Date?
     var waitingFor: String?
     var coolSince: Double?
+    var residentMemoryMiB: Int?
 }
 
 struct SchedulerState: Codable, Equatable {
@@ -88,7 +90,8 @@ struct SchedulerState: Codable, Equatable {
             if !guardrail.satisfied(by: snapshot) {
                 tasks[index].coolSince = nil
             } else if tasks[index].coolSince == nil || previous == nil
-                || snapshot.uptime < previous!.uptime || snapshot.uptime - previous!.uptime > SchedulingPolicy.maximumSampleAge
+                || snapshot.uptime < previous!.uptime
+                || snapshot.uptime - previous!.uptime > SchedulingPolicy.maximumSampleAge
             {
                 tasks[index].coolSince = snapshot.uptime
             }
@@ -124,14 +127,14 @@ enum SchedulingPolicy {
             return "sensors unavailable: \(error)"
         }
         guard let sensors = state.sensors, now >= sensors.uptime,
-              now - sensors.uptime <= maximumSampleAge
+            now - sensors.uptime <= maximumSampleAge
         else {
             return "waiting for fresh sensors"
         }
         guard sensors.thermalState == "nominal" else { return "thermal state is \(sensors.thermalState)" }
         guard sensors.memoryPressure == "normal" else { return "memory pressure is \(sensors.memoryPressure)" }
         if let guardrail = request.temperatureGuard,
-           let reason = guardrail.reason(sensors: sensors, since: task.coolSince)
+            let reason = guardrail.reason(sensors: sensors, since: task.coolSince)
         {
             return reason
         }
@@ -140,7 +143,9 @@ enum SchedulingPolicy {
         let reservedMemory = running.reduce(0) { $0 + $1.requirements.memoryMiB }
         guard reservedCPU + request.cpuCores <= sensors.cpuCores else { return "CPU reservation capacity" }
         // Count outstanding reservations conservatively even if some are already resident.
-        guard reservedMemory + request.memoryMiB <= sensors.memoryAvailableMiB - sensors.memoryTotalMiB / 10 else {
+        // Parked allocations are already reflected in available memory; reserve only additional headroom on resume.
+        let additionalMemory = max(0, request.memoryMiB - (task.residentMemoryMiB ?? 0))
+        guard reservedMemory + additionalMemory <= sensors.memoryAvailableMiB - sensors.memoryTotalMiB / 10 else {
             return "insufficient memory headroom"
         }
         if request.mode == .isolated {
@@ -148,13 +153,16 @@ enum SchedulingPolicy {
                 return "required sensors unavailable: \(sensors.unavailable.joined(separator: ", "))"
             }
             guard sensors.quiet, let since = state.quietSince, now >= since,
-                  sensors.uptime - since >= quietPeriod
+                sensors.uptime - since >= quietPeriod
             else {
                 return "waiting for a quiet CPU/GPU/ANE/disk window"
             }
         } else {
             guard sensors.cpuActive <= 0.8 else { return "background CPU load" }
-            guard max(Double(reservedCPU), sensors.cpuActive * Double(sensors.cpuCores)) + Double(request.cpuCores) <= Double(sensors.cpuCores) else {
+            guard
+                max(Double(reservedCPU), sensors.cpuActive * Double(sensors.cpuCores)) + Double(request.cpuCores)
+                    <= Double(sensors.cpuCores)
+            else {
                 return "insufficient CPU headroom"
             }
             if request.gpu {

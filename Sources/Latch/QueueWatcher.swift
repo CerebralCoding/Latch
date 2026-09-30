@@ -15,7 +15,9 @@ final class QueueWatcher {
             throw LatchError.system("create scheduler event queue")
         }
         _ = fcntl(queue, F_SETFD, FD_CLOEXEC)
-        var event = kevent(ident: UInt(descriptor), filter: Int16(EVFILT_VNODE), flags: UInt16(EV_ADD | EV_CLEAR), fflags: UInt32(NOTE_WRITE), data: 0, udata: nil)
+        var event = kevent(
+            ident: UInt(descriptor), filter: Int16(EVFILT_VNODE), flags: UInt16(EV_ADD | EV_CLEAR),
+            fflags: UInt32(NOTE_WRITE), data: 0, udata: nil)
         guard kevent(queue, &event, 1, nil, 0, nil) == 0 else {
             close(descriptor)
             close(queue)
@@ -33,7 +35,9 @@ final class QueueWatcher {
     func wait(seconds: Double, pids: [Int32]) {
         watchedPIDs.formIntersection(pids)
         for pid in pids where pid > 0 && watchedPIDs.insert(pid).inserted {
-            var process = kevent(ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT), fflags: UInt32(NOTE_EXIT), data: 0, udata: nil)
+            var process = kevent(
+                ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT),
+                fflags: UInt32(NOTE_EXIT), data: 0, udata: nil)
             if kevent(queue, &process, 1, nil, 0, nil) != 0 {
                 return
             }

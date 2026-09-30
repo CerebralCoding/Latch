@@ -4,8 +4,12 @@ import Foundation
 enum MCPSupervisor {
     static func run(path: String, id: String, lease: Int32, activity: Int32) -> Int32 {
         guard UUID(uuidString: id) != nil, lease > 2, activity > 2,
-              fcntl(lease, F_GETFD) >= 0, fcntl(activity, F_GETFD) >= 0 else { return 74 }
-        defer { close(lease); close(activity) }
+            fcntl(lease, F_GETFD) >= 0, fcntl(activity, F_GETFD) >= 0
+        else { return 74 }
+        defer {
+            close(lease)
+            close(activity)
+        }
         signal(SIGTERM, SIG_DFL)
         signal(SIGINT, SIG_DFL)
         signal(SIGPIPE, SIG_IGN)
@@ -13,25 +17,45 @@ enum MCPSupervisor {
             let scheduler = try Scheduler(path: path)
             let store = try DurableJobs(scheduler: scheduler)
             guard let record = try store.records().first(where: { $0.id == id }) else { return 74 }
-            let executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
+            let executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
+                .resolvingSymlinksInPath()
             let watcher = try QueueWatcher(directory: scheduler.directory.path)
+            let checkpoints =
+                try record.submission.checkpoints == true ? CheckpointCoordinator(id: id, scheduler: scheduler) : nil
             while true {
                 if FileManager.default.fileExists(atPath: store.file(id, "cancel").path) {
-                    try store.publish(id, result: ["jobID": .string(id), "requestKey": .string(record.submission.requestKey), "name": .string(record.submission.name),
-                                                   "complete": true, "state": "cancelled", "succeeded": false, "phase": "admission", "exitCode": 15, "terminationReason": "signal",
-                                                   "stdout": "", "stderr": "", "stdoutTruncated": false, "stderrTruncated": false])
+                    try store.publish(
+                        id,
+                        result: [
+                            "jobID": .string(id), "requestKey": .string(record.submission.requestKey),
+                            "name": .string(record.submission.name),
+                            "complete": true, "state": "cancelled", "succeeded": false, "phase": "admission",
+                            "exitCode": 15, "terminationReason": "signal",
+                            "stdout": "", "stderr": "", "stdoutTruncated": false, "stderrTruncated": false,
+                        ])
                     return 0
                 }
                 guard (try? SchedulerService.requireRunning(in: scheduler.directory)) != nil else {
                     watcher.wait(seconds: 1, pids: [])
                     continue
                 }
-                let execution = try MCPExecution(id: id, submission: record.submission, directory: store.directory, path: path,
-                                                 executable: executable, updateDescriptor: activity)
+                if let checkpoints, try !checkpoints.admit() {
+                    watcher.wait(seconds: 1, pids: [])
+                    continue
+                }
+                let execution = try MCPExecution(
+                    id: id, submission: record.submission, directory: store.directory, path: path,
+                    executable: executable, updateDescriptor: activity, checkpoints: checkpoints)
                 let result = try supervise(execution, store: store)
                 if result["phase"] == "admission", result["exitCode"] == 69, execution.cancelAt == nil {
-                    try store.publish(id, result: ["jobID": .string(id), "requestKey": .string(record.submission.requestKey), "name": .string(record.submission.name),
-                                                   "complete": false, "state": "queued", "waitingFor": "scheduler service unavailable; ticket retained"])
+                    try store.publish(
+                        id,
+                        result: [
+                            "jobID": .string(id), "requestKey": .string(record.submission.requestKey),
+                            "name": .string(record.submission.name),
+                            "complete": false, "state": "queued",
+                            "waitingFor": "scheduler service unavailable; ticket retained",
+                        ])
                     watcher.wait(seconds: 1, pids: [])
                     continue
                 }
@@ -53,12 +77,21 @@ enum MCPSupervisor {
         guard directory >= 0 else { throw LatchError.system("watch durable job directory") }
         defer { close(directory) }
         func watch(_ ident: UInt, filter: Int32, flags: Int32 = EV_ADD, fflags: UInt32 = 0) throws {
-            var event = kevent(ident: ident, filter: Int16(filter), flags: UInt16(flags), fflags: fflags, data: 0, udata: nil)
+            var event = kevent(
+                ident: ident, filter: Int16(filter), flags: UInt16(flags), fflags: fflags, data: 0, udata: nil)
             guard kevent(queue, &event, 1, nil, 0, nil) == 0 else { throw LatchError.system("watch supervisor event") }
         }
         try watch(UInt(directory), filter: EVFILT_VNODE, flags: EV_ADD | EV_CLEAR, fflags: UInt32(NOTE_WRITE))
         for fd in execution.descriptors {
             try watch(UInt(fd), filter: EVFILT_READ)
+        }
+        if let checkpoint = execution.checkpoints { try watch(UInt(checkpoint.channel), filter: EVFILT_READ) }
+        let schedulerDirectory = open(store.scheduler.directory.path, O_EVTONLY | O_CLOEXEC)
+        guard schedulerDirectory >= 0 else { throw LatchError.system("watch scheduler directory") }
+        defer { close(schedulerDirectory) }
+        if execution.checkpoints != nil {
+            try watch(
+                UInt(schedulerDirectory), filter: EVFILT_VNODE, flags: EV_ADD | EV_CLEAR, fflags: UInt32(NOTE_WRITE))
         }
         try? watch(UInt(execution.pid), filter: EVFILT_PROC, flags: EV_ADD | EV_ONESHOT, fflags: UInt32(NOTE_EXIT))
         var previous: MCPValue?
@@ -70,9 +103,16 @@ enum MCPSupervisor {
                 execution.cancel(now: now)
             }
             execution.update(now: now)
+            if let checkpoint = execution.checkpoints, !execution.complete, execution.cancelAt == nil {
+                do { try checkpoint.advance() } catch {
+                    checkpoint.error = String(describing: error)
+                    execution.cancel(now: now)
+                }
+            }
             try execution.applyControls(store.claimControls(execution.id), store: store)
             if execution.liveOutput != previousOutput {
-                try JSONEncoder().encode(execution.liveOutput).write(to: store.file(execution.id, "output.json"), options: .atomic)
+                try JSONEncoder().encode(execution.liveOutput).write(
+                    to: store.file(execution.id, "output.json"), options: .atomic)
                 previousOutput = execution.liveOutput
             }
             let inputFD = execution.pendingInput.isEmpty ? nil : execution.inputDescriptor
@@ -101,9 +141,12 @@ enum MCPSupervisor {
                 deadlines.append(exited + 2)
             }
             let seconds = deadlines.min().map { max(0, $0 - now) }
-            var timeout = timespec(tv_sec: Int(seconds ?? 0), tv_nsec: Int(((seconds ?? 0).truncatingRemainder(dividingBy: 1)) * 1_000_000_000))
+            var timeout = timespec(
+                tv_sec: Int(seconds ?? 0),
+                tv_nsec: Int(((seconds ?? 0).truncatingRemainder(dividingBy: 1)) * 1_000_000_000))
             var events = Array(repeating: kevent(), count: 8)
-            let count = seconds == nil ? kevent(queue, nil, 0, &events, 8, nil) : kevent(queue, nil, 0, &events, 8, &timeout)
+            let count =
+                seconds == nil ? kevent(queue, nil, 0, &events, 8, nil) : kevent(queue, nil, 0, &events, 8, &timeout)
             if count < 0 {
                 if errno == EINTR {
                     continue
@@ -112,6 +155,19 @@ enum MCPSupervisor {
             }
             for event in events.prefix(Int(count)) where event.filter == Int16(EVFILT_READ) {
                 let fd = Int32(event.ident)
+                if let checkpoint = execution.checkpoints, fd == checkpoint.channel, checkpoint.channelOpen {
+                    if execution.cancelAt != nil || execution.complete {
+                        checkpoint.channelOpen = false
+                    } else {
+                        do { try checkpoint.receive() } catch {
+                            checkpoint.error = String(describing: error)
+                            execution.cancel(now: ProcessInfo.processInfo.systemUptime)
+                        }
+                    }
+                    if !checkpoint.channelOpen || checkpoint.error != nil {
+                        try? watch(UInt(fd), filter: EVFILT_READ, flags: EV_DELETE)
+                    }
+                }
                 if execution.descriptors.contains(fd) {
                     execution.drain(fd)
                 }

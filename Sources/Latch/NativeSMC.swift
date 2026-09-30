@@ -11,7 +11,8 @@ final class NativeSMC {
 
     init() throws {
         var iterator: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleSMC"), &iterator) == KERN_SUCCESS else {
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleSMC"), &iterator) == KERN_SUCCESS
+        else {
             throw LatchError("AppleSMC unavailable", exitCode: 69)
         }
         defer { IOObjectRelease(iterator) }
@@ -24,7 +25,9 @@ final class NativeSMC {
             defer { IOObjectRelease(service) }
             var name = [CChar](repeating: 0, count: 128)
             guard IORegistryEntryGetName(service, &name) == KERN_SUCCESS,
-                  String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self) == "AppleSMCKeysEndpoint" else { continue }
+                String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                    == "AppleSMCKeysEndpoint"
+            else { continue }
             guard IOServiceOpen(service, mach_task_self_, 0, &opened) == KERN_SUCCESS else {
                 throw LatchError("cannot open AppleSMC temperature sensors", exitCode: 69)
             }
@@ -36,7 +39,7 @@ final class NativeSMC {
         guard countBytes.count >= 4 else { throw LatchError("invalid SMC key count", exitCode: 74) }
         let count = countBytes.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         guard count > 0, count < 100_000 else { throw LatchError("invalid SMC key count", exitCode: 74) }
-        for index in 0 ..< count {
+        for index in 0..<count {
             guard let output = try? call(command: 8, index: index) else { continue }
             let key = output.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
             let prefix = UInt16(key >> 16)
@@ -87,7 +90,7 @@ final class NativeSMC {
             return cached
         }
         let output = try call(command: 9, key: key)
-        let info = Array(output[28 ..< 40])
+        let info = Array(output[28..<40])
         keys[key] = info
         return info
     }
@@ -97,7 +100,7 @@ final class NativeSMC {
         let count = info.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
         guard count > 0, count <= 32 else { throw LatchError("invalid SMC value size", exitCode: 74) }
         let output = try call(command: 5, key: key, info: info)
-        return Array(output[48 ..< (48 + Int(count))])
+        return Array(output[48..<(48 + Int(count))])
     }
 
     private func call(command: UInt8, key: UInt32 = 0, index: UInt32 = 0, info: [UInt8]? = nil) throws -> [UInt8] {
@@ -109,7 +112,7 @@ final class NativeSMC {
         }
         input[42] = command
         if let info {
-            input.replaceSubrange(28 ..< 40, with: info)
+            input.replaceSubrange(28..<40, with: info)
         }
         var output = [UInt8](repeating: 0, count: 80)
         var size = output.count

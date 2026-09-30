@@ -4,6 +4,8 @@ A small, headless Swift scheduler for cooperating agents on one Mac. Queue resou
 
 Requires **macOS 26+** and **Swift 6.4+** to build. Native GPU/ANE and temperature sensors use private Apple interfaces, with Apple Silicon support based on [macmon](https://github.com/vladkens/macmon). Unsupported or inaccessible required sensors block admission.
 
+Formatting uses the official formatter bundled with Swift 6.4, with no package dependency. From this repository, run `swift format format --in-place --recursive --configuration .swift-format Package.swift Sources Tests`; verification uses `swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests`. The formatting workflow uses the Xcode 27 toolchain. Latch is excluded from the global `swiftformat` function.
+
 ## Build and service setup
 
 ```sh
@@ -171,6 +173,34 @@ latch sensors
 Optional JSON fields are omitted when unknown or inapplicable. Dates are ISO 8601; monotonic values such as `uptime`, `quietSince`, and `coolSince` are seconds since boot. Headroom describes capacity only: isolation, FIFO, temperature, pressure, other resource checks, and the process latch can still prevent admission. `blockedBy` reports one blocker at a time. When the service is stopped it reports that prerequisite, even if a task uses `--standalone`. All fields are snapshots; neither a view nor a free status reserves anything. No finish-time estimate is invented for arbitrary commands.
 
 `tasks` exposes the scheduler state directly, including the last recorded `waitingFor` reason. Both commands prune expired task leases. `status` prints `free` (0) or `held` (75), including shared holders. `sensors` actively collects readings and prints JSON; use it for diagnosis outside measurements, not a polling loop. Cached sensors becoming stale during a measurement or idle period is expected.
+
+## Cooperative benchmark checkpoints
+
+Submit one checkpoint-capable executable with `checkpoints: true` through `latch_submit` or `latch_execute`. This implies measurement isolation. Latch admits process setup first, then cools and schedules every iteration independently. Ordinary executables must omit this flag; a loop inside an ordinary command has only one admission boundary.
+
+The `LatchCheckpoint` library product has no external dependencies. Add that product to the benchmark's target and use one session from one thread:
+
+```swift
+import LatchCheckpoint
+
+let session = try LatchSession.connect()
+// Load models or prepare shared state during the admitted setup phase.
+for iteration in 0..<10 {
+    try session.awaitPermit(iteration: iteration)
+    // Run and measure the benchmark; finish all asynchronous CPU/GPU work.
+    try session.finishIteration(iteration: iteration)
+}
+```
+
+Before `awaitPermit` and `finishIteration`, all workload threads and devices must be quiescent. After finishing, only lightweight bookkeeping and the next checkpoint are allowed until another permit arrives. The process, memory, model weights, and caches remain alive. Available-memory sensors account for retained allocations; cached resident memory is also exposed in `latch_view`. Latch cannot enforce cooperation inside an arbitrary executable.
+
+The agent submits once and waits on the same job ID. It never sends checkpoints, chooses thermal thresholds, or inserts sleeps. Every ready iteration joins the FIFO tail; other queued jobs can run while this process is parked. The supervisor releases the execution lock during these gaps so fresh sensor samples can establish a new cool/quiet interval. A resumed iteration reacquires isolation before receiving its permit. There is no runtime or iteration-count limit, and admitted iterations are never automatically paused.
+
+Results expose `completedIterations` and the latest 64 `iterations`, each with `iteration`, `waitingSeconds`, `executionSeconds`, and `admissionSensors`; `iterationsTruncated` identifies omitted older entries. These durations describe scheduling and the permit-to-finish envelope, not the benchmark's internal performance metric. Keep detailed benchmark results in repository artifacts. Normal command results also separate admission waiting from execution time when available. Progress reports actual checkpoint stages and iteration numbers.
+
+Agent disconnects leave work running. Service outages block new permits; cancellation still works while parked or running. Use `latch_cancel` on the job ID. A broken checkpoint channel fails the Swift session permanently: exit on its error and never replay an uncertain iteration. Recovery after supervisor loss preserves recorded iteration summaries and reports `terminationReason: "unknown"` once worker leases close. Parked work still counts toward the global outstanding-job limit and update drains.
+
+The wire protocol is newline-delimited JSON on the inherited Unix socket named by `LATCH_CHECKPOINT_FD`, separate from stdin/stdout/stderr. Frames are bounded to 1024 bytes, use `version: 1`, and carry zero-based, sequential `iteration` integers. Send `{"version":1,"kind":"ready","iteration":0}` and block for `kind: "permit"` with the same version/iteration. After quiescing the workload, send `kind: "finished"` and wait for its matching `finished` acknowledgment before advancing. Duplicate requests for the current boundary never advance it twice; invalid ordering/version closes the session through cancellation. Keep one outstanding exchange, do not inherit this socket into unrelated subprocesses, and treat EOF as failure unless all requested iterations have finished.
 
 ## Coordination, lifetime, and failures
 

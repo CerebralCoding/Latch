@@ -1,0 +1,12 @@
+name: Swift formatting
+on: [push, pull_request]
+jobs:
+  format:
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+      - run: swift --version
+      - run: swift package dump-package
+      - run: swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests

@@ -13,7 +13,9 @@ final class MCPProgress {
         guard self.state != state else { return nil }
         self.state = state
         sequence += 1
-        var params: [String: MCPValue] = ["progressToken": token, "progress": .number(Double(sequence)), "message": .string(state)]
+        var params: [String: MCPValue] = [
+            "progressToken": token, "progress": .number(Double(sequence)), "message": .string(state),
+        ]
         if let taskID {
             params["_meta"] = MCPTask.metadata(taskID)
         }
@@ -42,8 +44,10 @@ final class MCPTask {
     func update(job: MCPJob) throws -> Bool {
         guard !terminal else { return false }
         let result = try job.result(includeOutput: false)
-        let next = job.complete ? (job.cancelAt != nil ? "cancelled" : (result["succeeded"] == true ? "completed" : "failed")) : "working"
-        let message = job.complete ? next : (result["state"]?.string ?? next)
+        let next =
+            job.complete
+            ? (job.cancelAt != nil ? "cancelled" : (result["succeeded"] == true ? "completed" : "failed")) : "working"
+        let message = job.complete ? next : (result["progressMessage"]?.string ?? result["state"]?.string ?? next)
         guard next != status || message != self.message else { return false }
         status = next
         self.message = message
@@ -52,9 +56,11 @@ final class MCPTask {
     }
 
     func value() throws -> MCPValue {
-        try ["taskId": .string(jobID), "status": .string(status), "statusMessage": .string(message),
-             "createdAt": .encoded(createdAt), "lastUpdatedAt": .encoded(updatedAt),
-             "ttl": .null, "pollInterval": 25000]
+        try [
+            "taskId": .string(jobID), "status": .string(status), "statusMessage": .string(message),
+            "createdAt": .encoded(createdAt), "lastUpdatedAt": .encoded(updatedAt),
+            "ttl": .null, "pollInterval": 25000,
+        ]
     }
 
     static func metadata(_ id: String) -> MCPValue {
