@@ -9,6 +9,7 @@ private final class UpdateFixture {
     let scheduler: Scheduler
     let target: URL
     let source: URL
+    let updates: URL
     var loaded = true
     var revision: Int? = BuildIdentity.serviceRevision
     var events: [String] = []
@@ -19,8 +20,16 @@ private final class UpdateFixture {
         scheduler = try Scheduler(path: fixture.lockPath)
         target = fixture.directory.appendingPathComponent("installed")
         source = fixture.directory.appendingPathComponent("candidate")
+        updates = fixture.directory.appendingPathComponent("state/updates")
         try Data("old".utf8).write(to: target)
         try Data("new".utf8).write(to: source)
+        try InstallationPaths.privateDirectory(updates)
+        try JSONEncoder().encode(
+            UpdateReceipt(
+                current: BuildIdentity(release: "fixture", serviceRevision: nil, sha256: BuildIdentity.digest(target)),
+                previous: nil
+            )
+        ).write(to: ServiceUpdate.receipt(in: updates))
     }
 
     var service: UpdateServiceControl {
@@ -42,7 +51,8 @@ private final class UpdateFixture {
 
     func apply(rollback: Bool = false, restart: Bool = false, timeout: Double = 0) throws -> Bool {
         try ServiceUpdate.apply(
-            source: source, target: target, scheduler: scheduler, rollback: rollback, timeout: timeout,
+            source: source, target: target, updates: updates, scheduler: scheduler, rollback: rollback,
+            timeout: timeout,
             restartService: restart, service: service)
     }
 
@@ -72,12 +82,12 @@ private final class UpdateFixture {
     #expect(f.events.isEmpty)
     #expect(f.loaded)
     #expect(try f.contents(f.target) == "new")
-    #expect(try f.contents(ServiceUpdate.previous(for: f.target)) == "old")
+    #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
     #expect(try UpdateDrain.generation(in: f.scheduler.directory) != oldGeneration)
     #expect(try f.apply(rollback: true))
     #expect(f.events == ["stop", "start"])
     #expect(try f.contents(f.target) == "old")
-    #expect(try f.contents(ServiceUpdate.previous(for: f.target)) == "new")
+    #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "new")
 }
 
 @Test func `changed service revision and explicit restart restart only loaded services`() throws {
@@ -99,11 +109,12 @@ private final class UpdateFixture {
 @Test func `failed service startup restores the old binary and service`() throws {
     let f = try UpdateFixture()
     f.failStart = true
+    let receipt = try Data(contentsOf: ServiceUpdate.receipt(in: f.updates))
     #expect(throws: LatchError.self) { try f.apply(restart: true) }
     #expect(f.events == ["stop", "start", "stop", "start"])
     #expect(f.loaded)
     #expect(try f.contents(f.target) == "old")
-    #expect(!FileManager.default.fileExists(atPath: ServiceUpdate.receipt(for: f.target).path))
+    #expect(try Data(contentsOf: ServiceUpdate.receipt(in: f.updates)) == receipt)
     _ = try UpdateDrain.admit(in: f.scheduler.directory)
 }
 
@@ -137,7 +148,7 @@ private final class UpdateFixture {
 @Test func `rollback rejects changed backup without touching installed code`() throws {
     let f = try UpdateFixture()
     _ = try f.apply()
-    try Data("damaged".utf8).write(to: ServiceUpdate.previous(for: f.target))
+    try Data("damaged".utf8).write(to: ServiceUpdate.previous(in: f.updates))
     #expect(throws: LatchError.self) { try f.apply(rollback: true) }
     #expect(try f.contents(f.target) == "new")
     #expect(f.events.isEmpty)
@@ -148,22 +159,22 @@ private final class UpdateFixture {
     _ = try f.apply()
     let generation = try UpdateDrain.generation(in: f.scheduler.directory)
     _ = try f.apply()
-    #expect(try f.contents(ServiceUpdate.previous(for: f.target)) == "old")
+    #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
     #expect(try UpdateDrain.generation(in: f.scheduler.directory) == generation)
     #expect(f.events.isEmpty)
     #expect(try f.apply(restart: true))
     #expect(f.events == ["stop", "start"])
-    #expect(try f.contents(ServiceUpdate.previous(for: f.target)) == "old")
+    #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
 }
 
 @Test func `recovery after later update failure keeps the existing rollback copy`() throws {
     let f = try UpdateFixture()
     _ = try f.apply()
-    let receipt = try Data(contentsOf: ServiceUpdate.receipt(for: f.target))
+    let receipt = try Data(contentsOf: ServiceUpdate.receipt(in: f.updates))
     try Data("newer".utf8).write(to: f.source)
     f.failStart = true
     #expect(throws: LatchError.self) { try f.apply(restart: true) }
     #expect(try f.contents(f.target) == "new")
-    #expect(try f.contents(ServiceUpdate.previous(for: f.target)) == "old")
-    #expect(try Data(contentsOf: ServiceUpdate.receipt(for: f.target)) == receipt)
+    #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
+    #expect(try Data(contentsOf: ServiceUpdate.receipt(in: f.updates)) == receipt)
 }

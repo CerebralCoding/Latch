@@ -30,6 +30,10 @@ struct Latch {
         }
         do {
             let options = try Options(arguments: Array(CommandLine.arguments.dropFirst()))
+            if options.command == .version {
+                print(BuildIdentity.version)
+                return
+            }
             if options.command == .help {
                 print(Options.usage)
                 return
@@ -101,7 +105,7 @@ struct Latch {
                     print("held")
                     exit(75)
                 }
-            case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback:
+            case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version:
                 break
             }
         } catch let error as LatchError {

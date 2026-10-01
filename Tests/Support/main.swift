@@ -1,8 +1,49 @@
+import CryptoKit
 import Darwin
 import Foundation
 import LatchCheckpoint
 
 let arguments = Array(CommandLine.arguments.dropFirst())
+let tool = URL(fileURLWithPath: CommandLine.arguments[0]).lastPathComponent
+if tool.hasPrefix("installer-") {
+    let environment = ProcessInfo.processInfo.environment
+    let scenario = environment["LATCH_INSTALLER_TEST_SCENARIO"] ?? "install"
+    let home = URL(fileURLWithPath: environment["HOME"]!)
+    let event = tool + " " + arguments.joined(separator: " ") + "\n"
+    let log = try FileHandle(forWritingTo: home.appendingPathComponent("events"))
+    try log.seekToEnd()
+    try log.write(contentsOf: Data(event.utf8))
+    try log.close()
+    switch tool {
+    case "installer-id": print(scenario == "root" ? "0" : "501")
+    case "installer-uname": print(arguments == ["-s"] ? "Darwin" : scenario == "intel" ? "x86_64" : "arm64")
+    case "installer-sw_vers": print(scenario == "old-os" ? "25.0" : "26.0")
+    case "installer-stat": print("501")
+    case "installer-codesign": exit(scenario == "bad-signature" ? 1 : 0)
+    case "installer-curl":
+        if scenario == "network-failure" { exit(22) }
+        let index = arguments.firstIndex(of: "--output")!
+        let output = URL(fileURLWithPath: arguments[index + 1])
+        if arguments.last!.hasSuffix(".sha256") {
+            let data = try Data(contentsOf: URL(fileURLWithPath: environment["LATCH_INSTALLER_TEST_BINARY"]!))
+            let hash =
+                scenario == "bad-checksum"
+                ? String(repeating: "0", count: 64)
+                : SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            try Data((hash + "\n").utf8).write(to: output)
+        } else {
+            try FileManager.default.copyItem(atPath: environment["LATCH_INSTALLER_TEST_BINARY"]!, toPath: output.path)
+        }
+    case "installer-latch":
+        if arguments == ["--version"] {
+            print(scenario == "bad-version" ? "9.9.9" : "0.11.0")
+        } else if scenario == "command-failure" {
+            exit(74)
+        }
+    default: exit(64)
+    }
+    exit(0)
+}
 switch arguments.first {
 case "checkpoints":
     let session = try LatchSession.connect()

@@ -76,22 +76,10 @@ enum SchedulerService {
 }
 
 enum ServiceInstallation {
-    static let label = "dev.latch.scheduler"
-    static var root: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Latch")
-    }
-
-    static var executable: URL {
-        root.appendingPathComponent("bin/latch")
-    }
-
-    static var commandLink: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/latch")
-    }
-
-    static var plist: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/\(label).plist")
-    }
+    static let label = InstallationPaths.identifier
+    static var paths: InstallationPaths { InstallationPaths() }
+    static var executable: URL { paths.executable }
+    static var plist: URL { paths.plist }
 
     static var domain: String {
         "gui/\(getuid())"
@@ -120,74 +108,53 @@ enum ServiceInstallation {
                 throw LatchError("scheduler service is stopped", exitCode: 69)
             }
         case .install:
-            let manager = FileManager.default
-            guard !manager.fileExists(atPath: executable.path), !manager.fileExists(atPath: plist.path) else {
+            let scheduler = try Scheduler(path: path)
+            guard try !SchedulerService.status(in: scheduler.directory).running else {
                 throw LatchError(
-                    "Latch is already installed; run the new binary with update (or service start to start it)")
+                    "scheduler is already running for this queue; refusing initial installation", exitCode: 75)
             }
-            try manager.createDirectory(
-                at: executable.deletingLastPathComponent(), withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700])
-            try manager.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let logs = root.appendingPathComponent("logs")
-            try manager.createDirectory(
-                at: logs, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            // Stage the new executable before stopping the service; rename preserves running processes.
             let source = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
                 .resolvingSymlinksInPath()
-            let staged = executable.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
-            defer { try? manager.removeItem(at: staged) }
-            try manager.copyItem(at: source, to: staged)
-            try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staged.path)
-            let data = try PropertyListSerialization.data(
-                fromPropertyList: configuration(
-                    executable: executable.path, path: URL(fileURLWithPath: path).standardizedFileURL.path,
-                    logs: logs.path), format: .xml, options: 0)
-            try installCommandLink(at: commandLink, target: executable)
-            try stopIfLoaded()
-            guard rename(staged.path, executable.path) == 0 else { throw LatchError.system("install executable") }
-            try data.write(to: plist, options: .atomic)
-            try launchctl(["bootstrap", domain, plist.path])
-            try waitUntilRunning(path: path)
-            print("Installed and started \(label)\nCommand: \(commandLink.path)")
+            try ServiceInstall.install(
+                source: source, paths: paths, queue: path,
+                service: UpdateServiceControl(
+                    loaded: isLoaded, revision: { nil }, stop: stopIfLoaded,
+                    start: {
+                        try launchctl(["bootstrap", domain, plist.path])
+                        try waitUntilRunning(path: path)
+                    }))
+            print("Installed and started \(label)\nCommand: \(executable.path)")
             if !(ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").contains(
-                Substring(commandLink.deletingLastPathComponent().path))
+                Substring(executable.deletingLastPathComponent().path))
             {
                 print("Add ~/.local/bin to your shell and agent PATH to run latch by name.")
             }
         case .start:
-            let config =
-                try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), format: nil) as? [String: Any]
-            guard let arguments = config?["ProgramArguments"] as? [String], arguments.count == 5,
-                Array(arguments[1...3]) == ["service", "run", "--file"]
-            else {
-                throw LatchError("invalid installed service configuration; run service install", exitCode: 74)
-            }
+            let installedQueue = try installedPath()
             if try isLoaded() {
                 try launchctl(["kickstart", "\(domain)/\(label)"])
             } else {
                 try launchctl(["bootstrap", domain, plist.path])
             }
-            try waitUntilRunning(path: arguments[4])
+            try waitUntilRunning(path: installedQueue)
         case .stop:
             try stopIfLoaded()
         case .uninstall:
-            try stopIfLoaded()
-            try removeCommandLink(at: commandLink, target: executable)
-            if FileManager.default.fileExists(atPath: plist.path) {
-                try FileManager.default.removeItem(at: plist)
-            }
-            if FileManager.default.fileExists(atPath: executable.path) {
-                try FileManager.default.removeItem(at: executable)
-            }
+            try ServiceInstall.uninstall(paths: paths, stop: stopIfLoaded)
         }
     }
 
-    static func installedPath() throws -> String {
+    static func installedPath(paths: InstallationPaths = InstallationPaths()) throws -> String {
+        let attributes = try FileManager.default.attributesOfItem(atPath: paths.plist.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+            (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == geteuid()
+        else { throw LatchError("service configuration must be a regular file owned by this user", exitCode: 74) }
         let config =
-            try PropertyListSerialization.propertyList(from: Data(contentsOf: plist), format: nil) as? [String: Any]
+            try PropertyListSerialization.propertyList(from: Data(contentsOf: paths.plist), format: nil)
+            as? [String: Any]
         guard let arguments = config?["ProgramArguments"] as? [String], arguments.count == 5,
-            arguments[0] == executable.path, Array(arguments[1...3]) == ["service", "run", "--file"],
+            config?["Label"] as? String == label,
+            arguments[0] == paths.executable.path, Array(arguments[1...3]) == ["service", "run", "--file"],
             arguments[4].hasPrefix("/")
         else {
             throw LatchError("invalid installed service configuration", exitCode: 74)
@@ -201,7 +168,7 @@ enum ServiceInstallation {
         let source = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
             .resolvingSymlinksInPath()
         let restarted = try ServiceUpdate.apply(
-            source: source, target: executable, scheduler: scheduler, rollback: rollback,
+            source: source, target: executable, updates: paths.updates, scheduler: scheduler, rollback: rollback,
             timeout: timeout, restartService: restartService,
             service: UpdateServiceControl(
                 loaded: isLoaded,
@@ -216,26 +183,6 @@ enum ServiceInstallation {
         )
     }
 
-    static func installCommandLink(at link: URL, target: URL) throws {
-        let manager = FileManager.default
-        if (try? manager.destinationOfSymbolicLink(atPath: link.path)) == target.path {
-            return
-        }
-        try manager.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
-        do {
-            try manager.createSymbolicLink(atPath: link.path, withDestinationPath: target.path)
-        } catch CocoaError.fileWriteFileExists {
-            throw LatchError("refusing to replace existing command at \(link.path)", exitCode: 74)
-        }
-    }
-
-    static func removeCommandLink(at link: URL, target: URL) throws {
-        let manager = FileManager.default
-        if (try? manager.destinationOfSymbolicLink(atPath: link.path)) == target.path {
-            try manager.removeItem(at: link)
-        }
-    }
-
     private static func waitUntilRunning(path: String) throws {
         let scheduler = try Scheduler(path: path)
         let deadline = ProcessInfo.processInfo.systemUptime + 5
@@ -245,7 +192,7 @@ enum ServiceInstallation {
             }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        throw LatchError("service did not start; inspect \(root.path)/logs/service-error.log", exitCode: 69)
+        throw LatchError("service did not start; inspect \(paths.logs.path)/service-error.log", exitCode: 69)
     }
 
     private static func isLoaded() throws -> Bool {

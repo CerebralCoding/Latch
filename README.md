@@ -6,17 +6,28 @@ Requires **macOS 26+** and **Swift 6.4+** to build. Native GPU/ANE and temperatu
 
 Formatting uses the official formatter bundled with Swift 6.4, with no package dependency. From this repository, run `swift format format --in-place --recursive --configuration .swift-format Package.swift Sources Tests`; verification uses `swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests`. The formatting workflow uses the Xcode 27 toolchain. Latch is excluded from the global `swiftformat` function.
 
-## Build and service setup
+## Installation and service setup
+
+Release publication is currently disabled. Once an approved release is published, download its version-pinned installer from the official repository and run it as your macOS login user (Apple Silicon, macOS 26+):
+
+```sh
+curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.11.0/install.sh --output latch-install.sh
+/bin/sh latch-install.sh
+```
+
+The installer downloads only that release, checks SHA-256 and the Developer ID signature for `com.cerebralcoding.latch`, Team ID `YKF838CLKT`, and checks the executable's version before invoking it. Re-running installs through `update --timeout 600`; first installation uses `service install`. Downloads are staged privately under `~/.cache/latch/` and removed on success or failure. A source copy of `install.sh` requires `--version X.Y.Z`. Conflicting files, symlinks, incomplete installations, and unsupported systems fail without replacing them. It never edits shell configuration or uses administrator access.
+
+Building from source remains supported:
 
 ```sh
 swift build -c release
 swift test -c release
-swift run -c release latch service install
+.build/release/latch service install
 ```
 
-Installation copies the executable to `~/Library/Application Support/Latch/bin/latch`, links it as `~/.local/bin/latch`, installs `~/Library/LaunchAgents/dev.latch.scheduler.plist`, and starts a login LaunchAgent for the current user. It starts again at login and launchd restarts it after an unexpected exit. `service install` is for initial setup and refuses to replace an existing installation or unrelated command link.
+Installation places the actual executable at `~/.local/bin/latch` and installs `~/Library/LaunchAgents/com.cerebralcoding.latch.plist`. The `com.cerebralcoding.latch` login LaunchAgent starts immediately and again at login; launchd restarts it after an unexpected exit. `service install` refuses an existing installation, occupied executable path (including dangling symlinks), or running scheduler for the selected queue. A failed initial start removes the new installation after unloading it; if unloading fails, files remain for operator recovery.
 
-To update, an operator runs the newly built executable with `update --timeout 600`. It rejects new submissions while accepted work drains, atomically replaces the installed binary, and retains `latch.previous` with a SHA-256 installation receipt. A loaded service restarts only if its recorded service revision differs (or is unknown), or `--restart-service` is given; a stopped service stays stopped. Service changes must increment `BuildIdentity.serviceRevision`; MCP-only changes keep that revision. `latch rollback` uses the same drain to restore the previous binary. A failed service start restores the original binary and attempts to restart the original service. Both commands use the latch path in the installed LaunchAgent, ignoring `LATCH_FILE`; `--file` is not accepted. Never run an update inside a scheduled workload, which would wait for itself.
+To update from source, an operator runs the newly built executable with `update --timeout 600`. It rejects new submissions while accepted work drains and atomically replaces the installed binary. `~/.local/state/latch/updates/` holds the rollback executable (`latch.previous`), SHA-256 installation receipt, and installation lock. An executable that no longer matches its receipt is rejected. Replacement staging stays beside the executable; backup staging stays in the updates directory, so cross-volume layouts are supported. A loaded service restarts only if its recorded service revision differs (or is unknown), or `--restart-service` is given; a stopped service stays stopped. Service changes must increment `BuildIdentity.serviceRevision`; MCP-only changes keep that revision. `latch rollback` uses the same drain to restore the previous binary. A failed service start restores the original binary and attempts to restart the original service. Both commands use the latch path in the installed LaunchAgent, ignoring `LATCH_FILE`; `--file` is not accepted. Never run an update inside a scheduled workload, which would wait for itself.
 
 After updating, reconnect each MCP host to negotiate the current capabilities and retrieve retained results by job ID. Endpoints retire when their generation or executable changes, before reading shared state; outdated clients are not supported. Drain timeout leaves the installed version unchanged and releases the submission block. Process termination also releases the drain locks; recovery from an interrupted replacement may require operator intervention.
 
@@ -29,7 +40,9 @@ latch service start
 latch service uninstall
 ```
 
-`stop` unloads the login service until `start` or the next login. `uninstall` also removes its plist, installed executable, and command link if it still points to Latch; queue state and logs remain. Logs are in `~/Library/Application Support/Latch/logs/`. `service status` prints JSON and returns 69 when stopped. Lifecycle commands manage the single installed login service.
+`stop` unloads the login service until `start` or the next login. `uninstall` verifies the installation receipt, then removes its plist, executable, receipt, and rollback binary; queue state and logs remain and a fresh installation is possible. Logs are in `~/.local/state/latch/logs/`. `service status` prints JSON and returns 69 when stopped; `latch --version` prints the executable's release version without contacting the service. Lifecycle commands manage the single installed login service.
+
+Release preparation is manual-only in `.github/workflows/release.yml`, disabled unless `LATCH_RELEASE_PREPARATION_ENABLED` is `true`. Configure the `release-preparation` environment with reviewer approval, `LATCH_DEVELOPER_ID_APPLICATION`, and `LATCH_NOTARY_KEYCHAIN_PROFILE`; the Xcode 27 arm64 runner must already have that Developer ID Application certificate/private key and notarytool profile in its user keychain. Preparation tests, signs with hardened runtime, verifies the pinned identity, and requires accepted notarization before uploading review artifacts. It has read-only repository permissions and no release publication step. Publication and immutable versioned assets require a separate operator-approved action; no release is available merely because this workflow exists.
 
 For a separately managed service, run `latch service run --file /existing/directory/work.lock` in the foreground. Each latch path permits one service. Stop a foreground service using its process manager or a termination signal. `schedule --standalone` and `guard --standalone` explicitly allow client-side sampling without a service.
 

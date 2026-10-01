@@ -3,9 +3,9 @@ import Darwin
 import Foundation
 
 struct BuildIdentity: Codable, Equatable {
-    static let version = "0.10.2"
+    static let version = "0.11.0"
     // Bump when daemon behavior or its client/state contract requires a service restart.
-    static let serviceRevision = 10
+    static let serviceRevision = 11
     var release: String
     var serviceRevision: Int?
     var sha256: String
@@ -23,7 +23,7 @@ struct BuildIdentity: Codable, Equatable {
 
 struct UpdateReceipt: Codable {
     var current: BuildIdentity
-    var previous: BuildIdentity
+    var previous: BuildIdentity?
 }
 
 struct UpdateServiceControl {
@@ -34,20 +34,21 @@ struct UpdateServiceControl {
 }
 
 enum ServiceUpdate {
-    static func previous(for target: URL) -> URL {
-        target.appendingPathExtension("previous")
+    static func previous(in updates: URL) -> URL {
+        updates.appendingPathComponent("latch.previous")
     }
 
-    static func receipt(for target: URL) -> URL {
-        target.appendingPathExtension("installation.json")
+    static func receipt(in updates: URL) -> URL {
+        updates.appendingPathComponent("installation.json")
     }
 
     static func apply(
-        source: URL, target: URL, scheduler: Scheduler, rollback: Bool = false,
+        source: URL, target: URL, updates: URL, scheduler: Scheduler, rollback: Bool = false,
         timeout: Double = 600, restartService: Bool = false, service: UpdateServiceControl
     ) throws -> Bool {
         let manager = FileManager.default
-        let installLock = try FileLatch(path: target.appendingPathExtension("update.lock").path)
+        try InstallationPaths.privateDirectory(updates)
+        let installLock = try FileLatch(path: updates.appendingPathComponent("installation.lock").path)
         try installLock.acquire(shared: false, timeout: 0)
         defer { installLock.release() }
         return try withExtendedLifetime(installLock) {
@@ -61,23 +62,23 @@ enum ServiceUpdate {
                 else {
                     throw LatchError("installed executable must be a regular file owned by this user", exitCode: 74)
                 }
-                let receiptURL = receipt(for: target)
-                let previousReceipt: Data?
-                do { previousReceipt = try Data(contentsOf: receiptURL) } catch CocoaError.fileReadNoSuchFile {
-                    previousReceipt = nil
-                }
-                let record = try previousReceipt.map { try JSONDecoder().decode(UpdateReceipt.self, from: $0) }
+                let receiptURL = receipt(in: updates)
+                let previousReceipt = try Data(contentsOf: receiptURL)
+                let record = try JSONDecoder().decode(UpdateReceipt.self, from: previousReceipt)
                 let currentHash = try BuildIdentity.digest(target)
-                let current =
-                    record?.current.sha256 == currentHash
-                    ? record!.current : BuildIdentity(release: "unknown", serviceRevision: nil, sha256: currentHash)
-                let candidate = rollback ? previous(for: target) : source
+                guard record.current.sha256 == currentHash else {
+                    throw LatchError("installed executable does not match its installation receipt", exitCode: 74)
+                }
+                let current = record.current
+                let candidate = rollback ? previous(in: updates) : source
                 let parent = target.deletingLastPathComponent()
                 let staged = parent.appendingPathComponent(UUID().uuidString)
                 let original = parent.appendingPathComponent(UUID().uuidString)
+                let backup = updates.appendingPathComponent(UUID().uuidString)
                 var preserveRecovery = false
                 defer {
                     try? manager.removeItem(at: staged)
+                    try? manager.removeItem(at: backup)
                     if !preserveRecovery {
                         try? manager.removeItem(at: original)
                     }
@@ -87,7 +88,7 @@ enum ServiceUpdate {
                 let hash = try BuildIdentity.digest(staged)
                 let next: BuildIdentity
                 if rollback {
-                    guard let saved = record?.previous, saved.sha256 == hash else {
+                    guard let saved = record.previous, saved.sha256 == hash else {
                         throw LatchError("rollback binary is missing a matching installation receipt", exitCode: 74)
                     }
                     next = saved
@@ -108,6 +109,8 @@ enum ServiceUpdate {
                     return restart
                 }
                 try manager.copyItem(at: target, to: original)
+                // Backup and executable may live on different volumes; commit each rename locally.
+                try manager.copyItem(at: original, to: backup)
                 var replaced = false
                 do {
                     if restart {
@@ -121,7 +124,7 @@ enum ServiceUpdate {
                     try UpdateDrain.advance(in: scheduler.directory)
                     try JSONEncoder().encode(UpdateReceipt(current: next, previous: current)).write(
                         to: receiptURL, options: .atomic)
-                    try replace(original, previous(for: target))
+                    try replace(backup, previous(in: updates))
                 } catch {
                     let failure = error
                     do {
@@ -131,11 +134,7 @@ enum ServiceUpdate {
                         if replaced {
                             try replace(original, target)
                         }
-                        if let previousReceipt {
-                            try previousReceipt.write(to: receiptURL, options: .atomic)
-                        } else if manager.fileExists(atPath: receiptURL.path) {
-                            try manager.removeItem(at: receiptURL)
-                        }
+                        try previousReceipt.write(to: receiptURL, options: .atomic)
                         if restart {
                             try service.start()
                         }

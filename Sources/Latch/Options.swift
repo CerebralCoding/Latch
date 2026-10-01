@@ -2,7 +2,7 @@ import Foundation
 
 struct Options {
     enum Command: String {
-        case run, wait, status, schedule, tasks, sensors, service, view, mcp, update, rollback, `guard`, help
+        case run, wait, status, schedule, tasks, sensors, service, view, mcp, update, rollback, `guard`, help, version
     }
 
     enum ServiceAction: String { case run, install, start, stop, status, uninstall }
@@ -25,6 +25,11 @@ struct Options {
         if ["help", "--help", "-h"].contains(first) {
             guard arguments.count == 1 else { throw LatchError("unexpected arguments after help") }
             command = .help
+            return
+        }
+        if ["version", "--version"].contains(first) {
+            guard arguments.count == 1 else { throw LatchError("unexpected arguments after version") }
+            command = .version
             return
         }
         guard let command = Command(rawValue: first) else {
@@ -166,12 +171,8 @@ struct Options {
             guard !path.isEmpty else { throw LatchError("latch file path must not be empty") }
             return path
         }
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/state/latch", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700],
-        )
+        let directory = InstallationPaths().state
+        try InstallationPaths.privateDirectory(directory)
         return directory.appendingPathComponent("default.lock").path
     }
 
@@ -195,6 +196,7 @@ struct Options {
           latch sensors
           latch mcp [--file PATH]
           latch update|rollback [--timeout SECONDS] [--restart-service]
+          latch --version
 
         mcp       Serve agent tools over newline-delimited JSON-RPC on stdin/stdout.
                   Uses the existing service. No installation or lifecycle changes.
@@ -213,7 +215,8 @@ struct Options {
                   Requires the service unless --standalone is explicit.
         guard     Queue a checkpoint, print an admitted JSON snapshot, then release.
                   It does not protect subsequent work; prefer schedule for commands.
-        service   install copies this binary and starts a per-user login LaunchAgent.
+        service   install copies this binary to ~/.local/bin/latch and starts
+                  com.cerebralcoding.latch as a per-user login LaunchAgent.
                   start/stop control the installed service; status prints JSON.
                   run serves in the foreground; uninstall retains queue data/logs.
         tasks     JSON snapshot of queued/running tasks, PIDs, reservations, sensors,

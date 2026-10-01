@@ -225,10 +225,10 @@ final class Fixture {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    func launch(_ arguments: [String], input: Pipe? = nil) throws -> Child {
+    func launch(_ arguments: [String], input: Pipe? = nil, includeFile: Bool = true) throws -> Child {
         let child = Child()
         child.process.executableURL = executable
-        child.process.arguments = [arguments[0], "--file", lockPath] + arguments.dropFirst()
+        child.process.arguments = includeFile ? [arguments[0], "--file", lockPath] + arguments.dropFirst() : arguments
         child.process.standardOutput = child.stdout
         child.process.standardError = child.stderr
         child.process.standardInput = input ?? Pipe()

@@ -4,26 +4,6 @@ import Testing
 
 @testable import Latch
 
-@Test func `command link installation is repeatable and preserves unrelated files`() throws {
-    let fixture = try Fixture()
-    let link = fixture.directory.appendingPathComponent("bin/latch")
-    let target = fixture.directory.appendingPathComponent("installed/latch")
-    let manager = FileManager.default
-    try ServiceInstallation.installCommandLink(at: link, target: target)
-    try ServiceInstallation.installCommandLink(at: link, target: target)
-    #expect(try manager.destinationOfSymbolicLink(atPath: link.path) == target.path)
-    try ServiceInstallation.removeCommandLink(at: link, target: target)
-    try Data("another executable".utf8).write(to: link)
-    #expect(throws: LatchError.self) { try ServiceInstallation.installCommandLink(at: link, target: target) }
-    try ServiceInstallation.removeCommandLink(at: link, target: target)
-    #expect(try String(contentsOf: link, encoding: .utf8) == "another executable")
-    try manager.removeItem(at: link)
-    try manager.createSymbolicLink(atPath: link.path, withDestinationPath: "/missing/unrelated/latch")
-    #expect(throws: LatchError.self) { try ServiceInstallation.installCommandLink(at: link, target: target) }
-    try ServiceInstallation.removeCommandLink(at: link, target: target)
-    #expect(try manager.destinationOfSymbolicLink(atPath: link.path) == "/missing/unrelated/latch")
-}
-
 private func coolSensors(at uptime: Double) -> SensorSnapshot {
     SensorSnapshot(
         sampledAt: Date(), uptime: uptime, cpuCores: 8, cpuActive: 0, busiestCore: 0,
@@ -198,6 +178,7 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
             "/path with spaces/latch", "service", "run", "--file", "/state/custom.lock",
         ])
     #expect(decoded["KeepAlive"] as? Bool == true)
+    #expect(decoded["Label"] as? String == "com.cerebralcoding.latch")
     #expect(decoded["RunAtLoad"] as? Bool == true)
     #expect(decoded["UserName"] == nil)
 }

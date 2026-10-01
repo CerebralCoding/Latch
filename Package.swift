@@ -21,12 +21,13 @@ let package = Package(
         ),
         .testTarget(
             name: "LatchTests",
-            dependencies: ["Latch", "LatchTestWorkload"],
+            dependencies: ["Latch", "LatchTestWorkload", "LatchRelease"],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency")
             ],
         ),
         .target(name: "LatchCheckpoint"),
         .executableTarget(name: "LatchTestWorkload", dependencies: ["LatchCheckpoint"], path: "Tests/Support"),
+        .executableTarget(name: "LatchRelease"),
     ],
 )
