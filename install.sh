@@ -25,7 +25,7 @@ IFS=$old_ifs
 [ "$#" -eq 3 ] || fail 'version must have three numeric components'
 
 target="$HOME/.local/bin/latch"
-plist="$HOME/Library/LaunchAgents/com.cerebralcoding.latch.plist"
+plist="$HOME/Library/LaunchAgents/com.cerebralcoding.latch.scheduler.plist"
 mode=install
 if [ -L "$target" ]; then
     fail "refusing to replace symlink: $target"

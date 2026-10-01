@@ -3,6 +3,7 @@ import Foundation
 
 struct InstallationPaths {
     static let identifier = "com.cerebralcoding.latch"
+    static let serviceIdentifier = identifier + ".scheduler"
     let home: URL
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -14,7 +15,7 @@ struct InstallationPaths {
     var logs: URL { state.appendingPathComponent("logs") }
     var updates: URL { state.appendingPathComponent("updates") }
     var cache: URL { home.appendingPathComponent(".cache/latch") }
-    var plist: URL { home.appendingPathComponent("Library/LaunchAgents/\(Self.identifier).plist") }
+    var plist: URL { home.appendingPathComponent("Library/LaunchAgents/\(Self.serviceIdentifier).plist") }
 
     static func exists(_ url: URL) -> Bool {
         var info = stat()

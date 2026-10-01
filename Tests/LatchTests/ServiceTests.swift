@@ -178,7 +178,7 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
             "/path with spaces/latch", "service", "run", "--file", "/state/custom.lock",
         ])
     #expect(decoded["KeepAlive"] as? Bool == true)
-    #expect(decoded["Label"] as? String == "com.cerebralcoding.latch")
+    #expect(decoded["Label"] as? String == "com.cerebralcoding.latch.scheduler")
     #expect(decoded["RunAtLoad"] as? Bool == true)
     #expect(decoded["UserName"] == nil)
 }

@@ -216,7 +216,7 @@ struct Options {
         guard     Queue a checkpoint, print an admitted JSON snapshot, then release.
                   It does not protect subsequent work; prefer schedule for commands.
         service   install copies this binary to ~/.local/bin/latch and starts
-                  com.cerebralcoding.latch as a per-user login LaunchAgent.
+                  com.cerebralcoding.latch.scheduler as a per-user login LaunchAgent.
                   start/stop control the installed service; status prints JSON.
                   run serves in the foreground; uninstall retains queue data/logs.
         tasks     JSON snapshot of queued/running tasks, PIDs, reservations, sensors,

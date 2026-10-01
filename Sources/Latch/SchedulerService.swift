@@ -76,7 +76,7 @@ enum SchedulerService {
 }
 
 enum ServiceInstallation {
-    static let label = InstallationPaths.identifier
+    static let label = InstallationPaths.serviceIdentifier
     static var paths: InstallationPaths { InstallationPaths() }
     static var executable: URL { paths.executable }
     static var plist: URL { paths.plist }
