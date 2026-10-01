@@ -287,7 +287,6 @@ final class MCPServer {
                 value: [
                     "scheduler": MCPValue.encoded(SchedulerView(scheduler: scheduler)),
                     "globalOutstandingLimit": .number(Double(DurableJobs.globalOutstandingLimit)),
-                    "globalRetainedLimit": .number(Double(DurableJobs.globalRetainedLimit)),
                     "jobs": .array(jobs.values.sorted { $0.id < $1.id }.map { try $0.result(includeOutput: false) }),
                 ])
         case "latch_submit", "latch_execute":

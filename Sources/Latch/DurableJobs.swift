@@ -15,7 +15,6 @@ struct DurableJobRecord: Codable, Equatable {
 
 final class DurableJobs {
     static let globalOutstandingLimit = 64
-    static let globalRetainedLimit = 256
     let scheduler: Scheduler
     let directory: URL
 
@@ -54,9 +53,6 @@ final class DurableJobs {
                 records.filter({ !$0.complete }).count < Self.globalOutstandingLimit
             else {
                 throw LatchError("shared queue has reached its \(Self.globalOutstandingLimit)-job limit", exitCode: 75)
-            }
-            guard records.count < Self.globalRetainedLimit else {
-                throw LatchError("retained result limit reached; forget completed jobs", exitCode: 75)
             }
             let record = DurableJobRecord(id: UUID().uuidString, submission: submission)
             let plan = TaskPlanner.plan(

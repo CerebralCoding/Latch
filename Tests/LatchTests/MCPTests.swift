@@ -879,7 +879,6 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
         let view = try second.tool("latch_view")["result"]?["structuredContent"]
         #expect(view?["owner"] == nil)
         #expect(view?["globalOutstandingLimit"] == 64)
-        #expect(view?["globalRetainedLimit"] == 256)
         guard case .array(let jobs) = view?["jobs"] else {
             Issue.record("missing shared jobs")
             return
@@ -893,7 +892,7 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     }
 }
 
-@Test func `durable queue enforces only global outstanding and retention bounds`() throws {
+@Test func `completed history never consumes outstanding queue capacity`() throws {
     let fixture = try Fixture()
     let store = try DurableJobs(scheduler: Scheduler(path: fixture.lockPath))
     for _ in 0..<DurableJobs.globalOutstandingLimit {
@@ -904,16 +903,21 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     for record in try store.records() {
         try store.publish(record.id, result: ["state": "completed", "complete": true, "succeeded": true])
     }
-    for index in DurableJobs.globalOutstandingLimit..<DurableJobs.globalRetainedLimit {
+    for index in DurableJobs.globalOutstandingLimit..<512 {
         let record = try store.submit(MCPSubmission(submission(fixture, key: "result-\(index)")))
         try store.publish(record.id, result: ["state": "completed", "complete": true, "succeeded": true])
     }
-    #expect(try store.records().count == DurableJobs.globalRetainedLimit)
-    #expect(throws: LatchError.self) { try store.submit(MCPSubmission(submission(fixture))) }
+    #expect(try store.records().count == 512)
     let completed = try #require(store.records().first)
     #expect(try store.submit(completed.submission).id == completed.id)
     try store.forget(completed.id)
     #expect(try store.submit(completed.submission).id != completed.id)
+    for _ in 1..<DurableJobs.globalOutstandingLimit {
+        _ = try store.submit(MCPSubmission(submission(fixture)))
+    }
+    #expect(try store.scheduler.snapshot().tasks.count == DurableJobs.globalOutstandingLimit)
+    #expect(throws: LatchError.self) { try store.submit(MCPSubmission(submission(fixture))) }
+    #expect(try store.records().filter(\.complete).count == 511)
 }
 
 @Test func `unlaunched durable tickets recover in their original FIFO position`() throws {
