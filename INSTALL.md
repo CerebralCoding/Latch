@@ -37,7 +37,7 @@ Follow MCP initialization instructions and the [usage reference](https://github.
 - Route finite builds, tests, benchmarks, profiling and inference through Latch MCP. Never queue dev servers, watch modes, REPLs, daemons or persistent model servers. Long finite jobs are supported.
 - Submit the actual foreground executable, literal arguments and an absolute working directory. Mark independent work `ordinary` only when overlap is acceptable; otherwise use `sensitive`. Set `measurement: true` for performance measurements. Latch owns budgets, admission, thermal guards and cooling; agents do not plan them.
 - Choose a retry key once using the Latch-issued prefix and a distinct operation suffix. Preserve that full key and identical arguments for uncertain retries, including after reconnecting. Do not generate UUIDs or resubmit work because a wait is pending.
-- With short host timeouts, use `latch_submit`, then `latch_wait` on the same `jobID` until complete. Keep empty waiting updates silent unless asked for status. Report meaningful new findings, changed plans, failures and required user actions during a run.
+- With short host timeouts, use `latch_submit`, then `latch_wait` on the same `jobID` until complete.
 - Disconnecting stops waiting, not the job. Cancel abandoned work with `latch_cancel`, then retrieve its final status. Only control or forget work within the user's authorized task.
 - After updates, reconnect MCP and recover jobs by their original IDs. Report actionable connection failures; do not bypass scheduling with the CLI, another queue or direct heavy execution. Installation authorization does not authorize future automatic updates or restarts.
 
