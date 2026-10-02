@@ -6,7 +6,11 @@ Latch is a small, headless scheduler for autonomous agents sharing one Mac. It q
 
 ## Install
 
-**Latch is currently unreleased. Precompiled downloads are not yet available.** Once releases are published, use the installer attached to an official [release](https://github.com/CerebralCoding/Latch/releases). Replace `X.Y.Z` below with that release's version:
+Give your agent this prompt:
+
+> Install and configure Latch by following https://raw.githubusercontent.com/CerebralCoding/Latch/main/INSTALL.md
+
+For manual installation, use the installer attached to an official [release](https://github.com/CerebralCoding/Latch/releases). Replace `X.Y.Z` below with that release's version:
 
 ```sh
 curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/vX.Y.Z/install.sh --output latch-install.sh
@@ -74,7 +78,7 @@ Example `latch_submit` arguments (replace the paths and retry-key placeholder):
 
 - Use `classification: "ordinary"` only when overlapping execution is acceptable, including shared files and devices. Otherwise use `"sensitive"`, the default, for exclusive execution.
 - Set `measurement: true` for benchmarks, profiling and performance comparisons. Measurements always require exclusive admission, cooling and a quiet window, regardless of classification.
-- With a short host timeout, use `latch_submit`, then `latch_wait` on the returned `jobID`. Waits default to 25 seconds. When `complete` is false, wait on the same ID again; do not resubmit or poll diagnostics. **Wait silently unless the user asks for status:** do not narrate queue states, cooldowns, pending responses or update drains, echo progress notifications, or send heartbeats. Report genuine failures and required user actions promptly.
+- With a short host timeout, use `latch_submit`, then `latch_wait` on the returned `jobID`. Waits default to 25 seconds. When `complete` is false, wait on the same ID again; do not resubmit or poll diagnostics. **Keep empty waiting updates silent unless the user asks for status:** do not narrate queue states, cooldowns, pending responses or update drains, echo progress notifications, or send heartbeats. Report meaningful new findings, changed plans, failures and required user actions during a run.
 - Prefer `latch_execute` when the host supports long requests or MCP tasks. It accepts the same submission arguments and waits for completion.
 
 New submissions and controls need a stable retry key. Latch supplies a unique prefix in initialization instructions, `_meta["com.cerebralcoding.latch/retryKeyPrefix"]`, and keyed tool descriptions. Append a distinct operation name or number for each new operation; no UUID-generation command is needed. Retry uncertain submissions with the **original key and identical arguments**, including after reconnecting. Intentional repeat runs need new keys. Waits, reads, diagnostics, cancellation and forgetting need no new key.

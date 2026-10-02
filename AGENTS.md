@@ -8,7 +8,7 @@ Do not bump the release version or any revision/schema counter, change a persist
 
 # Silent Waiting
 
-**Wait silently unless the user explicitly asks for status.** Continue waits on the original job/control ID without narrating queued/running states, FIFO contention, cooldowns, pending responses, or update drains. Do not echo wait results or progress notifications, send heartbeats, or use diagnostics to fill the silence. Initial acknowledgement and final results are appropriate; report genuine failures and required user actions, such as MCP reconnection, promptly.
+**Keep empty waiting updates silent unless the user explicitly asks for status.** Continue waits on the original job/control ID without narrating queued/running states, FIFO contention, cooldowns, pending responses, or update drains. Do not echo wait results or progress notifications, send heartbeats, or use diagnostics to fill the silence. Report meaningful new developments during a run: findings, completed independent work, changed plans, genuine failures and required user actions such as MCP reconnection. Silence applies to waiting without new information, not substantive progress. Initial acknowledgement and final results are appropriate.
 
 # Formatting
 
