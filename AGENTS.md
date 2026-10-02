@@ -6,6 +6,10 @@ The release version is frozen at **0.16.0**. The service revision, scheduler-sta
 
 Do not bump the release version or any revision/schema counter, change a persisted or wire contract, or add protocol compatibility without the user's explicit approval for that specific change. Routine implementation requests, verification, commits, and pushes do not authorize those changes. Do not update the installed binary or running service without an explicit installation/update request.
 
+# Silent Waiting
+
+**Wait silently unless the user explicitly asks for status.** Continue waits on the original job/control ID without narrating queued/running states, FIFO contention, cooldowns, pending responses, or update drains. Do not echo wait results or progress notifications, send heartbeats, or use diagnostics to fill the silence. Initial acknowledgement and final results are appropriate; report genuine failures and required user actions, such as MCP reconnection, promptly.
+
 # Formatting
 
 Latch is an explicit exception to the global `zsh -ic 'format'` workflow. Use the official formatter bundled with the selected Swift 6.4 toolchain, scoped to this repository:
