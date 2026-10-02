@@ -851,6 +851,75 @@ private func jobID(_ response: MCPValue) throws -> String {
     }
 }
 
+@Test func `scoped bulk clear isolates agents sharing a connection and survives reconnects`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        let ownToken = try #require(
+            client.tool("latch_create_scope")["result"]?["structuredContent"]?["scopeToken"]?.string)
+        let otherToken = try #require(
+            client.tool("latch_create_scope")["result"]?["structuredContent"]?["scopeToken"]?.string)
+        func scoped(_ value: MCPValue, token: String) throws -> MCPValue {
+            var arguments = try #require(value.object)
+            arguments["scopeToken"] = .string(token)
+            return .object(arguments)
+        }
+        let runningArguments = try scoped(
+            interactiveSubmission(fixture, mode: "pipe-input", input: "pipe"), token: ownToken)
+        let running = try jobID(client.tool("latch_submit", arguments: runningArguments))
+        let queuedArguments = try scoped(submission(fixture), token: ownToken)
+        let queued = try jobID(client.tool("latch_submit", arguments: queuedArguments))
+        let foreign = try jobID(
+            client.tool("latch_submit", arguments: scoped(submission(fixture), token: otherToken)))
+        let unscoped = try jobID(client.tool("latch_submit", arguments: submission(fixture)))
+        try admission(scheduler, expectedTasks: 4)
+        _ = try outputUntil(client, job: running, contains: "ready")
+        for response in [
+            try client.tool("latch_view", arguments: ["verbose": true]),
+            try client.tool("latch_jobs"),
+            try client.tool("latch_job", arguments: ["jobID": .string(running)]),
+        ] {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.withoutEscapingSlashes]
+            let text = String(decoding: try encoder.encode(response), as: UTF8.self)
+            #expect(!text.contains(ownToken))
+            #expect(!text.contains(otherToken))
+        }
+        #expect(try client.tool("latch_clear_own")["error"]?["code"] == -32602)
+        #expect(try client.tool("latch_clear_own", arguments: ["scopeToken": "forged"])["error"]?["code"] == -32602)
+        let cleared = try client.tool("latch_clear_own", arguments: ["scopeToken": .string(ownToken)])["result"]?[
+            "structuredContent"]
+        #expect(cleared?["jobIDs"] == .array([running, queued].map(MCPValue.string)))
+        #expect(cleared?["resultsRetained"] == true)
+        for id in [running, queued] {
+            #expect(
+                try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                    "structuredContent"]?["state"] == "cancelled")
+        }
+        for id in [foreign, unscoped] {
+            #expect(
+                try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 0])["result"]?[
+                    "structuredContent"]?["complete"] == false)
+        }
+        try client.input.fileHandleForWriting.close()
+        #expect(try fixture.finish(client.child) == 0)
+        let reconnected = try MCPClient(fixture: fixture)
+        #expect(try jobID(reconnected.tool("latch_submit", arguments: queuedArguments)) == queued)
+        #expect(
+            try reconnected.tool("latch_clear_own", arguments: ["scopeToken": .string(ownToken)])["result"]?[
+                "structuredContent"]?["jobIDs"] == [])
+        #expect(
+            try reconnected.tool("latch_submit", arguments: scoped(queuedArguments, token: otherToken))["error"]?[
+                "code"] == -32602)
+        var missingScope = try #require(queuedArguments.object)
+        missingScope.removeValue(forKey: "scopeToken")
+        #expect(try reconnected.tool("latch_submit", arguments: .object(missingScope))["error"]?["code"] == -32602)
+        #expect(try scheduler.snapshot().tasks.map(\.id) == [foreign, unscoped])
+    }
+}
+
 @Test func `MCP negotiates initialization discovers tools and validates protocol errors`() throws {
     let fixture = try Fixture()
     let client = try MCPClient(fixture: fixture, initialize: false)
@@ -872,6 +941,7 @@ private func jobID(_ response: MCPValue) throws -> String {
         tools.compactMap { $0["name"]?.string } == [
             "latch_view", "latch_submit", "latch_wait", "latch_cancel", "latch_forget", "latch_execute", "latch_signal",
             "latch_input", "latch_resize", "latch_control", "latch_read", "latch_jobs", "latch_job",
+            "latch_create_scope", "latch_clear_own",
         ])
     #expect(initialized["result"]?["capabilities"]?["tasks"]?["requests"]?["tools"]?["call"] == [:])
     #expect(tools[5]["execution"]?["taskSupport"] == "optional")
@@ -884,7 +954,7 @@ private func jobID(_ response: MCPValue) throws -> String {
     #expect(
         Set(properties.keys) == [
             "requestKey", "name", "executable", "arguments", "workingDirectory", "measurement", "input", "columns",
-            "rows", "checkpoints", "classification",
+            "rows", "checkpoints", "classification", "scopeToken",
         ])
     #expect(try client.request("unknown")["error"]?["code"] == -32601)
     #expect(try client.tool("service_install")["error"]?["code"] == -32602)

@@ -11,6 +11,7 @@ struct DurableJobRecord: Codable, Equatable {
     var complete = false
     var supervisorPID: Int32?
     var protocolTask = false
+    var submissionScope: String?
 }
 
 final class DurableJobs {
@@ -40,11 +41,11 @@ final class DurableJobs {
         try scheduler.snapshot().jobs
     }
 
-    func submit(_ submission: MCPSubmission) throws -> DurableJobRecord {
+    func submit(_ submission: MCPSubmission, scope: String? = nil) throws -> DurableJobRecord {
         try scheduler.transaction { state in
             var records = state.jobs
             if let existing = records.first(where: { $0.submission.requestKey == submission.requestKey }) {
-                guard existing.submission == submission else {
+                guard existing.submission == submission, existing.submissionScope == scope else {
                     throw MCPFailure.invalid("requestKey already belongs to a different submission")
                 }
                 return existing
@@ -54,7 +55,7 @@ final class DurableJobs {
             else {
                 throw LatchError("shared queue has reached its \(Self.globalOutstandingLimit)-job limit", exitCode: 75)
             }
-            let record = DurableJobRecord(id: UUID().uuidString, submission: submission)
+            let record = DurableJobRecord(id: UUID().uuidString, submission: submission, submissionScope: scope)
             let plan = TaskPlanner.plan(
                 arguments: submission.arguments, measurement: submission.measurement,
                 classification: submission.classification)
@@ -103,6 +104,15 @@ final class DurableJobs {
 
     func cancel(_ id: String) throws {
         try Data().write(to: file(id, "cancel"), options: .atomic)
+    }
+
+    func clearOwn(scopeToken: String) throws -> [String] {
+        let scope = try SubmissionScope.validate(scopeToken, in: scheduler.directory)
+        return try scheduler.transaction { state in
+            let ids = state.jobs.filter { !$0.complete && $0.submissionScope == scope }.map(\.id)
+            for id in ids { try cancel(id) }
+            return ids
+        }
     }
 
     func forget(_ id: String) throws {

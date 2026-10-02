@@ -356,6 +356,15 @@ final class MCPServer {
         let store = backend.store
         try syncJobs()
         switch name {
+        case "latch_create_scope":
+            _ = try MCPArguments(arguments, allowed: [])
+            try toolResult(
+                id: id, value: ["scopeToken": .string(try SubmissionScope.create(in: scheduler.directory))])
+        case "latch_clear_own":
+            let input = try MCPArguments(arguments, allowed: ["scopeToken"])
+            let ids = try store.clearOwn(scopeToken: input.text("scopeToken", maximum: 128))
+            try toolResult(
+                id: id, value: ["jobIDs": .array(ids.map(MCPValue.string)), "resultsRetained": true])
         case "latch_view":
             let input = try MCPArguments(arguments, allowed: ["verbose"])
             try toolResult(
@@ -383,7 +392,14 @@ final class MCPServer {
             if name == "latch_execute", !task {
                 try requireWaiterSlot()
             }
-            let job = try submit(MCPSubmission(arguments))
+            let input = try MCPArguments(arguments, allowed: MCPTools.submissionKeys.union(["scopeToken"]))
+            let scope =
+                try input.values["scopeToken"].map { _ in
+                    try SubmissionScope.validate(input.text("scopeToken", maximum: 128), in: scheduler.directory)
+                }
+            var values = input.values
+            values.removeValue(forKey: "scopeToken")
+            let job = try submit(MCPSubmission(.object(values)), scope: scope)
             if task {
                 try store.markTask(job.id)
                 let record =
@@ -438,12 +454,12 @@ final class MCPServer {
         }
     }
 
-    private func submit(_ submission: MCPSubmission) throws -> MCPJob {
+    private func submit(_ submission: MCPSubmission, scope: String?) throws -> MCPJob {
         let backend = try connection.get()
         let scheduler = backend.scheduler
         let store = backend.store
         if let existing = jobs.values.first(where: { $0.submission.requestKey == submission.requestKey }) {
-            guard existing.submission == submission else {
+            guard existing.submission == submission, existing.record.submissionScope == scope else {
                 throw MCPFailure.invalid("requestKey already belongs to a different submission")
             }
             return existing
@@ -465,7 +481,7 @@ final class MCPServer {
         else {
             throw MCPConnectionFailure(reason: .schedulerMismatch)
         }
-        let record = try store.submit(submission)
+        let record = try store.submit(submission, scope: scope)
         let job = MCPJob(record: record, store: store)
         jobs[job.id] = job
         // The ticket is committed before launch; the service recovers a missed launch after a connection crash.

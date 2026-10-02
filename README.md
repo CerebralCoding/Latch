@@ -85,6 +85,8 @@ New submissions and controls need a stable retry key. Latch supplies a unique pr
 
 Results expose `complete`, `state`, `succeeded`, `exitCode`, `terminationReason` and `phase`. Check these together: a command failure differs from an admission or execution failure. `terminationReason: "unknown"` means execution is uncertain; never blindly replay it. Disconnecting or cancelling a tool request stops only the wait. Use `latch_cancel`, then `latch_wait`, to stop work and retrieve its final status.
 
+For bulk cancellation, call `latch_create_scope`, retain its private `scopeToken`, and attach it to each submission and retry. `latch_clear_own(scopeToken: ...)` cancels that scope's outstanding jobs and returns IDs for `latch_wait`; final results and retry keys remain available. Tokens survive reconnects and are omitted from global diagnostics. Each agent must create and keep its own token: possession authorizes a submission group, rather than identifying an agent through a shared connection. Unscoped jobs cannot be adopted or bulk-cleared. Retrying scope creation returns a new empty scope; unused scopes add no durable records.
+
 ### What belongs in the queue
 
 Latch supports long **finite** jobs without a runtime limit. Submit builds, single-run tests, finite benchmarks/profiling, and inference or data processing that exits when finished.
@@ -101,6 +103,8 @@ Keep the workload in its submitted foreground process. Do not detach it, backgro
 | `latch_submit` | Submit and return a durable `jobID` immediately |
 | `latch_wait` | Wait for status and bounded final output |
 | `latch_cancel` | Cancel a job and its process group; TERM escalates to KILL after two seconds |
+| `latch_create_scope` | Issue a private capability for an agent's submission group |
+| `latch_clear_own` | Cancel outstanding jobs bearing that private scope token; retain results |
 | `latch_view` | Compact cached service/admission diagnostics and up to ten outstanding summaries; `verbose: true` expands evidence and outstanding work |
 | `latch_jobs` | Page outstanding summaries or retained history |
 | `latch_job` | Retrieve one durable job's submission and detailed result, without stdout/stderr |

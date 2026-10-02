@@ -27,6 +27,9 @@ import Testing
     let second = MCPRetryKeys()
     #expect(first.prefix != second.prefix)
     let tools = MCPTools.listing(retryKeyPrefix: first.prefix)
+    for name in ["latch_create_scope", "latch_clear_own"] {
+        #expect(tools.first { $0["name"] == .string(name) }?["annotations"]?["idempotentHint"] == false)
+    }
     for tool in tools where tool["inputSchema"]?["properties"]?["requestKey"] != nil {
         #expect(
             tool["inputSchema"]?["properties"]?["requestKey"]?["description"]?.string?.contains(first.prefix) == true)
