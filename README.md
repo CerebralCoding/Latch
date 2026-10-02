@@ -11,7 +11,7 @@ Formatting uses the official formatter bundled with Swift 6.4, with no package d
 Release publication is currently disabled. Once an approved release is published, download its version-pinned installer from the official repository and run it as your macOS login user (Apple Silicon, macOS 26+):
 
 ```sh
-curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.13.0/install.sh --output latch-install.sh
+curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.14.0/install.sh --output latch-install.sh
 /bin/sh latch-install.sh
 ```
 
@@ -40,7 +40,7 @@ latch service start
 latch service uninstall
 ```
 
-`stop` unloads the login service until `start` or the next login. `uninstall` verifies the installation receipt, then removes its plist, executable, receipt, and rollback binary; queue state and logs remain and a fresh installation is possible. Logs are in `~/.local/state/latch/logs/`. `service status` prints JSON and returns 69 when stopped; `latch --version` prints the executable's release version without contacting the service. Lifecycle commands manage the single installed login service.
+`stop` unloads the login service until `start` or the next login. `uninstall` verifies the installation receipt, then removes its plist, executable, receipt, and rollback binary; queue state and logs remain and a fresh installation is possible. Logs are in `~/.local/state/latch/logs/`. `service status` prints a readable summary (`--verbose` includes paths; `--json` emits structured data) and returns 69 when stopped; `latch --version` prints the executable's release version without contacting the service. Lifecycle commands manage the single installed login service.
 
 Release preparation is manual-only in `.github/workflows/release.yml`, disabled unless `LATCH_RELEASE_PREPARATION_ENABLED` is `true`. Configure the `release-preparation` environment with reviewer approval, `LATCH_DEVELOPER_ID_APPLICATION`, and `LATCH_NOTARY_KEYCHAIN_PROFILE`; the Xcode 27 arm64 runner must already have that Developer ID Application certificate/private key and notarytool profile in its user keychain. Preparation tests, signs with hardened runtime, verifies the pinned identity, and requires accepted notarization before uploading review artifacts. It has read-only repository permissions and no release publication step. Publication and immutable versioned assets require a separate operator-approved action; no release is available merely because this workflow exists.
 
@@ -81,7 +81,9 @@ Starting this endpoint uses the existing user service; it never installs, starts
 | `latch_submit` | Submit a stable retry key, `name`, absolute `executable`, literal `arguments`, and absolute `workingDirectory`; set `classification: "ordinary"` for independent non-sensitive work or `measurement: true` for measurements. Returns a job ID immediately. |
 | `latch_wait` | Wait on `jobID`, returning status and bounded stdout/stderr. Defaults to 25 seconds per call; `timeoutSeconds` can be 0–600 to suit the MCP host's call timeout. |
 | `latch_cancel` | Cancel a job and its process group by `jobID`, escalating TERM to KILL after two seconds. |
-| `latch_view` | Optional diagnostics: cached scheduler state, global outstanding-job limit, and all durable jobs. No sensor sampling or planning prerequisite. |
+| `latch_view` | Compact cached diagnostics with counts, next admission blocker, and at most ten outstanding summaries; `verbose: true` includes full scheduler evidence and all outstanding work. Completed history is omitted. No sampling or planning prerequisite. |
+| `latch_jobs` | Page compact outstanding summaries or retained history using `scope: "outstanding"` (default) or `"history"`, `limit` (default 20, maximum 50), and the returned `nextCursor`. |
+| `latch_job` | Read one durable job's submission and detailed result by `jobID`, without stdout/stderr. Use `latch_wait` for final output. |
 | `latch_forget` | Discard a completed job's retained output and retry key. |
 | `latch_signal` | Relay `interrupt` (SIGINT), `terminate`, `hangup`, `quit`, `stop`, `continue`, `user1`, or `user2` to running work, without automatic escalation. |
 | `latch_input` | Write literal `text` or `base64` bytes to an opted-in pipe or terminal; `eof: true` closes pipe stdin after writing. |
@@ -103,6 +105,8 @@ Example `latch_execute` (or `latch_submit`) arguments:
 ```
 
 Prefer `latch_execute` when the host supports long requests or MCP tasks. For hosts with short call timeouts, use `latch_submit`, then `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. The shared queue allows 64 outstanding jobs (queued, running, or parked). Completed results and retry keys remain until explicitly forgotten; their count never blocks new submissions. Optional `latch_forget` cleanup reclaims storage when results and retries are no longer needed. Never edit queue state or delete job files manually. Each connection allows 128 pending waits.
+
+`latch_view` reports `outstandingCount`, per-state `counts`, and `omittedJobCount`. Use `latch_jobs` for more summaries, carrying `nextCursor` unchanged with the same scope until `hasMore` is false. Outstanding pages include CLI tasks and sort by submission time oldest first; history sorts by submission time newest first, with IDs breaking timestamp ties. `queuePosition` gives current FIFO order. Cursors survive reconnects and forgetting the last returned job. Pages are live snapshots; concurrent submissions, completions, forgetting, and operator changes can change membership. Inspection needs no retry key and never reserves admission.
 
 Latch issues a unique retry-key prefix in initialization instructions, `_meta["com.cerebralcoding.latch/retryKeyPrefix"]`, and each keyed tool's schema description. Append a distinct operation name or number to that prefix for each new submission or control; no UUID-generation command is needed. Keep the full original key for identical retries, including after lost responses and reconnects; a new connection's prefix is only for new work. Changed input with the same key is rejected, and intentional repeat executions need different keys. Forgetting removes the key, so never retry a forgotten operation. Waits, reads, diagnostics, cancellation, and forgetting need no new key.
 
@@ -143,7 +147,7 @@ latch --run JOB_ID
 latch --clear
 ```
 
-`--list` shows outstanding durable jobs and CLI tasks with stable IDs, state, queue position, and name; completed history is omitted. `--run JOB_ID` moves a queued ticket ahead of other queued work for its next admission. It does not launch a command or preempt work; thermal guards, cooldowns, quiet windows, and isolation still apply. Other tickets retain their relative order, and a checkpoint's next iteration rejoins the FIFO tail normally. `--clear` requests cancellation of jobs that have never started; running jobs and already-started checkpoint processes (including parked/waiting iterations) are preserved. Admission and clearing share a state lock, so a cleared ticket cannot subsequently start. Cancellation completes asynchronously; durable results and retry keys remain available through MCP. New submissions after clearing are unaffected. All three queue commands accept `--file PATH`; mutations require the matching running scheduler service. These overrides are for human operators; agents continue to use MCP and must not change queue order or bulk-clear other agents' work.
+`--list` shows outstanding durable jobs and CLI tasks with full copyable IDs, state, classification, queue position, elapsed time, and name; completed history is omitted. Running work appears first. `--run JOB_ID` moves a queued ticket ahead of other queued work for its next admission. It does not launch a command or preempt work; thermal guards, cooldowns, quiet windows, and isolation still apply. Other tickets retain their relative order, and a checkpoint's next iteration rejoins the FIFO tail normally. `--clear` requests cancellation of jobs that have never started; running jobs and already-started checkpoint processes (including parked/waiting iterations) are preserved. Admission and clearing share a state lock, so a cleared ticket cannot subsequently start. Cancellation completes asynchronously; durable results and retry keys remain available through MCP. New submissions after clearing are unaffected. All three queue commands accept `--file PATH`; mutations require the matching running scheduler service. These overrides are for human operators; agents continue to use MCP and must not change queue order or bulk-clear other agents' work.
 
 ```sh
 # Isolate a benchmark; require CPU/GPU temperatures <=50 C for 10 seconds.
@@ -193,31 +197,36 @@ Cooldowns reset after running tasks finish, a hot/missing reading, a sampling ga
 
 ```sh
 latch view
+latch view --verbose
+latch view --json
 latch tasks
 latch status
 latch sensors
 ```
 
-`view` returns a diagnostic JSON object, schema `version: 1`, without collecting fresh sensor readings. The MCP `latch_view` tool includes it under `scheduler` alongside all durable `jobs` and `globalOutstandingLimit`:
+`view` defaults to a short human report: service health, job counts, running work, the next admission blocker, and cached sensor freshness. `--verbose` expands outstanding work, sensor details, thresholds, advisory reservations, and paths. `view`, `tasks`, `--list`, `sensors`, and `service status` accept `--json` for full structured output; redirection never changes the format. Choose `--verbose` or `--json`, not both. Use `latch COMMAND --help` or `latch help COMMAND` for focused help.
+
+`view --json` and `tasks --json` emit the full diagnostic snapshot, schema `version: 1`, without collecting readings. MCP `latch_view` includes this under `scheduler` only with `verbose: true`; its default is compact:
 
 | Field | Meaning |
 | --- | --- |
 | `service.running`, `service.pid` | Whether the service lease is held and by which service PID |
 | `processLatch` | `free`, `shared`, or `exclusive`; includes legacy `run` holders |
 | `isolatedTaskRunning`, `nextTaskID`, `drainingForTaskID` | Isolation, the next FIFO candidate, and the exclusive job waiting for running work to drain |
-| `sensorsFresh`, `sensorAgeSeconds`, `sensorError` | Whether cached readings are usable now and why they may not be |
+| `sensorsFresh`, `sensorAgeSeconds`, `sensorError`, `samplingPaused`, `samplingPausedReason` | Cached reading validity and pauses for exclusive work, draining, or no ready admission |
 | `sensors` | Last readings, including `cpuTemperature`/`gpuTemperature` in C, activity fractions 0–1, ANE watts, memory MiB, disk bytes/sec, and `unavailable` sensor details |
-| `capacity` | Total/reserved CPU, reserved memory, GPU/I/O/bandwidth reservations; load-adjusted `batchCPUHeadroom` and `memoryHeadroomMiB` only with fresh sensors |
+| `capacity` | Total/reserved/unreserved CPU, reserved memory, GPU/I/O/bandwidth reservations; `ordinaryCPUHeadroom`, CLI `batchCPUHeadroom`, and `memoryHeadroomMiB` only with fresh readings. Ordinary headroom follows ordinary admission rules for already-admitted activity. |
 | `tasks[].task` | ID, name, PID, command arguments, requirements, state, timestamps, and last recorded wait reason |
 | `tasks[].queuePosition` | One-based FIFO position for queued tasks |
 | `tasks[].blockedBy` | Recomputed current admission blocker; absent when no blocker is observed |
+| `tasks[].blockerDetail` | Blocker with observed and required values where applicable |
 | `tasks[].cooldownRemainingSeconds` | Remaining sampled cool interval, reset to the full interval when readings cannot establish progress |
 
 Optional JSON fields are omitted when unknown or inapplicable. Dates are ISO 8601; monotonic values such as `uptime`, `quietSince`, and `coolSince` are seconds since boot. Headroom describes capacity only: isolation, FIFO, temperature, pressure, other resource checks, and the process latch can still prevent admission. `blockedBy` reports one blocker at a time. When the service is stopped it reports that prerequisite, even if a task uses `--standalone`. All fields are snapshots; neither a view nor a free status reserves anything. No finish-time estimate is invented for arbitrary commands.
 
-`tasks` exposes the scheduler state directly, including the last recorded `waitingFor` reason. Both commands prune expired task leases. `status` prints `free` (0) or `held` (75), including shared holders. `sensors` actively collects readings and prints JSON; use it for diagnosis outside measurements, not a polling loop. Cached sensors becoming stale during a measurement or idle period is expected.
+`tasks` prints a focused outstanding-job table. `--list` and `tasks` show up to ten jobs by default; `--verbose` shows all. Full IDs remain copyable, names escape terminal control characters, and narrow terminals use stacked rows. Elapsed time is the current queue wait or time since command start, not an internal benchmark metric. Both commands prune expired task leases. `status` prints `free` (0) or `held` (75), including shared holders; it reports the process latch, not admission eligibility. `sensors` actively collects readings and prints human-readable units; `--verbose` expands them and `--json` emits data. Use it outside measurements, not a polling loop. Stale cached readings during measurements or idle periods are expected; the view labels last captured values and sampling pauses.
 
-Quiet-window admission uses the lower quartile of up to 32 eligible idle readings from the last five minutes (the median during startup), then adapts slowly after five samples. Running Latch work never contributes; queued or parked work prevents upward drift after calibration. Calibration rejects heavy activity, missing sensors, memory pressure, and non-nominal thermal state. Baseline plus noise allowances is capped at 12% CPU average, 60% busiest core, 8% GPU, 0.2 W ANE, and 2 MiB/s disk I/O. Waiting never relaxes these ceilings. `latch_view` exposes `idleBaseline`, `quietLimits`, observed sensors, resource-specific blockers, and `drainingForTaskID`. Measurement results retain an `admission` snapshot containing sensors, baseline, and effective limits; iteration results retain their own snapshot. CPU/GPU temperature guards, continuous quiet intervals, isolation, and FIFO still apply.
+Quiet-window admission uses the lower quartile of up to 32 eligible idle readings from the last five minutes (the median during startup), then adapts slowly after five samples. Running Latch work never contributes; queued or parked work prevents upward drift after calibration. Calibration rejects heavy activity, missing sensors, memory pressure, and non-nominal thermal state. Baseline plus noise allowances is capped at 12% CPU average, 60% busiest core, 8% GPU, 0.2 W ANE, and 2 MiB/s disk I/O. Waiting never relaxes these ceilings. `latch_view` with `verbose: true` exposes `idleBaseline`, `quietLimits`, observed sensors, resource-specific blockers, and `drainingForTaskID`. Measurement results retain an `admission` snapshot containing sensors, baseline, and effective limits; iteration results retain their own snapshot. CPU/GPU temperature guards, continuous quiet intervals, isolation, and FIFO still apply.
 
 ## Cooperative benchmark checkpoints
 

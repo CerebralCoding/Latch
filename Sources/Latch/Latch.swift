@@ -35,11 +35,18 @@ struct Latch {
                 return
             }
             if options.command == .help {
-                print(Options.usage)
+                print(CLIHelp.text(for: options.helpCommand, service: options.helpServiceAction))
                 return
             }
             if options.command == .sensors {
-                try printJSON(NativeSensors.sample())
+                let sensors = try NativeSensors.sample()
+                if options.json {
+                    try printJSON(sensors)
+                } else {
+                    print(
+                        HumanOutput.wrap(
+                            HumanOutput.sensors(sensors, verbose: options.verbose), width: HumanOutput.terminalWidth))
+                }
                 return
             }
             if options.command == .update || options.command == .rollback {
@@ -54,14 +61,17 @@ struct Latch {
                 let queue = try OperatorQueue(scheduler: Scheduler(path: path))
                 switch options.command {
                 case .list:
-                    print(try queue.list())
+                    if options.json {
+                        try printJSON(SchedulerView(scheduler: queue.scheduler).jobs)
+                    } else {
+                        print(try queue.list(verbose: options.verbose))
+                    }
                 case .prioritize:
                     try queue.prioritize(options.jobID!)
                     print("Prioritized \(options.jobID!); admission guards still apply.")
                 case .clear:
                     let ids = try queue.clear()
-                    print("Cancellation requested for \(ids.count) queued job(s).")
-                    for id in ids { print(id) }
+                    print("Cancellation requested for \(ids.count) queued job(s). Already-started work is preserved.")
                 default: break
                 }
                 return
@@ -71,15 +81,19 @@ struct Latch {
                 return
             }
             if options.command == .service {
-                try ServiceInstallation.perform(options.serviceAction!, path: path)
+                try ServiceInstallation.perform(
+                    options.serviceAction!, path: path, verbose: options.verbose, json: options.json)
                 return
             }
-            if options.command == .tasks {
-                try printJSON(Scheduler(path: path).snapshot())
-                return
-            }
-            if options.command == .view {
-                try printJSON(SchedulerView(scheduler: Scheduler(path: path)))
+            if options.command == .view || options.command == .tasks {
+                let view = try SchedulerView(scheduler: Scheduler(path: path))
+                if options.json {
+                    try printJSON(view)
+                } else if options.command == .tasks {
+                    print(HumanOutput.list(view.jobs, verbose: options.verbose))
+                } else {
+                    print(HumanOutput.view(view, verbose: options.verbose))
+                }
                 return
             }
             if options.command == .schedule || options.command == .guard {

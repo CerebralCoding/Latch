@@ -21,14 +21,29 @@ struct Options {
     var serviceAction: ServiceAction?
     var restartService = false
     var jobID: String?
+    var verbose = false
+    var json = false
+    var helpCommand: Command?
+    var helpServiceAction: ServiceAction?
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
             throw LatchError("expected a command; see latch --help")
         }
         if ["help", "--help", "-h"].contains(first) {
-            guard arguments.count == 1 else { throw LatchError("unexpected arguments after help") }
             command = .help
+            if arguments.count > 1 {
+                guard arguments.count <= 3, let target = Command(rawValue: arguments[1]), target != .help else {
+                    throw LatchError("expected a command after help")
+                }
+                helpCommand = target
+                if arguments.count == 3 {
+                    guard target == .service, let action = ServiceAction(rawValue: arguments[2]) else {
+                        throw LatchError("expected a service action after help service")
+                    }
+                    helpServiceAction = action
+                }
+            }
             return
         }
         if ["version", "--version"].contains(first) {
@@ -59,8 +74,15 @@ struct Options {
                 guard serviceAction == nil else { throw LatchError("service accepts one action") }
                 serviceAction = ServiceAction(rawValue: action)
             case "--help", "-h":
+                helpCommand = command
+                helpServiceAction = serviceAction
                 self.command = .help
                 return
+            case "--verbose", "--json":
+                guard [.view, .tasks, .sensors, .list, .service].contains(command) else {
+                    throw LatchError("\(argument) is only valid for diagnostic commands")
+                }
+                if argument == "--verbose" { verbose = true } else { json = true }
             case "--file":
                 guard ![.sensors, .update, .rollback].contains(command), file == nil, index < arguments.count,
                     !arguments[index].isEmpty
@@ -167,6 +189,10 @@ struct Options {
         if command == .service, serviceAction == nil {
             throw LatchError("service requires run, install, start, stop, status, or uninstall")
         }
+        if command == .service, verbose || json, serviceAction != .status {
+            throw LatchError("--verbose and --json are only valid for service status")
+        }
+        if verbose && json { throw LatchError("choose --verbose or --json, not both") }
         if command == .prioritize, jobID == nil {
             throw LatchError("--run requires a queued job ID from --list")
         }
@@ -185,129 +211,4 @@ struct Options {
         try InstallationPaths.privateDirectory(directory)
         return directory.appendingPathComponent("default.lock").path
     }
-
-    static let usage = """
-        Usage:
-          latch run [--file PATH] [--shared] [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
-          latch wait [--file PATH] [--timeout SECONDS | --no-wait]
-          latch status [--file PATH]
-          latch schedule [--file PATH] [--name NAME] [--mode isolated|batch]
-                         [--cpu CORES] [--memory-mib MIB] [--gpu] [--io] [--bandwidth]
-                         [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
-                         [--standalone]
-                         [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
-          latch guard [--file PATH] [--name NAME] [--mode isolated|batch]
-                      [--cpu CORES] [--memory-mib MIB]
-                      [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
-                      [--standalone] [--timeout SECONDS | --no-wait]
-          latch service install|start|stop|status|uninstall|run [--file PATH]
-          latch tasks [--file PATH]
-          latch view [--file PATH]
-          latch sensors
-          latch mcp [--file PATH]
-          latch update|rollback [--timeout SECONDS] [--restart-service]
-          latch --version
-          latch --list [--file PATH]
-          latch --run JOB_ID [--file PATH]
-          latch --clear [--file PATH]
-
-        --list    List outstanding jobs and CLI tasks in scheduler order.
-        --run     Move a queued job to the front for its next admission. Operator
-                  override of FIFO only; isolation and sensor guards still apply.
-                  Does not preempt running work or launch a new command.
-        --clear   Request cancellation of queued jobs that have never started.
-                  Running jobs and started checkpoint processes are preserved.
-                  Retained results and retry keys remain available to agents.
-                  Queue controls are operator commands, not MCP tools.
-                  --run and --clear require the matching running scheduler service.
-
-        mcp       Serve agent tools over newline-delimited JSON-RPC on stdin/stdout.
-                  Uses the existing service. No installation or lifecycle changes.
-        update    Run from the newly built binary to drain work and atomically update
-                  the installed executable, retaining the previous binary for rollback.
-                  Restarts a loaded service only when its revision differs or when
-                  --restart-service is explicit. A stopped service stays stopped.
-        rollback  Drain and restore the previous installed binary. Both commands use
-                  the installed service's latch path. Drain timeout defaults to 600s.
-                  Existing MCP hosts retain results; reconnect them before new work.
-        schedule  Queue a named task until reservations and native sensors allow it.
-                  Defaults: isolated, 1 CPU core, 512 MiB. Batch tasks may overlap
-                  within CPU/memory budgets; GPU, I/O, and bandwidth are exclusive
-                  resources when requested. Declare the command's peak requirements.
-                  FIFO admission prevents new work overtaking a waiting measurement.
-                  Requires the service unless --standalone is explicit.
-        guard     Queue a checkpoint, print an admitted JSON snapshot, then release.
-                  It does not protect subsequent work; prefer schedule for commands.
-        service   install copies this binary to ~/.local/bin/latch and starts
-                  com.cerebralcoding.latch.scheduler as a per-user login LaunchAgent.
-                  start/stop control the installed service; status prints JSON.
-                  run serves in the foreground; uninstall retains queue data/logs.
-        tasks     JSON snapshot of queued/running tasks, PIDs, reservations, sensors,
-                  and waiting reasons. Completed/crashed tasks are pruned by leases.
-        view      JSON planning snapshot: service, latch holders, FIFO order, current
-                  blocking reasons, cooldowns, resource headroom and sensor freshness.
-                  Uses cached readings; it does not sample or reserve resources.
-        sensors   Sample native macOS CPU, GPU, ANE, memory, thermal, and disk sensors
-                  plus CPU/GPU temperatures, and print JSON. No root access needed.
-
-        Temperature defaults for schedule/guard: hottest CPU and GPU <=55 C for
-        5 consecutive seconds. --cooldown accepts 0–3600 seconds; limits 1–125 C.
-        Missing temperatures block admission. Cooldowns reset when running tasks
-        finish, sensors fail/go stale, or the service restarts. Guards only gate
-        starts; admitted tasks run uninterrupted. Limits are workflow preferences,
-        not hardware safety limits.
-
-        Isolated CLI tasks require no running Latch tasks and two seconds of quiet.
-        Quiet limits adapt to measured idle activity with bounded noise allowances;
-        view exposes the baseline, effective limits, and observed sensor values.
-        All scheduled tasks leave 10% physical memory headroom. Batch admission also
-        requires CPU load <=80%; GPU/I/O requests require those resources to be idle.
-        Unknown/stale required sensors block admission. GPU/ANE use private IOReport
-        APIs and may be unavailable on some Macs. Latch requires macOS 26 or newer.
-
-        Scheduler state lives beside the latch in PATH.queue (private to this user).
-        Queue changes/process exits wake waiters; sensor eligibility is rechecked at
-        most once per second by the service while work is queued. Sampling stops behind
-        an exclusive latch. Sensors observe background load, but cannot prevent an
-        unrelated process from starting later. Use isolated mode for measurements.
-        A schedule timeout bounds admission, not command runtime. --no-wait uses
-        cached service readings and never waits for a cooldown/quiet window.
-        --standalone lets the queue head collect readings without a service.
-
-        run     Hold an exclusive latch for a command. --shared lets cooperating
-                background work overlap while excluding exclusive work.
-        wait    Wait until no exclusive holder remains, then exit. This is only a
-                checkpoint; use run to protect the full duration of work.
-        status  Print free (exit 0) or held (exit 75), including shared holders.
-                Status is a snapshot, not a reservation.
-
-        The default is to block without polling. --no-wait fails immediately;
-        --timeout bounds the wait in seconds (fractional values allowed).
-        File: --file, then LATCH_FILE, then ~/.local/state/latch/default.lock.
-        Explicit paths require an existing parent directory. All agents must use
-        the same file on a local filesystem. Never delete or replace a latch file.
-
-        run/schedule replace themselves with COMMAND, preserving arguments, streams, signals,
-        and exit status. The lock descriptor is inherited by the command and its
-        children; it releases when the last copy closes, including on process exit.
-        Commands that close inherited descriptors can release the latch early.
-        Coordination is advisory; every participant must cooperate. Waiters are
-        not guaranteed FIFO ordering for run/wait. No external dependencies.
-
-        Exit codes: 64 usage, 69 service unavailable, 71 allocation failure,
-                    74 I/O, 75 busy/timeout, 126 cannot execute, 127 command not found.
-                    run/schedule otherwise return COMMAND's status.
-
-        Examples:
-          latch service install
-          latch service status
-          latch run -- swift test
-          latch run --shared -- swift build
-          latch run --timeout 30 -- ./benchmark
-          latch wait --no-wait
-          latch schedule --name benchmark -- ./benchmark
-          latch schedule --mode batch --cpu 4 --memory-mib 4096 -- swift build -j 4
-          latch schedule --mode batch --gpu --memory-mib 8192 -- ./inference
-          latch tasks
-        """
 }

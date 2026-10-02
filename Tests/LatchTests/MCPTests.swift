@@ -109,6 +109,109 @@ private func checkpointState(_ client: MCPClient, id: String, state: String, ite
     throw LatchError("checkpoint did not reach \(state) iteration \(iteration)")
 }
 
+@Test func `MCP diagnostics bound outstanding summaries and explicitly page history across reconnects`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    let store = try DurableJobs(scheduler: scheduler)
+    try withExtendedLifetime(service) {
+        var historyIDs: [String] = []
+        for index in 0..<80 {
+            let record = try store.submit(MCPSubmission(submission(fixture, key: "history-\(index)")))
+            historyIDs.append(record.id)
+            try store.publish(
+                record.id,
+                result: [
+                    "jobID": .string(record.id), "complete": true, "state": "completed", "succeeded": false,
+                    "exitCode": 42, "stdout": "retained output",
+                ])
+        }
+        // Equal timestamps exercise deterministic tie-breaking rather than UUID order alone.
+        let timestamp = Date(timeIntervalSinceReferenceDate: 100)
+        try scheduler.transaction { state in
+            for index in state.jobs!.indices { state.jobs?[index].createdAt = timestamp }
+        }
+        var queuedIDs: [String] = []
+        for index in 0..<12 {
+            queuedIDs.append(try store.submit(MCPSubmission(submission(fixture, key: "queued-\(index)"))).id)
+        }
+        let first = try MCPClient(fixture: fixture)
+        let compact = try #require(first.tool("latch_view")["result"]?["structuredContent"])
+        #expect(compact["outstandingCount"] == 12)
+        #expect(compact["omittedJobCount"] == 2)
+        #expect(compact["scheduler"]?["tasks"] == nil)
+        #expect(compact["scheduler"]?["quietLimits"] == nil)
+        #expect(try JSONEncoder().encode(compact).count < 20000)
+        guard case .array(let jobs) = compact["jobs"] else {
+            Issue.record("missing summaries")
+            return
+        }
+        #expect(jobs.compactMap { $0["jobID"]?.string } == Array(queuedIDs.prefix(10)))
+        #expect(jobs.allSatisfy { $0["plan"] == nil && $0["requestKey"] == nil && $0["admission"] == nil })
+        let verbose = try first.tool("latch_view", arguments: ["verbose": true])["result"]?["structuredContent"]
+        #expect(verbose?["omittedJobCount"] == 0)
+        #expect(verbose?["scheduler"]?["tasks"] != nil)
+        #expect(verbose?["scheduler"]?["quietLimits"] != nil)
+        let outstandingPage = try first.tool("latch_jobs", arguments: ["limit": 5])["result"]?["structuredContent"]
+        guard case .array(let outstanding) = outstandingPage?["jobs"] else {
+            Issue.record("missing outstanding page")
+            return
+        }
+        #expect(outstanding.compactMap { $0["jobID"]?.string } == Array(queuedIDs.prefix(5)))
+        let outstandingNext = try first.tool(
+            "latch_jobs", arguments: ["limit": 50, "cursor": try #require(outstandingPage?["nextCursor"])])["result"]?[
+                "structuredContent"]
+        guard case .array(let tail) = outstandingNext?["jobs"] else {
+            Issue.record("missing outstanding tail")
+            return
+        }
+        #expect(tail.compactMap { $0["jobID"]?.string } == Array(queuedIDs.dropFirst(5)))
+        #expect(outstandingNext?["hasMore"] == false)
+        let firstPage = try #require(
+            first.tool("latch_jobs", arguments: ["scope": "history", "limit": 7])["result"]?["structuredContent"])
+        guard case .array(let initial) = firstPage["jobs"] else {
+            Issue.record("missing history")
+            return
+        }
+        #expect(initial.compactMap { $0["jobID"]?.string } == Array(historyIDs.sorted(by: >).prefix(7)))
+        #expect(firstPage["hasMore"] == true)
+        #expect(firstPage["totalCount"] == 80)
+        let cursor = try #require(firstPage["nextCursor"])
+        let lastID = try #require(initial.last?["jobID"]?.string)
+        let detail = try first.tool("latch_job", arguments: ["jobID": .string(lastID)])["result"]?["structuredContent"]
+        #expect(detail?["result"]?["exitCode"] == 42)
+        #expect(detail?["result"]?["stdout"] == nil)
+        #expect(detail?["submission"]?["executable"] != nil)
+        _ = try first.tool("latch_forget", arguments: ["jobID": .string(lastID)])
+        let second = try MCPClient(fixture: fixture)
+        let secondPage = try second.tool("latch_jobs", arguments: ["scope": "history", "limit": 50, "cursor": cursor])[
+            "result"]?["structuredContent"]
+        guard case .array(let following) = secondPage?["jobs"] else {
+            Issue.record("missing next page")
+            return
+        }
+        #expect(following.compactMap { $0["jobID"]?.string } == Array(historyIDs.sorted(by: >).dropFirst(7).prefix(50)))
+        let finalPage = try second.tool(
+            "latch_jobs", arguments: ["scope": "history", "cursor": try #require(secondPage?["nextCursor"])])[
+                "result"]?["structuredContent"]
+        #expect(finalPage?["hasMore"] == true)
+        let end = try second.tool(
+            "latch_jobs", arguments: ["scope": "history", "cursor": try #require(finalPage?["nextCursor"])])["result"]?[
+                "structuredContent"]
+        #expect(end?["hasMore"] == false)
+        #expect(end?["nextCursor"] == nil)
+        for arguments: MCPValue in [
+            ["limit": 0], ["limit": 51], ["limit": .number(1.5)], ["scope": "all"],
+            ["scope": "outstanding", "cursor": cursor], ["cursor": "bad"],
+        ] {
+            #expect(try second.tool("latch_jobs", arguments: arguments)["error"]?["code"] == -32602)
+        }
+        #expect(try second.tool("latch_view", arguments: ["verbose": "yes"])["error"]?["code"] == -32602)
+        #expect(
+            try second.tool("latch_job", arguments: ["jobID": .string(UUID().uuidString)])["error"]?["code"] == -32602)
+    }
+}
+
 @Test func `checkpoints preserve process memory and rejoin FIFO with a fresh cooldown`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
@@ -768,7 +871,7 @@ private func jobID(_ response: MCPValue) throws -> String {
     #expect(
         tools.compactMap { $0["name"]?.string } == [
             "latch_view", "latch_submit", "latch_wait", "latch_cancel", "latch_forget", "latch_execute", "latch_signal",
-            "latch_input", "latch_resize", "latch_control", "latch_read",
+            "latch_input", "latch_resize", "latch_control", "latch_read", "latch_jobs", "latch_job",
         ])
     #expect(initialized["result"]?["capabilities"]?["tasks"]?["requests"]?["tools"]?["call"] == [:])
     #expect(tools[5]["execution"]?["taskSupport"] == "optional")

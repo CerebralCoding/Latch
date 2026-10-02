@@ -120,8 +120,10 @@ private final class OperatorFixture {
     let listing = try f.fixture.launch(["--list"])
     #expect(try f.fixture.finish(listing) == 0)
     let text = listing.output
-    #expect(text.contains("\(a.id)\tqueued\t1\t"))
-    #expect(text.contains("\(b.id)\tqueued\t2\t"))
+    #expect(text.contains(a.id))
+    #expect(text.contains(b.id))
+    #expect(text.contains("queued"))
+    #expect(text.contains("\\n\\u{1b}[31m"))
     #expect(!text.contains(done.id))
     #expect(!text.contains("\u{1B}"))
     #expect(text.split(separator: "\n").count == 3)

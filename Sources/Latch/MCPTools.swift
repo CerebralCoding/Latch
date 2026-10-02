@@ -38,8 +38,8 @@ enum MCPTools {
         tool(
             "latch_view",
             description:
-                "Optional diagnostics: read the shared scheduler's cached state and all durable jobs. Latch handles planning; agents need not inspect this before submitting. Does not collect sensors or reserve resources.",
-            properties: [:], required: [], readOnly: true),
+                "Optional cached diagnostics. Defaults to a compact service/admission snapshot and at most ten outstanding job summaries in FIFO order; completed history is omitted. verbose=true includes full scheduler evidence and all outstanding summaries. Use latch_jobs for paginated outstanding work/history and latch_job for one durable job's details. Never samples or reserves resources; not a planning prerequisite.",
+            properties: ["verbose": ["type": "boolean", "default": false]], required: [], readOnly: true),
         tool(
             "latch_submit",
             description:
@@ -114,7 +114,7 @@ enum MCPTools {
         if tasks {
             execute["execution"] = ["taskSupport": "optional"]
         }
-        return (list + [.object(execute)] + interactiveTools).map { value in
+        return (list + [.object(execute)] + interactiveTools + diagnosticTools).map { value in
             guard let retryKeyPrefix, var tool = value.object,
                 var schema = tool["inputSchema"]?.object,
                 var properties = schema["properties"]?.object,
@@ -129,6 +129,23 @@ enum MCPTools {
             return .object(tool)
         }
     }
+
+    static let diagnosticTools: [MCPValue] = [
+        tool(
+            "latch_jobs",
+            description:
+                "Page through compact job summaries without command output or admission evidence. scope=outstanding (default) includes CLI tasks, ordered by submission time oldest first; scope=history includes retained completed durable jobs, newest submission first. limit defaults to 20, maximum 50. Pass nextCursor unchanged with the same scope; cursors survive reconnects and forgetting the last job. Pages are live snapshots: concurrent completion, forgetting, and queue changes may change membership; queuePosition gives current FIFO order. Use latch_job or latch_wait for one job's result. No new retry key is needed.",
+            properties: [
+                "scope": ["type": "string", "enum": ["outstanding", "history"], "default": "outstanding"],
+                "limit": ["type": "integer", "minimum": 1, "maximum": 50, "default": 20],
+                "cursor": ["type": "string", "maxLength": 1024],
+            ], required: [], readOnly: true),
+        tool(
+            "latch_job",
+            description:
+                "Retrieve one durable job's submission and detailed status/admission evidence by jobID, including retained completed work. Omits stdout/stderr; use latch_wait for final output or latch_read for live output. Does not wait, control, or replay work. No new retry key is needed.",
+            properties: ["jobID": ["type": "string"]], required: ["jobID"], readOnly: true),
+    ]
 
     static func tool(
         _ name: String, description: String, properties: MCPValue, required: MCPValue, readOnly: Bool,

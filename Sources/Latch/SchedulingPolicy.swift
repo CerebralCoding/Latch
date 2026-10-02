@@ -155,6 +155,19 @@ enum SchedulingPolicy {
     static let maximumSampleAge = 2.0
     static let quietPeriod = 2.0
 
+    static func cpuHeadroom(in state: SchedulerState, sensors: SensorSnapshot, ordinary: Bool) -> Int {
+        let running = state.tasks.filter { $0.state == .running }
+        let reserved = running.reduce(0) { $0 + $1.requirements.cpuCores }
+        guard (0...1).contains(sensors.cpuActive) else { return 0 }
+        if ordinary, !running.isEmpty, running.allSatisfy({ $0.plan != nil && $0.requirements.mode == .batch }) {
+            return max(0, sensors.cpuCores - reserved)
+        }
+        guard sensors.cpuActive <= 0.8 else { return 0 }
+        return max(
+            0,
+            Int(floor(Double(sensors.cpuCores) - max(Double(reserved), sensors.cpuActive * Double(sensors.cpuCores)))))
+    }
+
     static func reason(for task: ScheduledTask, in state: SchedulerState, now: Double) -> String? {
         if task.state == .cancelling { return "queued task cancelled by operator" }
         let running = state.tasks.filter { $0.state == .running }
@@ -219,9 +232,7 @@ enum SchedulingPolicy {
             guard (0...1).contains(sensors.cpuActive) else { return "invalid CPU activity" }
             guard sharedOrdinaryLoad || sensors.cpuActive <= 0.8 else { return "background CPU load" }
             guard
-                sharedOrdinaryLoad
-                    || max(Double(reservedCPU), sensors.cpuActive * Double(sensors.cpuCores)) + Double(request.cpuCores)
-                        <= Double(sensors.cpuCores)
+                request.cpuCores <= cpuHeadroom(in: state, sensors: sensors, ordinary: ordinary)
             else {
                 return "insufficient CPU headroom"
             }

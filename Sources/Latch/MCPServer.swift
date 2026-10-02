@@ -299,13 +299,27 @@ final class MCPServer {
         try syncJobs()
         switch name {
         case "latch_view":
-            _ = try MCPArguments(arguments, allowed: [])
+            let input = try MCPArguments(arguments, allowed: ["verbose"])
+            try toolResult(
+                id: id, value: MCPDiagnostics.view(SchedulerView(scheduler: scheduler), verbose: input.flag("verbose")))
+        case "latch_jobs":
+            let input = try MCPArguments(arguments, allowed: ["scope", "limit", "cursor"])
+            let state = try scheduler.snapshot()
+            let view = SchedulerView(
+                state: state, service: try SchedulerService.status(in: scheduler.directory),
+                processLatch: try SchedulerView.latchState(path: scheduler.path),
+                now: ProcessInfo.processInfo.systemUptime)
+            try toolResult(id: id, value: MCPDiagnostics.page(state: state, view: view, arguments: input))
+        case "latch_job":
+            let input = try MCPArguments(arguments, allowed: ["jobID"])
+            let jobID = try input.text("jobID", maximum: 128)
+            guard let job = jobs[jobID] else { throw MCPFailure.invalid("Unknown jobID") }
             try toolResult(
                 id: id,
                 value: [
-                    "scheduler": MCPValue.encoded(SchedulerView(scheduler: scheduler)),
-                    "globalOutstandingLimit": .number(Double(DurableJobs.globalOutstandingLimit)),
-                    "jobs": .array(jobs.values.sorted { $0.id < $1.id }.map { try $0.result(includeOutput: false) }),
+                    "submission": try .encoded(job.submission),
+                    "createdAt": .string(job.record.createdAt.formatted(.iso8601)),
+                    "result": try job.result(includeOutput: false),
                 ])
         case "latch_submit", "latch_execute":
             if name == "latch_execute", !task {

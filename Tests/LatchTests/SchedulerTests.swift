@@ -375,7 +375,7 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     #expect(try String(contentsOf: file, encoding: .utf8) == "invalid")
 }
 
-@Test func `killed queued process is pruned and tasks are JSON`() throws {
+@Test func `killed queued process is pruned and explicit tasks JSON shows queued work`() throws {
     let fixture = try Fixture()
     let holder = try FileLatch(path: fixture.lockPath)
     try holder.acquire(shared: false, timeout: 0)
@@ -387,12 +387,14 @@ func `rejects invalid scheduler options`(arguments: [String]) {
             Thread.sleep(forTimeInterval: 0.01)
         }
         #expect(try scheduler.snapshot().tasks.first?.name == "parked-agent")
-        let inspection = try fixture.launch(["tasks"])
+        let inspection = try fixture.launch(["tasks", "--json"])
         #expect(try fixture.finish(inspection) == 0)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let state = try decoder.decode(SchedulerState.self, from: Data(inspection.output.utf8))
-        #expect(state.tasks.first?.state == .queued)
+        let value = try JSONDecoder().decode(MCPValue.self, from: Data(inspection.output.utf8))
+        guard case .array(let tasks) = value["tasks"] else {
+            Issue.record("missing tasks")
+            return
+        }
+        #expect(tasks.first?["task"]?["state"] == "queued")
         #expect(kill(child.process.processIdentifier, SIGKILL) == 0)
         #expect(try fixture.finish(child) == SIGKILL)
         #expect(try scheduler.snapshot().tasks.isEmpty)

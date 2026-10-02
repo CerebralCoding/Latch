@@ -3,20 +3,8 @@ import Foundation
 struct OperatorQueue {
     let scheduler: Scheduler
 
-    func list() throws -> String {
-        let state = try scheduler.snapshot()
-        var position = 0
-        var rows = ["JOB ID\tSTATE\tQUEUE\tNAME"]
-        for task in state.tasks {
-            if task.state == .queued { position += 1 }
-            let queue = task.state == .queued ? String(position) : "-"
-            let phase = task.state == .queued && task.residentMemoryMiB != nil ? "waiting" : task.state.rawValue
-            rows.append("\(task.id)\t\(phase)\t\(queue)\t\(String(reflecting: task.name))")
-        }
-        for job in state.jobs ?? [] where !job.complete && !state.tasks.contains(where: { $0.id == job.id }) {
-            rows.append("\(job.id)\t\(job.state)\t-\t\(String(reflecting: job.submission.name))")
-        }
-        return rows.count == 1 ? "No outstanding jobs." : rows.joined(separator: "\n")
+    func list(verbose: Bool = false) throws -> String {
+        HumanOutput.list(try SchedulerView(scheduler: scheduler).jobs, verbose: verbose)
     }
 
     func prioritize(_ id: String) throws {

@@ -219,7 +219,7 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
         #expect(!stale.sensorsFresh)
         #expect(stale.capacity.batchCPUHeadroom == nil)
         #expect(stale.capacity.memoryHeadroomMiB == nil)
-        let child = try fixture.launch(["view"])
+        let child = try fixture.launch(["view", "--json"])
         #expect(try fixture.finish(child) == 0)
         let json = try #require(JSONSerialization.jsonObject(with: Data(child.output.utf8)) as? [String: Any])
         #expect(json["version"] as? Int == 1)

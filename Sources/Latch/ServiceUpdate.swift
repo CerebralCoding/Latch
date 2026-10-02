@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 struct BuildIdentity: Codable, Equatable {
-    static let version = "0.13.0"
+    static let version = "0.14.0"
     // Bump when daemon behavior or its client/state contract requires a service restart.
     static let serviceRevision = 13
     var release: String

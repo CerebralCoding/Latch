@@ -96,14 +96,19 @@ enum ServiceInstallation {
         ]
     }
 
-    static func perform(_ action: Options.ServiceAction, path: String) throws {
+    static func perform(_ action: Options.ServiceAction, path: String, verbose: Bool = false, json: Bool = false) throws
+    {
         switch action {
         case .run:
             try SchedulerService.run(path: path)
         case .status:
             let scheduler = try Scheduler(path: path)
             let status = try SchedulerService.status(in: scheduler.directory)
-            try Latch.printJSON(status)
+            if json {
+                try Latch.printJSON(status)
+            } else {
+                print(HumanOutput.wrap(HumanOutput.service(status, verbose: verbose), width: HumanOutput.terminalWidth))
+            }
             if !status.running {
                 throw LatchError("scheduler service is stopped", exitCode: 69)
             }
@@ -137,8 +142,10 @@ enum ServiceInstallation {
                 try launchctl(["bootstrap", domain, plist.path])
             }
             try waitUntilRunning(path: installedQueue)
+            print("Started \(label).")
         case .stop:
             try stopIfLoaded()
+            print("Stopped \(label). Accepted jobs are retained.")
         case .uninstall:
             try ServiceInstall.uninstall(paths: paths, stop: stopIfLoaded)
         }
