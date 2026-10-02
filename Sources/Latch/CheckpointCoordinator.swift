@@ -71,6 +71,10 @@ final class CheckpointCoordinator {
             guard let index = state.tasks.firstIndex(where: { $0.id == id }) else {
                 throw LatchError("checkpoint ticket missing")
             }
+            guard state.tasks[index].state != .cancelling,
+                !FileManager.default.fileExists(
+                    atPath: scheduler.directory.appendingPathComponent("jobs/\(id).cancel").path)
+            else { return false }
             if let reason = SchedulingPolicy.reason(
                 for: state.tasks[index], in: state, now: ProcessInfo.processInfo.systemUptime)
             {

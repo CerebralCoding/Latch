@@ -3,6 +3,9 @@ import Foundation
 struct Options {
     enum Command: String {
         case run, wait, status, schedule, tasks, sensors, service, view, mcp, update, rollback, `guard`, help, version
+        case list = "--list"
+        case prioritize = "--run"
+        case clear = "--clear"
     }
 
     enum ServiceAction: String { case run, install, start, stop, status, uninstall }
@@ -17,6 +20,7 @@ struct Options {
     var standalone = false
     var serviceAction: ServiceAction?
     var restartService = false
+    var jobID: String?
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
@@ -48,6 +52,9 @@ struct Options {
                 throw LatchError("duplicate option '\(argument)'")
             }
             switch argument {
+            case let id where command == .prioritize && UUID(uuidString: id) != nil:
+                guard jobID == nil else { throw LatchError("--run accepts one job ID") }
+                jobID = UUID(uuidString: id)!.uuidString
             case let action where command == .service && ServiceAction(rawValue: action) != nil:
                 guard serviceAction == nil else { throw LatchError("service accepts one action") }
                 serviceAction = ServiceAction(rawValue: action)
@@ -160,6 +167,9 @@ struct Options {
         if command == .service, serviceAction == nil {
             throw LatchError("service requires run, install, start, stop, status, or uninstall")
         }
+        if command == .prioritize, jobID == nil {
+            throw LatchError("--run requires a queued job ID from --list")
+        }
         if command == .schedule || command == .guard {
             requirements.measurement = requirements.mode == .isolated
             try requirements.validate()
@@ -197,6 +207,19 @@ struct Options {
           latch mcp [--file PATH]
           latch update|rollback [--timeout SECONDS] [--restart-service]
           latch --version
+          latch --list [--file PATH]
+          latch --run JOB_ID [--file PATH]
+          latch --clear [--file PATH]
+
+        --list    List outstanding jobs and CLI tasks in scheduler order.
+        --run     Move a queued job to the front for its next admission. Operator
+                  override of FIFO only; isolation and sensor guards still apply.
+                  Does not preempt running work or launch a new command.
+        --clear   Request cancellation of queued jobs that have never started.
+                  Running jobs and started checkpoint processes are preserved.
+                  Retained results and retry keys remain available to agents.
+                  Queue controls are operator commands, not MCP tools.
+                  --run and --clear require the matching running scheduler service.
 
         mcp       Serve agent tools over newline-delimited JSON-RPC on stdin/stdout.
                   Uses the existing service. No installation or lifecycle changes.

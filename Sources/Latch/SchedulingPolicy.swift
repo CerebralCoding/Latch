@@ -64,7 +64,7 @@ struct SensorSnapshot: Codable, Equatable {
 }
 
 struct ScheduledTask: Codable, Equatable, Identifiable {
-    enum State: String, Codable { case queued, running, parked }
+    enum State: String, Codable { case queued, running, parked, cancelling }
 
     var id: String
     var name: String
@@ -156,6 +156,7 @@ enum SchedulingPolicy {
     static let quietPeriod = 2.0
 
     static func reason(for task: ScheduledTask, in state: SchedulerState, now: Double) -> String? {
+        if task.state == .cancelling { return "queued task cancelled by operator" }
         let running = state.tasks.filter { $0.state == .running }
         let request = task.requirements
         guard state.tasks.first(where: { $0.state == .queued })?.id == task.id else {

@@ -570,6 +570,53 @@ private func jobID(_ response: MCPValue) throws -> String {
     try #require(response["result"]?["structuredContent"]?["jobID"]?.string)
 }
 
+@Test func `human priority and clear control MCP jobs without preempting running work`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        let a = try jobID(
+            client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
+        let marker = fixture.directory.appendingPathComponent("cancelled-must-not-run")
+        let submission: MCPValue = [
+            "requestKey": .string(UUID().uuidString), "name": "clear-me", "executable": "/usr/bin/touch",
+            "arguments": [.string(marker.path)], "workingDirectory": .string(fixture.directory.path),
+        ]
+        let b = try jobID(client.tool("latch_submit", arguments: submission))
+        let c = try jobID(
+            client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
+        try admission(scheduler, expectedTasks: 3)
+        _ = try outputUntil(client, job: a, contains: "ready")
+        let priority = try fixture.launch(["--run", c])
+        #expect(try fixture.finish(priority) == 0)
+        #expect(try scheduler.snapshot().tasks.filter { $0.state == .queued }.map(\.id) == [c, b])
+        #expect(try scheduler.snapshot().tasks.filter { $0.state == .running }.map(\.id) == [a])
+        _ = try delivered(client, job: a, tool: "latch_input", arguments: ["eof": true])
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(a), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
+        try admission(scheduler, expectedTasks: 2)
+        _ = try outputUntil(client, job: c, contains: "ready")
+        let clear = try fixture.launch(["--clear"])
+        #expect(try fixture.finish(clear) == 0)
+        #expect(clear.output.contains("1 queued job(s)"))
+        let cancelled = try client.tool("latch_wait", arguments: ["jobID": .string(b), "timeoutSeconds": 4])["result"]?[
+            "structuredContent"]
+        #expect(cancelled?["complete"] == true)
+        #expect(cancelled?["state"] == "cancelled")
+        #expect(cancelled?["succeeded"] == false)
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+        #expect(try jobID(client.tool("latch_submit", arguments: submission)) == b)
+        #expect(try scheduler.snapshot().tasks.filter { $0.state == .running }.map(\.id) == [c])
+        _ = try delivered(client, job: c, tool: "latch_input", arguments: ["eof": true])
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(c), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
+        #expect(try scheduler.snapshot().tasks.isEmpty)
+    }
+}
+
 @Test func `MCP negotiates initialization discovers tools and validates protocol errors`() throws {
     let fixture = try Fixture()
     let client = try MCPClient(fixture: fixture, initialize: false)

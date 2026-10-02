@@ -80,20 +80,24 @@ final class Scheduler {
             }
             let servicePID = useService ? try SchedulerService.requireRunning(in: directory) : nil
             var view = try snapshot()
-            var samplingBlocked = false
             if !useService, view.tasks.first(where: { $0.state == .queued })?.id == id,
                 !view.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),
                 !(requirements.mode == .isolated && view.tasks.contains(where: { $0.state == .running }))
             {
-                samplingBlocked = try !refreshSensors()
+                _ = try refreshSensors()
             }
             var reason = "waiting for admission"
-            var blockedByLatch = false
             let now = ProcessInfo.processInfo.systemUptime
             try transaction { state in
                 guard let index = state.tasks.firstIndex(where: { $0.id == id }) else {
                     throw LatchError("queued task was removed", exitCode: 75)
                 }
+                guard state.tasks[index].state != .cancelling else {
+                    throw LatchError("queued task cancelled by operator", exitCode: 75)
+                }
+                guard
+                    !FileManager.default.fileExists(atPath: directory.appendingPathComponent("jobs/\(id).cancel").path)
+                else { throw LatchError("queued task cancellation requested", exitCode: 75) }
                 if let deadline, timeout != 0, now >= deadline {
                     reason = "timeout: \(state.tasks[index].waitingFor ?? "waiting for admission")"
                 } else if let blocked = SchedulingPolicy.reason(for: state.tasks[index], in: state, now: now) {
@@ -111,7 +115,6 @@ final class Scheduler {
                         admitted = true
                     } catch let error as LatchError where error.exitCode == 75 {
                         reason = "waiting for the process latch"
-                        blockedByLatch = true
                     }
                 }
                 if !admitted {
@@ -129,16 +132,12 @@ final class Scheduler {
             if let remaining, remaining <= 0 {
                 throw LatchError(reason, exitCode: 75)
             }
-            let isolatedRunning = view.tasks.contains { $0.state == .running && $0.requirements.mode == .isolated }
             if useService {
                 watcher.wait(
                     seconds: remaining ?? 3600,
                     pids: view.tasks.map(\.pid) + [servicePID!] + (supervisorPID.map { [$0] } ?? []))
-            } else if isolatedRunning || blockedByLatch || samplingBlocked {
-                // Park behind an exclusive workload without sampling or periodic wakeups.
-                let checkpoint = try FileLatch(path: path)
-                try checkpoint.acquire(shared: isolatedRunning || requirements.mode == .batch, timeout: remaining)
             } else {
+                // Queue notifications wake cancelled standalone waiters even while the process latch is held.
                 watcher.wait(
                     seconds: min(remaining ?? 1, 1), pids: view.tasks.filter { $0.state == .running }.map(\.pid))
             }

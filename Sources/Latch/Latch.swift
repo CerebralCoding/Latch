@@ -50,6 +50,22 @@ struct Latch {
             }
 
             let path = try options.resolvedPath()
+            if [.list, .prioritize, .clear].contains(options.command) {
+                let queue = try OperatorQueue(scheduler: Scheduler(path: path))
+                switch options.command {
+                case .list:
+                    print(try queue.list())
+                case .prioritize:
+                    try queue.prioritize(options.jobID!)
+                    print("Prioritized \(options.jobID!); admission guards still apply.")
+                case .clear:
+                    let ids = try queue.clear()
+                    print("Cancellation requested for \(ids.count) queued job(s).")
+                    for id in ids { print(id) }
+                default: break
+                }
+                return
+            }
             if options.command == .mcp {
                 try MCPServer(path: path).run()
                 return
@@ -105,7 +121,8 @@ struct Latch {
                     print("held")
                     exit(75)
                 }
-            case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version:
+            case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version,
+                .list, .prioritize, .clear:
                 break
             }
         } catch let error as LatchError {

@@ -11,7 +11,7 @@ Formatting uses the official formatter bundled with Swift 6.4, with no package d
 Release publication is currently disabled. Once an approved release is published, download its version-pinned installer from the official repository and run it as your macOS login user (Apple Silicon, macOS 26+):
 
 ```sh
-curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.11.0/install.sh --output latch-install.sh
+curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.12.0/install.sh --output latch-install.sh
 /bin/sh latch-install.sh
 ```
 
@@ -126,6 +126,17 @@ The dependency-free implementation supports [MCP stdio](https://modelcontextprot
 
 The CLI retains explicit resource declarations and guard overrides for operators. Declare peak requirements and match command worker limits when using this interface.
 
+Operators can inspect and control the shared queue:
+
+```sh
+latch --version
+latch --list
+latch --run JOB_ID
+latch --clear
+```
+
+`--list` shows outstanding durable jobs and CLI tasks with stable IDs, state, queue position, and name; completed history is omitted. `--run JOB_ID` moves a queued ticket ahead of other queued work for its next admission. It does not launch a command or preempt work; thermal guards, cooldowns, quiet windows, and isolation still apply. Other tickets retain their relative order, and a checkpoint's next iteration rejoins the FIFO tail normally. `--clear` requests cancellation of jobs that have never started; running jobs and already-started checkpoint processes (including parked/waiting iterations) are preserved. Admission and clearing share a state lock, so a cleared ticket cannot subsequently start. Cancellation completes asynchronously; durable results and retry keys remain available through MCP. New submissions after clearing are unaffected. All three queue commands accept `--file PATH`; mutations require the matching running scheduler service. These overrides are for human operators; agents continue to use MCP and must not change queue order or bulk-clear other agents' work.
+
 ```sh
 # Isolate a benchmark; require CPU/GPU temperatures <=50 C for 10 seconds.
 latch schedule --name benchmark --cpu 8 --memory-mib 8192 --max-cpu-temp 50 --max-gpu-temp 50 --cooldown 10 --timeout 600 -- ./benchmark
@@ -146,7 +157,7 @@ This moves waiting into a sleeping process rather than an agent reasoning loop. 
 
 ## Scheduling policy
 
-Admission is strict FIFO: an older blocked job prevents every newer job from overtaking it. Tickets are committed before worker launch and retain their position across MCP reconnects and service outages. MCP jobs never overlap. Operators can still explicitly request compatible batch reservations through the human CLI. Global queue bounds limit scheduler overhead; they never shorten an admitted job's runtime. There is no per-agent allocation: one agent can fill the shared queue, but its newer jobs cannot overtake an already queued job. Reservations are advisory budgets, not OS resource limits.
+Admission is strict FIFO unless a human operator explicitly reorders the queue with `--run JOB_ID`: an older blocked job otherwise prevents every newer job from overtaking it. Tickets are committed before worker launch and retain their position across MCP reconnects and service outages. MCP jobs never overlap. Operators can still explicitly request compatible batch reservations through the human CLI. Global queue bounds limit scheduler overhead; they never shorten an admitted job's runtime. There is no per-agent allocation: one agent can fill the shared queue, but its newer jobs cannot overtake an already queued job. Reservations are advisory budgets, not OS resource limits.
 
 | Setting | Default / behavior |
 | --- | --- |
