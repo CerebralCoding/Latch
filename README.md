@@ -274,4 +274,9 @@ Coordination is cooperative and local to one user. Sensors notice unrelated acti
 
 After execution starts, `run`/`schedule` return the command's own status, which may overlap these codes. Before execution, failures include a `latch:` diagnostic on stderr. `latch --help` lists the CLI syntax.
 
+## TODO
+
+- [ ] Add host-assisted automatic retry keys for submissions and controls, avoiding separate UUID-generation calls while preserving recovery after lost responses and reconnects. Intentional repeat executions must remain distinct.
+- [ ] Develop sensor-aware, scheduler-owned batching of compatible ordinary work across projects and toolchains, including Zig, Swift, Metal, and Rust. Preserve measurement isolation, FIFO fairness without starvation, and unrestricted finite job runtimes. Keep exclusive MCP scheduling as the baseline until batching is validated.
+
 MIT license: [LICENSE](LICENSE). Native sensor implementation references macmon; its notice is retained in [LICENSES/macmon.txt](LICENSES/macmon.txt).
