@@ -53,6 +53,8 @@ Configure your agent host with a local stdio MCP server. Use the installed execu
 
 The MCP endpoint connects to the installed scheduler. It does not install, start, stop or replace the service. All connections share the same queue and can recover work by `jobID`, including after reconnecting.
 
+Connection failures include a readable message and structured `error.data` with `reason`, `action`, `reconnectRequired` and `retryable`. Draining rejects new submissions with `update_in_progress`; accepted work remains recoverable. After an update, ask the host or user to reconnect Latch MCP before continuing. Pending requests receive recovery guidance; idle connections receive an MCP log notification, and diagnostics also go to stderr. Host presentation varies. A stopped scheduler still allows diagnostics and retained-result retrieval. Never bypass Latch or automatically install, update or restart it. Recover jobs/controls by their original IDs; retry uncertain operations only with identical arguments and the full original retry key. `retryable` means after the stated recovery action, not immediate repeated calls.
+
 ### Submit and wait
 
 Agents submit the actual foreground executable and literal arguments. **Latch owns resource planning, temperature thresholds and scheduling.** Agents declare sensitivity, not CPU/memory budgets or cooling delays. Inspecting the queue is optional, never a prerequisite for submission.

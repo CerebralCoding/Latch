@@ -545,9 +545,12 @@ func `MCP task result blocks until completion and retains the final result`(mode
         let id = try jobID(client.tool("latch_submit", arguments: arguments))
         var drain: UpdateDrain? = try UpdateDrain(scheduler: scheduler)
         try withExtendedLifetime(drain) {
-            #expect(
-                try client.tool("latch_submit", arguments: submission(fixture))["result"]?["structuredContent"]?["code"]
-                    == 75)
+            let blocked = try client.tool("latch_submit", arguments: submission(fixture))
+            #expect(blocked["error"]?["code"] == -32000)
+            #expect(blocked["error"]?["data"]?["reason"] == "update_in_progress")
+            #expect(blocked["error"]?["message"]?.string?.contains("new work was not accepted") == true)
+            #expect(blocked["error"]?["data"]?["retryable"] == true)
+            #expect(try scheduler.snapshot().tasks.count == 1)
             #expect(try jobID(client.tool("latch_submit", arguments: arguments)) == id)
             #expect(throws: LatchError.self) { try drain!.wait(timeout: 0) }
             try admission(scheduler)
@@ -556,7 +559,9 @@ func `MCP task result blocks until completion and retains the final result`(mode
                     "structuredContent"]?["succeeded"] == true)
             try drain!.wait(timeout: 1)
             try UpdateDrain.advance(in: scheduler.directory)
-            try client.send(["jsonrpc": "2.0", "id": "wake", "method": "ping"])
+            let retired = try client.notification("notifications/message")["params"]
+            #expect(retired?["data"]?["recovery"]?["reason"] == "endpoint_updated")
+            #expect(retired?["data"]?["recovery"]?["reconnectRequired"] == true)
             #expect(try fixture.finish(client.child) == 69)
         }
         drain = nil
@@ -923,9 +928,125 @@ private func jobID(_ response: MCPValue) throws -> String {
         #expect(try client.tool("latch_submit", arguments: .object(arguments))["error"]?["code"] == -32602)
     }
     let missingService = try client.tool("latch_submit", arguments: submission(fixture))
-    #expect(missingService["result"]?["isError"] == true)
-    #expect(missingService["result"]?["structuredContent"]?["code"] == 69)
+    #expect(missingService["error"]?["code"] == -32000)
+    #expect(missingService["error"]?["data"]?["reason"] == "scheduler_unavailable")
+    #expect(missingService["error"]?["data"]?["reconnectRequired"] == false)
+    #expect(missingService["error"]?["data"]?["action"]?.string?.contains("Ask the operator") == true)
     #expect(try Scheduler(path: fixture.lockPath).snapshot().tasks.isEmpty)
+}
+
+@Test(arguments: ["directory", "state"])
+func `MCP startup failures return actionable initialization errors before exiting`(fault: String) throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    if fault == "directory" {
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scheduler.directory.path)
+    } else {
+        try Data("not JSON".utf8).write(to: scheduler.directory.appendingPathComponent("state.json"))
+    }
+    let client = try MCPClient(fixture: fixture, initialize: false)
+    let response = try client.request(
+        "initialize",
+        params: [
+            "protocolVersion": .string(MCPServer.protocolVersion), "capabilities": [:],
+            "clientInfo": ["name": "test", "version": "1"],
+        ])
+    #expect(response["result"] == nil)
+    #expect(response["error"]?["code"] == -32000)
+    #expect(response["error"]?["data"]?["reason"] == "state_unavailable")
+    #expect(response["error"]?["data"]?["retryable"] == false)
+    #expect(response["error"]?["data"]?["detail"]?.string?.isEmpty == false)
+    #expect(try fixture.finish(client.child) == 74)
+    let stderr = String(decoding: try client.child.stderr.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self)
+    #expect(stderr.contains("Ask the operator"))
+}
+
+@Test func `MCP retains result access without a running scheduler`() throws {
+    let fixture = try Fixture()
+    let store = try DurableJobs(scheduler: Scheduler(path: fixture.lockPath))
+    let record = try store.submit(MCPSubmission(submission(fixture)))
+    try store.publish(
+        record.id,
+        result: [
+            "jobID": .string(record.id), "state": "completed", "complete": true, "succeeded": true,
+            "exitCode": 0, "stdout": "retained output",
+        ])
+    let client = try MCPClient(fixture: fixture)
+    let blocked = try client.tool("latch_submit", arguments: submission(fixture))
+    #expect(blocked["error"]?["data"]?["reason"] == "scheduler_unavailable")
+    #expect(try store.records().count == 1)
+    #expect(
+        try client.tool("latch_view")["result"]?["structuredContent"]?["scheduler"]?["service"]?["running"] == false)
+    #expect(
+        try client.tool("latch_wait", arguments: ["jobID": .string(record.id)])["result"]?["structuredContent"]?[
+            "stdout"] == "retained output")
+    #expect(try client.request("ping")["result"] == [:])
+}
+
+@Test func `MCP scheduler mismatch requests operator recovery without accepting work`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try JSONEncoder().encode(
+        SchedulerService.Status(
+            running: true, pid: getpid(), path: scheduler.path, serviceRevision: BuildIdentity.serviceRevision + 1
+        )
+    ).write(to: scheduler.directory.appendingPathComponent("service.json"))
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        let response = try client.tool("latch_submit", arguments: submission(fixture))
+        #expect(response["error"]?["data"]?["reason"] == "scheduler_mismatch")
+        #expect(response["error"]?["data"]?["action"]?.string?.contains("Ask the operator") == true)
+        #expect(try scheduler.snapshot().jobs.isEmpty)
+        #expect(try client.request("ping")["result"] == [:])
+    }
+}
+
+@Test func `MCP update retirement resolves pending waits and preserves their recovery IDs`() throws {
+    let fixture = try Fixture()
+    let store = try DurableJobs(scheduler: Scheduler(path: fixture.lockPath))
+    let arguments = submission(fixture, key: "retained-after-update")
+    let record = try store.submit(MCPSubmission(arguments))
+    let client = try MCPClient(fixture: fixture)
+    try client.send([
+        "jsonrpc": "2.0", "id": "pending-wait", "method": "tools/call",
+        "params": ["name": "latch_wait", "arguments": ["jobID": .string(record.id), "timeoutSeconds": 600]],
+    ])
+    #expect(try client.request("ping")["result"] == [:])
+    try UpdateDrain.advance(in: store.scheduler.directory)
+    let failure = try client.response(id: "pending-wait")["error"]
+    #expect(failure?["code"] == -32000)
+    #expect(failure?["data"]?["reason"] == "endpoint_updated")
+    #expect(failure?["data"]?["jobID"] == .string(record.id))
+    #expect(failure?["data"]?["reconnectRequired"] == true)
+    #expect(failure?["data"]?["recovery"]?.string?.contains("full original requestKey") == true)
+    #expect(try fixture.finish(client.child) == 69)
+    #expect(try store.records().first?.complete == false)
+    let fresh = try MCPClient(fixture: fixture)
+    #expect(try jobID(fresh.tool("latch_submit", arguments: arguments)) == record.id)
+    #expect(
+        try fresh.tool("latch_wait", arguments: ["jobID": .string(record.id), "timeoutSeconds": 0])["result"]?[
+            "structuredContent"]?["complete"] == false)
+    #expect(try store.records().count == 1)
+}
+
+@Test(arguments: ["error", "critical"])
+func `MCP retirement respects log levels while retaining stderr recovery guidance`(level: String) throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let client = try MCPClient(fixture: fixture, initialize: false)
+    #expect(try client.handshake()["result"]?["capabilities"]?["logging"] == [:])
+    #expect(try client.request("logging/setLevel", params: ["level": "invalid"])["error"]?["code"] == -32602)
+    #expect(try client.request("logging/setLevel", params: ["level": .string(level)])["result"] == [:])
+    try UpdateDrain.advance(in: scheduler.directory)
+    if level == "error" {
+        #expect(try client.notification("notifications/message")["params"]?["level"] == "error")
+    } else {
+        #expect(throws: LatchError.self) { try client.notification("notifications/message") }
+    }
+    #expect(try fixture.finish(client.child) == 69)
+    let stderr = String(decoding: try client.child.stderr.fileHandleForReading.readToEnd() ?? Data(), as: UTF8.self)
+    #expect(stderr.contains("reconnect the Latch MCP server"))
 }
 
 @Test func `MCP schedules literal arguments preserves cwd and deduplicates submissions`() throws {

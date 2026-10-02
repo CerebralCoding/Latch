@@ -56,6 +56,9 @@ struct Latch {
                 return
             }
 
+            if options.command == .mcp {
+                exit(try MCPServer(path: options.resolvedPath()).run())
+            }
             let path = try options.resolvedPath()
             if [.list, .prioritize, .clear].contains(options.command) {
                 let queue = try OperatorQueue(scheduler: Scheduler(path: path))
@@ -74,10 +77,6 @@ struct Latch {
                     print("Cancellation requested for \(ids.count) queued job(s). Already-started work is preserved.")
                 default: break
                 }
-                return
-            }
-            if options.command == .mcp {
-                try MCPServer(path: path).run()
                 return
             }
             if options.command == .service {

@@ -15,13 +15,25 @@ final class MCPServer {
         var stderrOffset = 0
     }
 
-    private let scheduler: Scheduler
-    private let executable: URL
-    private let directory: URL
+    private struct Backend {
+        let scheduler: Scheduler
+        let executable: URL
+        let generation: Data?
+        let executableIdentity: [FileAttributeKey: Any]
+        let store: DurableJobs
+
+        init(path: String) throws {
+            scheduler = try Scheduler(path: URL(fileURLWithPath: path).standardizedFileURL.path)
+            store = try DurableJobs(scheduler: scheduler)
+            executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
+                .resolvingSymlinksInPath()
+            generation = try UpdateDrain.generation(in: scheduler.directory)
+            executableIdentity = try FileManager.default.attributesOfItem(atPath: executable.path)
+        }
+    }
+
+    private let connection: Result<Backend, MCPConnectionFailure>
     private let queue: Int32
-    private let generation: Data?
-    private let executableIdentity: [FileAttributeKey: Any]
-    private let store: DurableJobs
     private let retryKeys = MCPRetryKeys()
     private var input = Data()
     private var output = Data()
@@ -29,19 +41,16 @@ final class MCPServer {
     private var waiters: [Waiter] = []
     private var tasks: [String: MCPTask] = [:]
     private var directoryDescriptor: Int32 = -1
+    private var stateDirectoryDescriptor: Int32 = -1
     private var initialized = false
     private var ready = false
     private var closingAt: Double?
+    private var closingFailure: MCPConnectionFailure?
     private var watchingOutput = false
+    private var logLevel = 0
 
-    init(path: String) throws {
-        scheduler = try Scheduler(path: URL(fileURLWithPath: path).standardizedFileURL.path)
-        store = try DurableJobs(scheduler: scheduler)
-        executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
-            .resolvingSymlinksInPath()
-        generation = try UpdateDrain.generation(in: scheduler.directory)
-        executableIdentity = try FileManager.default.attributesOfItem(atPath: executable.path)
-        directory = store.directory
+    init(path: @autoclosure () throws -> String) throws {
+        do { connection = .success(try Backend(path: path())) } catch { connection = .failure(.state(error)) }
         queue = kqueue()
         guard queue >= 0 else { throw LatchError.system("create MCP event queue") }
         _ = fcntl(queue, F_SETFD, FD_CLOEXEC)
@@ -53,9 +62,10 @@ final class MCPServer {
         if directoryDescriptor >= 0 {
             close(directoryDescriptor)
         }
+        if stateDirectoryDescriptor >= 0 { close(stateDirectoryDescriptor) }
     }
 
-    func run() throws {
+    func run() throws -> Int32 {
         let inputFlags = fcntl(STDIN_FILENO, F_GETFL)
         let outputFlags = fcntl(STDOUT_FILENO, F_GETFL)
         guard inputFlags >= 0, outputFlags >= 0,
@@ -72,23 +82,23 @@ final class MCPServer {
             signal(number, SIG_IGN)
             try watch(UInt(number), filter: EVFILT_SIGNAL)
         }
-        directoryDescriptor = open(directory.path, O_EVTONLY | O_CLOEXEC)
-        guard directoryDescriptor >= 0 else { throw LatchError.system("open durable jobs directory") }
-        try watch(UInt(directoryDescriptor), filter: EVFILT_VNODE, flags: EV_ADD | EV_CLEAR, fflags: UInt32(NOTE_WRITE))
         while true {
-            if closingAt != nil {
-                return
+            let now = ProcessInfo.processInfo.systemUptime
+            if let closingAt, output.isEmpty || now >= closingAt {
+                return closingFailure?.exitCode ?? 0
             }
             while waitpid(-1, nil, WNOHANG) > 0 {}
-            let now = ProcessInfo.processInfo.systemUptime
-            try syncJobs()
-            for job in jobs.values {
-                try job.update(now: now)
+            if closingAt == nil, initialized {
+                do {
+                    try syncJobs()
+                    for job in jobs.values { try job.update(now: now) }
+                    try updateTasks()
+                    try updateProgress()
+                    try finishWaiters(now: now)
+                } catch { try retire(.state(error)) }
             }
-            try updateTasks()
-            try updateProgress()
-            try finishWaiters(now: now)
-            let deadlines = waiters.compactMap(\.deadline)
+            if closingAt != nil, output.isEmpty { return closingFailure?.exitCode ?? 0 }
+            let deadlines = waiters.compactMap(\.deadline) + [closingAt].compactMap { $0 }
             let seconds = deadlines.min().map { max(0, $0 - now) }
             var timeout = timespec(
                 tv_sec: Int(seconds ?? 0),
@@ -143,6 +153,42 @@ final class MCPServer {
             try? watch(UInt(STDOUT_FILENO), filter: EVFILT_WRITE, flags: EV_DELETE)
             watchingOutput = false
         }
+    }
+
+    private func retire(_ error: MCPConnectionFailure) throws {
+        guard closingAt == nil else { return }
+        error.log()
+        for waiter in waiters {
+            var data = error.data.object!
+            data["jobID"] = .string(waiter.jobID)
+            if let controlID = waiter.controlID { data["controlID"] = .string(controlID) }
+            try failure(id: waiter.requestID, code: -32000, message: error.message, data: .object(data))
+        }
+        waiters.removeAll()
+        if ready, logLevel <= 4 {
+            try notify(
+                "notifications/message",
+                params: [
+                    "level": "error", "logger": "latch.connection",
+                    "data": ["message": .string(error.message), "recovery": error.data],
+                ])
+        }
+        closingFailure = error
+        closingAt = ProcessInfo.processInfo.systemUptime + 2
+        try? watch(UInt(STDIN_FILENO), filter: EVFILT_READ, flags: EV_DELETE)
+    }
+
+    private func connect() throws {
+        let backend = try connection.get()
+        try syncJobs()
+        directoryDescriptor = open(backend.store.directory.path, O_EVTONLY | O_CLOEXEC)
+        guard directoryDescriptor >= 0 else { throw LatchError.system("open durable jobs directory") }
+        try watch(UInt(directoryDescriptor), filter: EVFILT_VNODE, flags: EV_ADD | EV_CLEAR, fflags: UInt32(NOTE_WRITE))
+        stateDirectoryDescriptor = open(backend.scheduler.directory.path, O_EVTONLY | O_CLOEXEC)
+        guard stateDirectoryDescriptor >= 0 else { throw LatchError.system("open scheduler directory") }
+        try watch(
+            UInt(stateDirectoryDescriptor), filter: EVFILT_VNODE, flags: EV_ADD | EV_CLEAR,
+            fflags: UInt32(NOTE_WRITE | NOTE_RENAME | NOTE_DELETE))
     }
 
     private func readInput() throws {
@@ -214,6 +260,7 @@ final class MCPServer {
         do {
             let params = message["params"] ?? [:]
             guard params.object != nil else { throw MCPFailure.invalid("params must be an object") }
+            if initialized { try requireCurrentEndpoint() }
             if method == "initialize" {
                 guard !initialized else { throw MCPFailure(code: -32600, message: "Already initialized") }
                 guard params["protocolVersion"]?.string != nil, params["capabilities"]?.object != nil,
@@ -221,7 +268,8 @@ final class MCPServer {
                 else {
                     throw MCPFailure.invalid("initialize requires protocolVersion, capabilities, and clientInfo")
                 }
-                var capabilities: [String: MCPValue] = ["tools": ["listChanged": false]]
+                do { try connect() } catch { throw MCPConnectionFailure.state(error) }
+                var capabilities: [String: MCPValue] = ["tools": ["listChanged": false], "logging": [:]]
                 capabilities["experimental"] = [
                     "com.cerebralcoding.latch/retryKeys": [
                         "metadataKey": .string(MCPRetryKeys.metadataKey),
@@ -246,6 +294,13 @@ final class MCPServer {
                         code: -32600, message: "Initialize and send notifications/initialized before using tools")
                 }
                 switch method {
+                case "logging/setLevel":
+                    let levels = ["debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"]
+                    guard let level = params["level"]?.string, let index = levels.firstIndex(of: level) else {
+                        throw MCPFailure.invalid("Invalid logging level")
+                    }
+                    logLevel = index
+                    try respond(id: id, result: [:])
                 case "tools/list":
                     guard params["cursor"] == nil else { throw MCPFailure.invalid("No pagination cursor is supported") }
                     try respond(
@@ -278,6 +333,13 @@ final class MCPServer {
                 default: throw MCPFailure(code: -32601, message: "Method not found: \(method)")
                 }
             }
+        } catch let error as MCPConnectionFailure {
+            try failure(id: id, code: -32000, message: error.message, data: error.data)
+            if error.reconnectRequired || error.reason == .stateUnavailable || !initialized {
+                try retire(error)
+            } else {
+                error.log()
+            }
         } catch let error as MCPFailure { try failure(id: id, code: error.code, message: error.message) } catch {
             try toolResult(
                 id: id,
@@ -289,6 +351,9 @@ final class MCPServer {
     }
 
     private func call(_ name: String, arguments: MCPValue?, id: MCPValue, progress: MCPProgress?, task: Bool) throws {
+        let backend = try connection.get()
+        let scheduler = backend.scheduler
+        let store = backend.store
         try syncJobs()
         switch name {
         case "latch_view":
@@ -374,44 +439,56 @@ final class MCPServer {
     }
 
     private func submit(_ submission: MCPSubmission) throws -> MCPJob {
+        let backend = try connection.get()
+        let scheduler = backend.scheduler
+        let store = backend.store
         if let existing = jobs.values.first(where: { $0.submission.requestKey == submission.requestKey }) {
             guard existing.submission == submission else {
                 throw MCPFailure.invalid("requestKey already belongs to a different submission")
             }
             return existing
         }
-        let updatePermit = try UpdateDrain.admit(in: scheduler.directory)
+        let updatePermit: FileLatch
+        do { updatePermit = try UpdateDrain.admit(in: scheduler.directory) } catch let error as LatchError
+            where error.exitCode == 75
+        {
+            throw MCPConnectionFailure(reason: .updateInProgress)
+        }
         defer { withExtendedLifetime(updatePermit) {} }
         try requireCurrentEndpoint()
-        _ = try SchedulerService.requireRunning(in: scheduler.directory)
-        guard try SchedulerService.status(in: scheduler.directory).serviceRevision == BuildIdentity.serviceRevision
+        let status: SchedulerService.Status
+        do { status = try SchedulerService.status(in: scheduler.directory) } catch {
+            throw MCPConnectionFailure.state(error)
+        }
+        guard status.running else { throw MCPConnectionFailure(reason: .schedulerUnavailable) }
+        guard status.serviceRevision == BuildIdentity.serviceRevision
         else {
-            throw LatchError(
-                "durable jobs require the updated scheduler service; ask the operator to update it", exitCode: 69)
+            throw MCPConnectionFailure(reason: .schedulerMismatch)
         }
         let record = try store.submit(submission)
         let job = MCPJob(record: record, store: store)
         jobs[job.id] = job
         // The ticket is committed before launch; the service recovers a missed launch after a connection crash.
-        try? store.launch(record.id, executable: executable)
+        try? store.launch(record.id, executable: backend.executable)
         return job
     }
 
     private func requireCurrentEndpoint() throws {
-        let identity = try FileManager.default.attributesOfItem(atPath: executable.path)
-        guard try UpdateDrain.generation(in: scheduler.directory) == generation,
-            identity[.systemFileNumber] as? NSNumber == executableIdentity[.systemFileNumber] as? NSNumber,
-            identity[.systemNumber] as? NSNumber == executableIdentity[.systemNumber] as? NSNumber
+        let backend = try connection.get()
+        let identity = try? FileManager.default.attributesOfItem(atPath: backend.executable.path)
+        guard try UpdateDrain.generation(in: backend.scheduler.directory) == backend.generation,
+            identity?[.systemFileNumber] as? NSNumber == backend.executableIdentity[.systemFileNumber] as? NSNumber,
+            identity?[.systemNumber] as? NSNumber == backend.executableIdentity[.systemNumber] as? NSNumber
         else {
-            throw LatchError(
-                "Latch was updated; reconnect this MCP host and retrieve retained results by job ID",
-                exitCode: 69)
+            throw MCPConnectionFailure(reason: .endpointUpdated)
         }
     }
 
     private func syncJobs() throws {
+        let store = try connection.get().store
         try requireCurrentEndpoint()
-        let records = try store.records()
+        let records: [DurableJobRecord]
+        do { records = try store.records() } catch { throw MCPConnectionFailure.state(error) }
         for record in records {
             let job = jobs[record.id] ?? MCPJob(record: record, store: store)
             job.record = record
@@ -438,6 +515,7 @@ final class MCPServer {
     }
 
     private func interactiveCall(_ name: String, arguments: MCPValue?, id: MCPValue) throws {
+        let store = try connection.get().store
         let fields: Set<String> =
             switch name {
             case "latch_signal": ["jobID", "requestKey", "signal"]
@@ -491,6 +569,7 @@ final class MCPServer {
     }
 
     private func readOutput(_ id: String) throws -> MCPLiveOutput {
+        let store = try connection.get().store
         do {
             return try JSONDecoder().decode(MCPLiveOutput.self, from: Data(contentsOf: store.file(id, "output.json")))
         } catch CocoaError.fileReadNoSuchFile { return MCPLiveOutput() }
@@ -582,6 +661,7 @@ final class MCPServer {
     }
 
     private func finishWaiters(now: Double) throws {
+        let store = try connection.get().store
         for waiter in waiters where waiter.kind == .control || waiter.kind == .output {
             guard let job = jobs[waiter.jobID] else { continue }
             let expired = waiter.deadline.map { $0 <= now } ?? false
@@ -656,8 +736,10 @@ final class MCPServer {
         try emit(["jsonrpc": "2.0", "id": id, "result": result])
     }
 
-    private func failure(id: MCPValue, code: Int, message: String) throws {
-        try emit(["jsonrpc": "2.0", "id": id, "error": ["code": .number(Double(code)), "message": .string(message)]])
+    private func failure(id: MCPValue, code: Int, message: String, data: MCPValue? = nil) throws {
+        var error: [String: MCPValue] = ["code": .number(Double(code)), "message": .string(message)]
+        if let data { error["data"] = data }
+        try emit(["jsonrpc": "2.0", "id": id, "error": .object(error)])
     }
 
     private func emit(_ value: MCPValue) throws {
