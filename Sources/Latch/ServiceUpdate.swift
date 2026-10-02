@@ -106,7 +106,7 @@ enum ServiceUpdate {
                 let runningRevision = try service.revision()
                 let restart =
                     wasLoaded
-                    && (restartService || runningRevision != next.serviceRevision)
+                    && (hash != currentHash || restartService || runningRevision != next.serviceRevision)
                 if !rollback, hash == currentHash {
                     if restart {
                         try service.stop()

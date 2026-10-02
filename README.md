@@ -171,7 +171,7 @@ Unlike MCP, the human CLI accepts explicit peak resource requirements and guard 
 
 To update, run the installer attached to the desired release using the installation steps above. It verifies the new binary, stops accepting submissions while existing work drains, then atomically replaces the installed executable. Drain timeout is ten minutes; on timeout the installed version remains unchanged. Running and parked jobs are not cancelled to force an update. Never run an installer or update inside Latch's own queue.
 
-The previous binary is retained for `latch rollback`. A loaded service restarts when required by the update; a stopped service remains stopped. Reconnect MCP hosts after updating or rolling back to negotiate current capabilities, then retrieve retained results by `jobID`.
+The previous binary is retained for `latch rollback`. Replacing the binary restarts a loaded service after draining, including when the service revision is unchanged; a stopped service remains stopped. Reapplying the same binary avoids a restart unless explicitly requested or the running revision differs. Reconnect MCP hosts after updating or rolling back to negotiate current capabilities, then retrieve retained results by `jobID`.
 
 ```sh
 latch service status

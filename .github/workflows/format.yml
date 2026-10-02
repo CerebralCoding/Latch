@@ -1,4 +1,4 @@
-name: Swift formatting
+name: Swift verification
 on: [push, pull_request]
 jobs:
   format:
@@ -10,3 +10,11 @@ jobs:
       - run: swift --version
       - run: swift package dump-package
       - run: swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests
+  test:
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+      - run: swift --version
+      - run: swift test -c release

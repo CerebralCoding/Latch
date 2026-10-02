@@ -13,6 +13,7 @@ private final class UpdateFixture {
     var loaded = true
     var revision: Int? = BuildIdentity.serviceRevision
     var events: [String] = []
+    var startedBinaries: [String] = []
     var failStart = false
 
     init() throws {
@@ -43,6 +44,7 @@ private final class UpdateFixture {
             },
             start: {
                 self.events.append("start")
+                self.startedBinaries.append(try self.contents(self.target))
                 if self.failStart {
                     self.failStart = false
                     throw LatchError("injected health check failure")
@@ -77,40 +79,57 @@ private final class UpdateFixture {
     }
 }
 
-@Test func `endpoint update keeps service running and rollback restores the prior binary`() throws {
+@Test func `changed binaries restart the loaded service on update and rollback without a revision change`() throws {
     let f = try UpdateFixture()
     let oldGeneration = try UpdateDrain.generation(in: f.scheduler.directory)
-    #expect(try f.apply() == false)
-    #expect(f.events.isEmpty)
+    #expect(try f.apply())
+    #expect(f.events == ["stop", "start"])
+    #expect(f.startedBinaries == ["new"])
     #expect(f.loaded)
     #expect(try f.contents(f.target) == "new")
     #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
     #expect(try UpdateDrain.generation(in: f.scheduler.directory) != oldGeneration)
-    #expect(try f.apply(rollback: true) == false)
-    #expect(f.events.isEmpty)
+    #expect(try f.apply(rollback: true))
+    #expect(f.events == ["stop", "start", "stop", "start"])
+    #expect(f.startedBinaries == ["new", "old"])
     #expect(try f.contents(f.target) == "old")
     #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "new")
 }
 
-@Test func `changed service revision and explicit restart restart only loaded services`() throws {
-    for mode in ["changed", "forced", "stopped"] {
+@Test func `unchanged binaries restart only for explicit restart or missing running revision`() throws {
+    for mode in ["missing", "forced", "matching", "stopped"] {
         let f = try UpdateFixture()
-        if mode == "changed" {
+        try Data("old".utf8).write(to: f.source)
+        if mode == "missing" {
             f.revision = nil
         }
         if mode == "stopped" {
             f.loaded = false
             f.revision = nil
         }
-        #expect(try f.apply(restart: mode == "forced") == (mode != "stopped"))
-        #expect(f.events == (mode == "stopped" ? [] : ["stop", "start"]))
+        let shouldRestart = mode == "missing" || mode == "forced"
+        #expect(try f.apply(restart: mode == "forced" || mode == "stopped") == shouldRestart)
+        #expect(f.events == (shouldRestart ? ["stop", "start"] : []))
         #expect(f.loaded == (mode != "stopped"))
     }
+}
+
+@Test func `changed binaries leave stopped services stopped on update and rollback`() throws {
+    let f = try UpdateFixture()
+    f.loaded = false
+    f.revision = nil
+    #expect(try !f.apply())
+    #expect(try f.contents(f.target) == "new")
+    #expect(try !f.apply(rollback: true))
+    #expect(try f.contents(f.target) == "old")
+    #expect(f.events.isEmpty)
+    #expect(!f.loaded)
 }
 
 @Test func `updates and rollbacks reject a different service identity before replacing code`() throws {
     let f = try UpdateFixture()
     _ = try f.apply()
+    f.events.removeAll()
     let receipt = try Data(contentsOf: ServiceUpdate.receipt(in: f.updates))
     for rollback in [false, true] {
         #expect(throws: LatchError.self) {
@@ -132,8 +151,9 @@ private final class UpdateFixture {
     let f = try UpdateFixture()
     f.failStart = true
     let receipt = try Data(contentsOf: ServiceUpdate.receipt(in: f.updates))
-    #expect(throws: LatchError.self) { try f.apply(restart: true) }
+    #expect(throws: LatchError.self) { try f.apply() }
     #expect(f.events == ["stop", "start", "stop", "start"])
+    #expect(f.startedBinaries == ["new", "old"])
     #expect(f.loaded)
     #expect(try f.contents(f.target) == "old")
     #expect(try Data(contentsOf: ServiceUpdate.receipt(in: f.updates)) == receipt)
@@ -161,7 +181,7 @@ private final class UpdateFixture {
     let child = try f.fixture.launch(["run", "--", "/bin/sleep", "0.2"])
     try f.fixture.waitUntilHeld()
     let started = ProcessInfo.processInfo.systemUptime
-    #expect(try f.apply(timeout: 3) == false)
+    #expect(try f.apply(timeout: 3))
     #expect(ProcessInfo.processInfo.systemUptime - started > 0.05)
     #expect(try f.fixture.finish(child) == 0)
     _ = try UpdateDrain.admit(in: f.scheduler.directory)
@@ -170,6 +190,7 @@ private final class UpdateFixture {
 @Test func `rollback rejects changed backup without touching installed code`() throws {
     let f = try UpdateFixture()
     _ = try f.apply()
+    f.events.removeAll()
     try Data("damaged".utf8).write(to: ServiceUpdate.previous(in: f.updates))
     #expect(throws: LatchError.self) { try f.apply(rollback: true) }
     #expect(try f.contents(f.target) == "new")
@@ -179,6 +200,7 @@ private final class UpdateFixture {
 @Test func `repeating the same update preserves the rollback binary and endpoint generation`() throws {
     let f = try UpdateFixture()
     _ = try f.apply()
+    f.events.removeAll()
     let generation = try UpdateDrain.generation(in: f.scheduler.directory)
     _ = try f.apply()
     #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
@@ -195,7 +217,7 @@ private final class UpdateFixture {
     let receipt = try Data(contentsOf: ServiceUpdate.receipt(in: f.updates))
     try Data("newer".utf8).write(to: f.source)
     f.failStart = true
-    #expect(throws: LatchError.self) { try f.apply(restart: true) }
+    #expect(throws: LatchError.self) { try f.apply() }
     #expect(try f.contents(f.target) == "new")
     #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
     #expect(try Data(contentsOf: ServiceUpdate.receipt(in: f.updates)) == receipt)

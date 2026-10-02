@@ -62,9 +62,10 @@ private final class InstallationFixture {
     try Data("replacement".utf8).write(to: f.source)
     let scheduler = try Scheduler(path: f.fixture.lockPath)
     #expect(
-        try !ServiceUpdate.apply(
+        try ServiceUpdate.apply(
             source: f.source, target: f.paths.executable, updates: f.paths.updates, scheduler: scheduler,
             service: f.service))
+    #expect(f.events == ["start", "stop", "start"])
     #expect(try String(contentsOf: ServiceUpdate.previous(in: f.paths.updates), encoding: .utf8) == "executable")
     #expect(!InstallationPaths.exists(f.paths.executable.appendingPathExtension("previous")))
 }
