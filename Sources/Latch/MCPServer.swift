@@ -21,6 +21,7 @@ final class MCPServer {
     private let generation: Data?
     private let executableIdentity: [FileAttributeKey: Any]
     private let store: DurableJobs
+    private let retryKeys = MCPRetryKeys()
     private var input = Data()
     private var output = Data()
     private var jobs: [String: MCPJob] = [:]
@@ -223,6 +224,12 @@ final class MCPServer {
                 let version = ["2025-11-25", "2025-06-18"].contains(requested) ? requested : "2025-11-25"
                 supportsTasks = version == "2025-11-25"
                 var capabilities: [String: MCPValue] = ["tools": ["listChanged": false]]
+                capabilities["experimental"] = [
+                    "com.cerebralcoding.latch/retryKeys": [
+                        "metadataKey": .string(MCPRetryKeys.metadataKey),
+                        "prefixMetadataKey": .string(MCPRetryKeys.prefixMetadataKey),
+                    ]
+                ]
                 if supportsTasks {
                     capabilities["tasks"] = ["list": [:], "cancel": [:], "requests": ["tools": ["call": [:]]]]
                 }
@@ -232,7 +239,8 @@ final class MCPServer {
                     result: [
                         "protocolVersion": .string(version), "capabilities": .object(capabilities),
                         "serverInfo": ["name": "latch", "version": .string(BuildIdentity.version)],
-                        "instructions": .string(MCPTools.instructions),
+                        "instructions": .string(MCPTools.instructions + "\n" + retryKeys.instructions),
+                        "_meta": [MCPRetryKeys.prefixMetadataKey: .string(retryKeys.prefix)],
                     ])
             } else if method == "ping" {
                 try respond(id: id, result: [:])
@@ -244,7 +252,11 @@ final class MCPServer {
                 switch method {
                 case "tools/list":
                     guard params["cursor"] == nil else { throw MCPFailure.invalid("No pagination cursor is supported") }
-                    try respond(id: id, result: ["tools": .array(MCPTools.listing(tasks: supportsTasks))])
+                    try respond(
+                        id: id,
+                        result: [
+                            "tools": .array(MCPTools.listing(tasks: supportsTasks, retryKeyPrefix: retryKeys.prefix))
+                        ])
                 case "tools/call":
                     guard let name = params["name"]?.string else { throw MCPFailure.invalid("tool name is required") }
                     let progress = try progress(params)
@@ -258,7 +270,13 @@ final class MCPServer {
                             _ = try input.number("ttl", default: 0, range: 0...9_007_199_254_740_991, integer: true)
                         }
                     }
-                    try call(name, arguments: params["arguments"], id: id, progress: progress, task: task != nil)
+                    let keyed = ["latch_submit", "latch_execute", "latch_signal", "latch_input", "latch_resize"]
+                        .contains(name)
+                    let arguments =
+                        keyed
+                        ? try MCPRetryKeys.arguments(params["arguments"], metadata: params["_meta"])
+                        : params["arguments"]
+                    try call(name, arguments: arguments, id: id, progress: progress, task: task != nil)
                 case "tasks/get", "tasks/list", "tasks/result", "tasks/cancel":
                     guard supportsTasks else {
                         throw MCPFailure(code: -32601, message: "Tasks require protocol 2025-11-25")

@@ -3,6 +3,10 @@
 
 import PackageDescription
 
+#if !os(macOS) || !arch(arm64)
+    #error("Latch requires Apple Silicon and macOS 26 or newer")
+#endif
+
 let package = Package(
     name: "Latch",
     platforms: [.macOS(.v26)],

@@ -222,7 +222,7 @@ extension MCPTools {
             properties: [
                 "jobID": ["type": "string"], "requestKey": ["type": "string"],
                 "signal": ["type": "string", "enum": .array(MCPControl.signals.keys.sorted().map(MCPValue.string))],
-            ], required: ["jobID", "requestKey", "signal"], readOnly: false),
+            ], required: ["jobID", "signal"], readOnly: false),
         tool(
             "latch_input",
             description:
@@ -230,7 +230,7 @@ extension MCPTools {
             properties: [
                 "jobID": ["type": "string"], "requestKey": ["type": "string"], "text": ["type": "string"],
                 "base64": ["type": "string"], "eof": ["type": "boolean", "default": false],
-            ], required: ["jobID", "requestKey"], readOnly: false, openWorld: true),
+            ], required: ["jobID"], readOnly: false, openWorld: true),
         tool(
             "latch_resize",
             description:
@@ -239,7 +239,7 @@ extension MCPTools {
                 "jobID": ["type": "string"], "requestKey": ["type": "string"],
                 "columns": ["type": "integer", "minimum": 1, "maximum": 1000],
                 "rows": ["type": "integer", "minimum": 1, "maximum": 1000],
-            ], required: ["jobID", "requestKey", "columns", "rows"], readOnly: false),
+            ], required: ["jobID", "columns", "rows"], readOnly: false),
         tool(
             "latch_control",
             description:

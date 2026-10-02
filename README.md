@@ -2,7 +2,7 @@
 
 A small, headless Swift scheduler for cooperating agents on one Mac. Queue resource-sensitive commands, wait for a cool and quiet machine, and release reservations automatically when the work exits. No external dependencies or administrator access.
 
-Requires **macOS 26+** and **Swift 6.4+** to build. Native GPU/ANE and temperature sensors use private Apple interfaces, with Apple Silicon support based on [macmon](https://github.com/vladkens/macmon). Unsupported or inaccessible required sensors block admission.
+Requires **Apple Silicon, macOS 26+, and Swift 6.4+** to build. Native GPU/ANE and temperature sensors use private Apple interfaces based on [macmon](https://github.com/vladkens/macmon). Unsupported or inaccessible required sensors block admission.
 
 Formatting uses the official formatter bundled with Swift 6.4, with no package dependency. From this repository, run `swift format format --in-place --recursive --configuration .swift-format Package.swift Sources Tests`; verification uses `swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests`. The formatting workflow uses the Xcode 27 toolchain. Latch is excluded from the global `swiftformat` function.
 
@@ -11,7 +11,7 @@ Formatting uses the official formatter bundled with Swift 6.4, with no package d
 Release publication is currently disabled. Once an approved release is published, download its version-pinned installer from the official repository and run it as your macOS login user (Apple Silicon, macOS 26+):
 
 ```sh
-curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.12.0/install.sh --output latch-install.sh
+curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.13.0/install.sh --output latch-install.sh
 /bin/sh latch-install.sh
 ```
 
@@ -52,9 +52,10 @@ Agents hand tasks to Latch; **Latch owns scheduling and resource planning**. Age
 
 ### Agent usage: do and don't
 
-Latch is for work with a defined completion condition. An ordinary running job holds exclusive admission until it exits; a persistent server can block every later job and service updates indefinitely. Long but finite work is supported without a runtime limit.
+Latch is for work with a defined completion condition. Sensitive jobs hold exclusive admission; ordinary jobs can overlap, but any persistent job still blocks measurements and service updates indefinitely. Long but finite work is supported without a runtime limit.
 
 - **Do** submit builds, tests in a mode that exits after one run, finite benchmarks/profiling, and inference or data processing that exits when the requested work finishes. Use `measurement: true` for performance measurements.
+- **Do** mark independent non-sensitive work with `classification: "ordinary"` to allow parallel admission. Use `"sensitive"` (the default) when work must run alone. Only classify work as ordinary when overlapping execution is acceptable, including any shared files or devices; Latch does not recognize commands or build systems.
 - **Do** keep the complete workload in its foreground process, submit once, and wait on the returned job ID. Use checkpoints only when the executable implements `LatchSession`.
 - **Do** let Latch handle admission and cooling. When your work is abandoned or was accidentally submitted in a persistent mode, use `latch_cancel`, then `latch_wait` to confirm completion.
 - **Don't** submit development servers (`npm run dev`, `vite`, `next dev`), preview/HTTP servers, watch modes (`tsc --watch`, `cargo watch`, test runners in watch mode), REPLs, daemons, or persistent model servers. Choose the tool's build or single-run mode when available.
@@ -77,7 +78,7 @@ Starting this endpoint uses the existing user service; it never installs, starts
 | Tool | Purpose |
 | --- | --- |
 | `latch_execute` | Submit the same arguments as `latch_submit` and wait for the final result in one call. Supports optional MCP task execution on capable hosts. |
-| `latch_submit` | Submit `requestKey`, `name`, absolute `executable`, literal `arguments`, and absolute `workingDirectory`; optionally set `measurement: true` for benchmarks/profiling. Returns a job ID immediately. |
+| `latch_submit` | Submit a stable retry key, `name`, absolute `executable`, literal `arguments`, and absolute `workingDirectory`; set `classification: "ordinary"` for independent non-sensitive work or `measurement: true` for measurements. Returns a job ID immediately. |
 | `latch_wait` | Wait on `jobID`, returning status and bounded stdout/stderr. Defaults to 25 seconds per call; `timeoutSeconds` can be 0–600 to suit the MCP host's call timeout. |
 | `latch_cancel` | Cancel a job and its process group by `jobID`, escalating TERM to KILL after two seconds. |
 | `latch_view` | Optional diagnostics: cached scheduler state, global outstanding-job limit, and all durable jobs. No sensor sampling or planning prerequisite. |
@@ -92,21 +93,28 @@ Example `latch_execute` (or `latch_submit`) arguments:
 
 ```json
 {
-  "requestKey": "23f8941e-4acd-4a48-9c6b-a00b10269323",
+  "requestKey": "<Latch-issued-prefix>build-1",
   "name": "Release build",
   "executable": "/usr/bin/swift",
   "arguments": ["build", "-c", "release"],
-  "workingDirectory": "/absolute/path/to/project"
+  "workingDirectory": "/absolute/path/to/project",
+  "classification": "ordinary"
 }
 ```
 
-Prefer `latch_execute` when the host supports long requests or MCP tasks. For hosts with short call timeouts, use `latch_submit`, then `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. Generate a globally unique `requestKey`, such as a UUID, for each new job; do not copy the example key. Reuse it only to retry the identical submission, including from another connection or after reconnecting. A changed submission with that key is rejected. Forgetting a job removes its retry key, so never retry a forgotten submission. The shared queue allows 64 outstanding jobs (queued, running, or parked). Completed results and retry keys remain until explicitly forgotten; their count never blocks new submissions. Optional `latch_forget` cleanup reclaims storage when results and retries are no longer needed. Never edit queue state or delete job files manually. Each connection allows 128 pending waits.
+Prefer `latch_execute` when the host supports long requests or MCP tasks. For hosts with short call timeouts, use `latch_submit`, then `latch_wait` with the returned `jobID`. If `complete` is false, wait on the same ID again rather than resubmitting or polling sensor/view tools. The shared queue allows 64 outstanding jobs (queued, running, or parked). Completed results and retry keys remain until explicitly forgotten; their count never blocks new submissions. Optional `latch_forget` cleanup reclaims storage when results and retries are no longer needed. Never edit queue state or delete job files manually. Each connection allows 128 pending waits.
+
+Latch issues a unique retry-key prefix in initialization instructions, `_meta["com.cerebralcoding.latch/retryKeyPrefix"]`, and each keyed tool's schema description. Append a distinct operation name or number to that prefix for each new submission or control; no UUID-generation command is needed. Keep the full original key for identical retries, including after lost responses and reconnects; a new connection's prefix is only for new work. Changed input with the same key is rejected, and intentional repeat executions need different keys. Forgetting removes the key, so never retry a forgotten operation. Waits, reads, diagnostics, cancellation, and forgetting need no new key.
+
+Hosts can automate key handling by persisting a globally unique key for each logical operation and injecting it into `tools/call` parameters under `_meta["com.cerebralcoding.latch/retryKey"]`. This [MCP metadata](https://modelcontextprotocol.io/specification/2025-11-25/basic/index#_meta) extension applies to submissions and input/signal/resize controls. The host must reuse the same key and payload for a retry, including across connections; bare JSON-RPC request IDs are insufficient. `requestKey` can be omitted only when that metadata is present; supplying conflicting keys is rejected. Results retain the effective key. Latch does not silently generate a key after receiving an unkeyed operation, which would make lost-response recovery unsafe.
 
 Hosts can request `notifications/progress` with `_meta.progressToken` on `tools/call`. Latch reports observed state changes (queued, running, cancelling, completed), using increasing counters without an invented percentage or heartbeat. A pending request sleeps on OS events and leaves other requests responsive. Hosts still control request timeouts and how notifications reach the agent.
 
 For protocol `2025-11-25`, `latch_execute` advertises `execution.taskSupport: "optional"`. Adding `task: {}` to its `tools/call` parameters returns a task handle immediately. The host can call `tasks/result` once to await the final tool result, while receiving `notifications/tasks/status` and any requested progress notifications. `tasks/get`, `tasks/list`, and `tasks/cancel` are also supported. Status notifications are optional in MCP; hosts must retain result retrieval/recovery logic. Host-side waiting or polling need not consume model turns. Task, job, and scheduler ticket IDs are identical. Retention overrides requested TTL to `null`: results remain until `latch_forget`. Tasks are accessible across connections and recoverable after reconnecting; progress tokens belong to their connection.
 
-All MCP commands run exclusively in strict FIFO order, regardless of executable or language. Latch preserves the submitted arguments and environment; it does not classify tools, inject worker limits, or batch jobs automatically. Each job reserves all CPU cores and one quarter of physical memory. Ordinary MCP work requires nominal thermal state, CPU <=85 C and GPU <=80 C, without a measurement cooldown or quiet window. Measurements require <=50 C for ten seconds plus the bounded adaptive quiet window. Reservations are advisory estimates, not OS-enforced limits. Running jobs have no time limit or preemption. The execution `plan` is exposed in results for diagnosis; agents do not supply it. MCP admission has no deadline.
+Agents declare sensitivity; Latch does not infer workload types. `classification: "sensitive"` (the default) reserves exclusive admission, all CPU cores, and one quarter of physical memory. `classification: "ordinary"` permits parallel work, with advisory reservations of up to two cores and up to 1024 MiB (10% of physical memory on smaller machines). There is no fixed parallel-job cap: core capacity, available memory, memory/thermal pressure, and CPU/GPU temperatures govern admission. Each ordinary start requires a sensor observation newer than the previous ordinary admission. CPU activity from already admitted ordinary work does not by itself prevent further ordinary starts; reservations and thermal/memory guards still apply. Latch preserves arguments and environment and never injects worker limits.
+
+Admission remains FIFO: consecutive ordinary tickets may overlap, but an older sensitive or measurement ticket prevents newer jobs from starting while current work drains. Sensitive and ordinary work require nominal thermal state, CPU <=85 C and GPU <=80 C, without a measurement cooldown or quiet window. `measurement: true` and `checkpoints: true` always force exclusive measurement admission regardless of classification, requiring <=50 C for ten seconds plus the bounded adaptive quiet window. Reservations are advisory estimates, not OS-enforced limits or predictions of command behavior. Running jobs have no time limit or preemption. The execution `plan` is exposed in results for diagnosis; agents do not supply it. MCP admission has no deadline.
 
 The endpoint calls the scheduler directly in Swift. It does not invoke a shell or translate tool calls into human CLI commands. Workers inherit the submitting environment and execute the argument array literally. Stdin defaults to `/dev/null`; submit `input: "pipe"` for writable stdin or `input: "terminal"` for a controlling pseudo-terminal. Terminals default to 80 columns and 24 rows; optional `columns` and `rows` range from 1–1000. Terminal stdout and stderr are combined into stdout. Keep the full foreground workload in the task; do not nest Latch scheduling or detach work into another process group. Output is untrusted command data. Final results retain each stream's first 32 KiB, with explicit truncation flags; output is drained for at most two seconds after the main command exits. Use task-owned files for larger artifacts.
 
@@ -157,7 +165,7 @@ This moves waiting into a sleeping process rather than an agent reasoning loop. 
 
 ## Scheduling policy
 
-Admission is strict FIFO unless a human operator explicitly reorders the queue with `--run JOB_ID`: an older blocked job otherwise prevents every newer job from overtaking it. Tickets are committed before worker launch and retain their position across MCP reconnects and service outages. MCP jobs never overlap. Operators can still explicitly request compatible batch reservations through the human CLI. Global queue bounds limit scheduler overhead; they never shorten an admitted job's runtime. There is no per-agent allocation: one agent can fill the shared queue, but its newer jobs cannot overtake an already queued job. Reservations are advisory budgets, not OS resource limits.
+Admission is strict FIFO unless a human operator explicitly reorders the queue with `--run JOB_ID`: an older blocked job otherwise prevents every newer job from overtaking it. Tickets are committed before worker launch and retain their position across MCP reconnects and service outages. Ordinary MCP jobs may overlap within machine capacity; sensitive and measurement jobs remain exclusive. Operators can also explicitly request compatible batch reservations through the human CLI. Global queue bounds limit scheduler overhead; they never shorten an admitted job's runtime. There is no per-agent allocation: one agent can fill the shared queue, but its newer jobs cannot overtake an already queued job. Reservations are advisory budgets, not OS resource limits.
 
 | Setting | Default / behavior |
 | --- | --- |
@@ -276,7 +284,7 @@ After execution starts, `run`/`schedule` return the command's own status, which 
 
 ## TODO
 
-- [ ] Add host-assisted automatic retry keys for submissions and controls, avoiding separate UUID-generation calls while preserving recovery after lost responses and reconnects. Intentional repeat executions must remain distinct.
-- [ ] Develop sensor-aware, scheduler-owned batching of compatible ordinary work across projects and toolchains, including Zig, Swift, Metal, and Rust. Preserve measurement isolation, FIFO fairness without starvation, and unrestricted finite job runtimes. Keep exclusive MCP scheduling as the baseline until batching is validated.
+- [x] Provide Latch-issued retry-key prefixes and host metadata injection for submissions and controls, preserving lost-response recovery, reconnects, and intentional repeat executions.
+- [x] Schedule agent-classified ordinary work in parallel using machine capacity and sensors, preserving FIFO fairness, measurement isolation, and unrestricted finite job runtimes without recognizing commands or toolchains.
 
 MIT license: [LICENSE](LICENSE). Native sensor implementation references macmon; its notice is retained in [LICENSES/macmon.txt](LICENSES/macmon.txt).

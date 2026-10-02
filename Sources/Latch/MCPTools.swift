@@ -13,11 +13,12 @@ enum MCPTools {
         \(workloadGuidance)
         Latch owns resource budgets, worker limits, isolation, temperature guards, and scheduling.
         Agents must not calculate budgets or inspect the queue to plan admission. Optionally mark performance measurements with measurement=true.
-        All MCP commands run exclusively in FIFO order. A human operator may explicitly reorder or clear queued work through CLI controls; agents must not use those overrides. Measurements additionally require cooling and quiet-window admission.
+        Classify independent non-sensitive work with classification=ordinary to allow jobs to overlap. Latch scales admission with the machine's core count, available memory, pressure, temperatures, and fresh sensors after each start; there is no fixed parallel-job cap. Sensitive work (the default) is exclusive; measurement=true and checkpoints=true always require exclusive cooling and quiet-window admission. Latch chooses budgets, preserves command arguments, and never recognizes tools or injects worker limits.
+        Admission is FIFO: an older sensitive or measurement ticket blocks newer ordinary work while existing jobs drain. A human operator may explicitly reorder or clear queued work through CLI controls; agents must not use those overrides.
         Set checkpoints=true only for an executable using LatchSession. The executable, not the agent, exchanges iteration permits. Latch owns cooling and FIFO reentry; parked processes retain memory. No runtime limit or automatic replay.
         Keep the full workload in the submitted command. latch_view is optional diagnostics, not a required planning step.
         For hosts with short request timeouts, use latch_submit then latch_wait on the returned jobID; repeat only when pending.
-        Use a globally unique requestKey (such as a UUID) for each new job. Reuse it only for identical retries, including after reconnecting.
+        Each new submission or control needs a stable retry key. Use the Latch-issued prefix from tool discovery plus a distinct operation suffix; no UUID-generation command is needed. Hosts can instead inject com.cerebralcoding.latch/retryKey in tools/call _meta. Reuse the complete original key for identical retries, including after reconnecting; never replace an uncertain key or derive it solely from command text.
         Accepted jobs survive disconnects and wait timeouts. Cancel jobs explicitly with latch_cancel; cancelling an MCP request only stops waiting.
         For interaction, submit input=pipe or input=terminal, then use latch_read to await prompts. latch_signal relays signals without escalation.
         latch_input and latch_resize return control receipts; await latch_control and retry only with the same requestKey. Unknown delivery must not be blindly repeated.
@@ -30,7 +31,7 @@ enum MCPTools {
 
     static let submissionKeys: Set<String> = [
         "requestKey", "name", "executable", "arguments", "workingDirectory", "measurement", "input", "columns", "rows",
-        "checkpoints",
+        "checkpoints", "classification",
     ]
 
     static let list: [MCPValue] = [
@@ -48,7 +49,7 @@ enum MCPTools {
                 "requestKey": [
                     "type": "string", "minLength": 1, "maxLength": 128,
                     "description":
-                        "Globally unique key, such as a UUID, for this job. Reuse only for identical retries; use a new key for new work.",
+                        "Stable unique operation key. Required unless the host supplies com.cerebralcoding.latch/retryKey in tools/call _meta. Reuse the complete key only for identical retries, including after reconnecting.",
                 ],
                 "name": ["type": "string", "minLength": 1, "maxLength": 128],
                 "executable": [
@@ -65,6 +66,11 @@ enum MCPTools {
                     "description":
                         "True when the task measures performance, benchmarks, or profiles. Latch selects stricter isolation and cooldowns.",
                 ],
+                "classification": [
+                    "type": "string", "enum": ["ordinary", "sensitive"], "default": "sensitive",
+                    "description":
+                        "ordinary opts non-sensitive work into bounded parallel scheduling; sensitive is exclusive. Measurements and checkpoints are always exclusive regardless of classification. Latch owns all resource planning.",
+                ],
                 "checkpoints": [
                     "type": "boolean", "default": false,
                     "description":
@@ -77,7 +83,7 @@ enum MCPTools {
                 ],
                 "columns": ["type": "integer", "minimum": 1, "maximum": 1000, "default": 80],
                 "rows": ["type": "integer", "minimum": 1, "maximum": 1000, "default": 24],
-            ], required: ["requestKey", "name", "executable", "workingDirectory"], readOnly: false, openWorld: true),
+            ], required: ["name", "executable", "workingDirectory"], readOnly: false, openWorld: true),
         tool(
             "latch_wait",
             description:
@@ -98,7 +104,7 @@ enum MCPTools {
             properties: ["jobID": ["type": "string"]], required: ["jobID"], readOnly: false),
     ]
 
-    static func listing(tasks: Bool) -> [MCPValue] {
+    static func listing(tasks: Bool, retryKeyPrefix: String? = nil) -> [MCPValue] {
         var execute = list[1].object!
         execute["name"] = "latch_execute"
         execute["description"] =
@@ -108,7 +114,20 @@ enum MCPTools {
         if tasks {
             execute["execution"] = ["taskSupport": "optional"]
         }
-        return list + [.object(execute)] + interactiveTools
+        return (list + [.object(execute)] + interactiveTools).map { value in
+            guard let retryKeyPrefix, var tool = value.object,
+                var schema = tool["inputSchema"]?.object,
+                var properties = schema["properties"]?.object,
+                var key = properties["requestKey"]?.object
+            else { return value }
+            key["description"] = .string(
+                "Use \(retryKeyPrefix)<distinct-operation-name-or-number> for each new operation; no UUID command needed. Keep and reuse the complete original key only for identical retries, even after reconnecting. Omit only when your host injects \(MCPRetryKeys.metadataKey) in tools/call _meta."
+            )
+            properties["requestKey"] = .object(key)
+            schema["properties"] = .object(properties)
+            tool["inputSchema"] = .object(schema)
+            return .object(tool)
+        }
     }
 
     static func tool(
@@ -129,6 +148,8 @@ enum MCPTools {
 }
 
 struct MCPSubmission: Codable, Equatable {
+    enum Classification: String, Codable { case ordinary, sensitive }
+
     var requestKey: String
     var name: String
     var executable: String
@@ -139,6 +160,7 @@ struct MCPSubmission: Codable, Equatable {
     var columns: Int
     var rows: Int
     var checkpoints: Bool?
+    var classification: Classification?
 
     init(_ value: MCPValue?) throws {
         let input = try MCPArguments(value, allowed: MCPTools.submissionKeys)
@@ -167,6 +189,10 @@ struct MCPSubmission: Codable, Equatable {
         measurement = try input.flag("measurement")
         checkpoints = try input.flag("checkpoints") ? true : nil
         if checkpoints == true { measurement = true }
+        guard let declared = Classification(rawValue: try input.text("classification", default: "sensitive")) else {
+            throw MCPFailure.invalid("classification must be ordinary or sensitive")
+        }
+        classification = measurement ? .sensitive : declared
         self.input = try input.text("input", default: "closed")
         guard ["closed", "pipe", "terminal"].contains(self.input) else {
             throw MCPFailure.invalid("input must be closed, pipe, or terminal")

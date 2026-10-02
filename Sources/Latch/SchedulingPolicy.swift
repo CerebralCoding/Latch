@@ -185,6 +185,13 @@ enum SchedulingPolicy {
         }
 
         let reservedCPU = running.reduce(0) { $0 + $1.requirements.cpuCores }
+        let ordinary = task.plan != nil && request.mode == .batch
+        let runningOrdinary = running.filter { $0.plan != nil && $0.requirements.mode == .batch }
+        if ordinary, let lastSample = runningOrdinary.compactMap({ $0.admission?.sensors.uptime }).max(),
+            sensors.uptime <= lastSample
+        {
+            return "waiting for sensors after ordinary admission"
+        }
         let reservedMemory = running.reduce(0) { $0 + $1.requirements.memoryMiB }
         guard reservedCPU + request.cpuCores <= sensors.cpuCores else { return "CPU reservation capacity" }
         // Count outstanding reservations conservatively even if some are already resident.
@@ -206,10 +213,15 @@ enum SchedulingPolicy {
                 return "waiting for a quiet CPU/GPU/ANE/disk window"
             }
         } else if request.mode == .batch {
-            guard sensors.cpuActive <= 0.8 else { return "background CPU load" }
+            // Admitted ordinary work already contributes to observed CPU load. Bound its
+            // concurrency instead of treating its own activity as unrelated contention.
+            let sharedOrdinaryLoad = ordinary && !runningOrdinary.isEmpty && runningOrdinary.count == running.count
+            guard (0...1).contains(sensors.cpuActive) else { return "invalid CPU activity" }
+            guard sharedOrdinaryLoad || sensors.cpuActive <= 0.8 else { return "background CPU load" }
             guard
-                max(Double(reservedCPU), sensors.cpuActive * Double(sensors.cpuCores)) + Double(request.cpuCores)
-                    <= Double(sensors.cpuCores)
+                sharedOrdinaryLoad
+                    || max(Double(reservedCPU), sensors.cpuActive * Double(sensors.cpuCores)) + Double(request.cpuCores)
+                        <= Double(sensors.cpuCores)
             else {
                 return "insufficient CPU headroom"
             }

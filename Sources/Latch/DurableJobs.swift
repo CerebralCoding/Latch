@@ -56,7 +56,8 @@ final class DurableJobs {
             }
             let record = DurableJobRecord(id: UUID().uuidString, submission: submission)
             let plan = TaskPlanner.plan(
-                arguments: submission.arguments, measurement: submission.measurement)
+                arguments: submission.arguments, measurement: submission.measurement,
+                classification: submission.classification ?? .sensitive)
             records.append(record)
             state.jobs = records
             state.tasks.append(

@@ -523,7 +523,7 @@ private func submission(
     ]
 }
 
-@Test func `MCP ordinary work serializes and measurements retain bounded admission evidence`() throws {
+@Test func `MCP sensitive work serializes and measurements retain bounded admission evidence`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
@@ -563,6 +563,137 @@ private func submission(
         #expect(result?["succeeded"] == true)
         #expect(result?["admission"]?["quietLimits"] != nil)
         #expect(result?["admission"]?["idleBaseline"]?["readings"] == nil)
+    }
+}
+
+@Test func `ordinary MCP jobs exceed two concurrent starts while a measurement forms a FIFO barrier`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        func ordinary() throws -> MCPValue {
+            var values = try #require(interactiveSubmission(fixture, mode: "pipe-input", input: "pipe").object)
+            values["classification"] = "ordinary"
+            return .object(values)
+        }
+        var ids: [String] = []
+        for _ in 0..<3 { ids.append(try jobID(client.tool("latch_submit", arguments: ordinary()))) }
+        var measured = try #require(ordinary().object)
+        measured["measurement"] = true
+        let barrier = try jobID(client.tool("latch_submit", arguments: .object(measured)))
+        let later = try jobID(client.tool("latch_submit", arguments: ordinary()))
+        for id in ids {
+            try admission(scheduler, expectedTasks: 5)
+            _ = try outputUntil(client, job: id, contains: "ready")
+        }
+        let parallel = try scheduler.snapshot()
+        #expect(parallel.tasks.filter { $0.state == .running }.map(\.id) == ids)
+        #expect(parallel.tasks.filter { $0.state == .running }.allSatisfy { $0.requirements.mode == .batch })
+        #expect(parallel.tasks.filter { $0.state == .queued }.map(\.id) == [barrier, later])
+        #expect(try SchedulerView(scheduler: scheduler).drainingForTaskID == barrier)
+        for id in ids {
+            _ = try delivered(client, job: id, tool: "latch_input", arguments: ["eof": true])
+            #expect(
+                try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                    "structuredContent"]?["succeeded"] == true)
+        }
+        try admission(scheduler, expectedTasks: 2)
+        _ = try outputUntil(client, job: barrier, contains: "ready")
+        #expect(try scheduler.snapshot().tasks.filter { $0.state == .running }.map(\.id) == [barrier])
+        _ = try delivered(client, job: barrier, tool: "latch_input", arguments: ["eof": true])
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(barrier), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
+        try admission(scheduler)
+        _ = try outputUntil(client, job: later, contains: "ready")
+        _ = try delivered(client, job: later, tool: "latch_input", arguments: ["eof": true])
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(later), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
+        #expect(try scheduler.snapshot().tasks.isEmpty)
+    }
+}
+
+@Test func `host retry keys recover a lost response across connections and preserve distinct executions`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let store = try DurableJobs(scheduler: scheduler)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let first = try MCPClient(fixture: fixture, initialize: false)
+        let initialized = try first.handshake()
+        let prefix = try #require(initialized["result"]?["_meta"]?[MCPRetryKeys.prefixMetadataKey]?.string)
+        var values = try #require(submission(fixture).object)
+        values["requestKey"] = nil
+        let key = prefix + "build-1"
+        #expect(try first.tool("latch_submit", arguments: .object(values))["error"]?["code"] == -32602)
+        try first.send([
+            "jsonrpc": "2.0", "id": "lost-response", "method": "tools/call",
+            "params": [
+                "name": "latch_submit", "arguments": .object(values),
+                "_meta": [MCPRetryKeys.metadataKey: .string(key)],
+            ],
+        ])
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        while try store.records().isEmpty, ProcessInfo.processInfo.systemUptime < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        let accepted = try #require(try store.records().first)
+        first.child.process.terminate()
+        #expect(try fixture.finish(first.child) == 0)
+        let fresh = try MCPClient(fixture: fixture, initialize: false)
+        let reconnected = try fresh.handshake()
+        let nextPrefix = try #require(reconnected["result"]?["_meta"]?[MCPRetryKeys.prefixMetadataKey]?.string)
+        #expect(nextPrefix != prefix)
+        values["requestKey"] = .string(key)
+        #expect(try jobID(fresh.tool("latch_submit", arguments: .object(values))) == accepted.id)
+        values["requestKey"] = .string(nextPrefix + "build-1")
+        let repeated = try jobID(fresh.tool("latch_submit", arguments: .object(values)))
+        #expect(repeated != accepted.id)
+        #expect(try store.records().count == 2)
+        for id in [accepted.id, repeated] {
+            _ = try fresh.tool("latch_cancel", arguments: ["jobID": .string(id)])
+            #expect(
+                try fresh.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                    "structuredContent"]?["complete"] == true)
+        }
+    }
+}
+
+@Test func `host metadata supplies retry-safe controls and conflicting keys are rejected`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        let id = try jobID(
+            client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
+        try admission(scheduler)
+        _ = try outputUntil(client, job: id, contains: "ready")
+        let key = UUID().uuidString
+        let params: MCPValue = [
+            "name": "latch_input", "arguments": ["jobID": .string(id), "eof": true],
+            "_meta": [MCPRetryKeys.metadataKey: .string(key)],
+        ]
+        let control = try client.request("tools/call", params: params)["result"]?["structuredContent"]
+        let receipt = try #require(control?["controlID"]?.string)
+        #expect(control?["requestKey"] == .string(key))
+        #expect(
+            try client.tool(
+                "latch_control", arguments: ["jobID": .string(id), "controlID": .string(receipt), "timeoutSeconds": 4])[
+                    "result"]?["structuredContent"]?["succeeded"] == true)
+        #expect(
+            try client.request("tools/call", params: params)["result"]?["structuredContent"]?["controlID"]
+                == .string(receipt))
+        let bad: MCPValue = [
+            "name": "latch_input", "arguments": ["jobID": .string(id), "requestKey": "different", "eof": true],
+            "_meta": [MCPRetryKeys.metadataKey: .string(key)],
+        ]
+        #expect(try client.request("tools/call", params: bad)["error"]?["code"] == -32602)
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["succeeded"] == true)
     }
 }
 
@@ -626,6 +757,9 @@ private func jobID(_ response: MCPValue) throws -> String {
     let initialized = try client.handshake(version: "unsupported-version")
     #expect(initialized["result"]?["protocolVersion"] == "2025-11-25")
     #expect(initialized["result"]?["capabilities"]?["tools"] != nil)
+    #expect(
+        initialized["result"]?["capabilities"]?["experimental"]?["com.cerebralcoding.latch/retryKeys"]?["metadataKey"]
+            == .string(MCPRetryKeys.metadataKey))
     let listed = try client.request("tools/list")
     guard case .array(let tools) = listed["result"]?["tools"] else {
         Issue.record("missing tools")
@@ -641,11 +775,13 @@ private func jobID(_ response: MCPValue) throws -> String {
     #expect(tools[0]["annotations"]?["readOnlyHint"] == true)
     #expect(tools[1]["annotations"]?["readOnlyHint"] == false)
     #expect(tools[1]["annotations"]?["openWorldHint"] == true)
+    let prefix = try #require(initialized["result"]?["_meta"]?[MCPRetryKeys.prefixMetadataKey]?.string)
+    #expect(tools[1]["inputSchema"]?["properties"]?["requestKey"]?["description"]?.string?.contains(prefix) == true)
     let properties = try #require(tools[1]["inputSchema"]?["properties"]?.object)
     #expect(
         Set(properties.keys) == [
             "requestKey", "name", "executable", "arguments", "workingDirectory", "measurement", "input", "columns",
-            "rows", "checkpoints",
+            "rows", "checkpoints", "classification",
         ])
     #expect(try client.request("unknown")["error"]?["code"] == -32601)
     #expect(try client.tool("service_install")["error"]?["code"] == -32602)
@@ -653,7 +789,7 @@ private func jobID(_ response: MCPValue) throws -> String {
     #expect(try client.request("ping")["result"] == [:])
 }
 
-@Test func `Latch preserves commands and isolates all MCP work without agent budgets`() {
+@Test func `Latch preserves commands and isolates unclassified MCP work without agent budgets`() {
     for arguments in [
         ["build", "-c", "release"], ["build", "-j", "8"], ["build-exe", "main.zig"],
         ["-c", "kernel.metal", "-o", "kernel.air"], ["test"], ["infer"],
