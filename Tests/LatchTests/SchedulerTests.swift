@@ -375,6 +375,31 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     #expect(try String(contentsOf: file, encoding: .utf8) == "invalid")
 }
 
+@Test func `cached scheduler reads observe other writers and never rewrite unchanged state`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let other = try Scheduler(path: fixture.lockPath)
+    let file = scheduler.directory.appendingPathComponent("state.json")
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted]
+    let original = try encoder.encode(SchedulerState(sensorError: "initial"))
+    try original.write(to: file)
+    #expect(try scheduler.snapshot().sensorError == "initial")
+    #expect(try scheduler.snapshot().sensorError == "initial")
+    #expect(try Data(contentsOf: file) == original)
+    try other.transaction { $0.sensorError = "changed" }
+    #expect(try scheduler.snapshot().sensorError == "changed")
+    #expect(throws: LatchError.self) {
+        try scheduler.transaction {
+            $0.sensorError = "uncommitted"
+            throw LatchError("abort")
+        }
+    }
+    #expect(try scheduler.snapshot().sensorError == "changed")
+    try Data("invalid".utf8).write(to: file)
+    #expect(throws: (any Error).self) { try scheduler.snapshot() }
+}
+
 @Test func `killed queued process is pruned and explicit tasks JSON shows queued work`() throws {
     let fixture = try Fixture()
     let holder = try FileLatch(path: fixture.lockPath)

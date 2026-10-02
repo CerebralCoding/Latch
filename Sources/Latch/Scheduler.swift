@@ -20,6 +20,7 @@ final class Scheduler {
     let path: String
     let directory: URL
     private let collect: () throws -> SensorSnapshot
+    private var cachedState: (data: Data, state: SchedulerState)?
 
     init(path: String, collect: @escaping () throws -> SensorSnapshot = NativeSensors.sample) throws {
         self.path = path
@@ -79,16 +80,19 @@ final class Scheduler {
                 throw LatchError("MCP supervisor exited", exitCode: 69)
             }
             let servicePID = useService ? try SchedulerService.requireRunning(in: directory) : nil
-            var view = try snapshot()
-            if !useService, view.tasks.first(where: { $0.state == .queued })?.id == id,
-                !view.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),
-                !(requirements.mode == .isolated && view.tasks.contains(where: { $0.state == .running }))
-            {
-                _ = try refreshSensors()
+            var view = SchedulerState()
+            if !useService {
+                view = try snapshot()
+                if view.tasks.first(where: { $0.state == .queued })?.id == id,
+                    !view.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),
+                    !(requirements.mode == .isolated && view.tasks.contains(where: { $0.state == .running }))
+                {
+                    _ = try refreshSensors()
+                }
             }
             var reason = "waiting for admission"
-            let now = ProcessInfo.processInfo.systemUptime
             try transaction { state in
+                let now = ProcessInfo.processInfo.systemUptime
                 guard let index = state.tasks.firstIndex(where: { $0.id == id }) else {
                     throw LatchError("queued task was removed", exitCode: 75)
                 }
@@ -197,16 +201,23 @@ final class Scheduler {
             let file = directory.appendingPathComponent("state.json")
             let previous: Data?
             do { previous = try Data(contentsOf: file) } catch CocoaError.fileReadNoSuchFile { previous = nil }
-            var state = try previous.map { try JSONDecoder().decode(SchedulerState.self, from: $0) } ?? SchedulerState()
+            var state: SchedulerState
+            if let previous, let cachedState, previous == cachedState.data {
+                state = cachedState.state
+            } else {
+                state = try previous.map { try JSONDecoder().decode(SchedulerState.self, from: $0) } ?? SchedulerState()
+            }
             guard state.version == SchedulerState.schemaVersion else {
                 throw LatchError("unsupported scheduler state version", exitCode: 74)
             }
+            let original = state
+            let unfinishedJobs = Set(state.jobs.lazy.filter { !$0.complete }.map(\.id))
             var live: [ScheduledTask] = []
             for task in state.tasks {
                 guard UUID(uuidString: task.id) != nil else {
                     throw LatchError("invalid task ID in scheduler state", exitCode: 74)
                 }
-                if state.jobs.contains(where: { $0.id == task.id && !$0.complete }) {
+                if unfinishedJobs.contains(task.id) {
                     live.append(task)
                     continue
                 }
@@ -226,12 +237,17 @@ final class Scheduler {
             }
             state.tasks = live
             let result = try body(&state)
+            if let previous, state == original {
+                cachedState = (previous, state)
+                return result
+            }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(state)
             if data != previous {
                 try data.write(to: file, options: .atomic)
             }
+            cachedState = (data, state)
             return result
         }
     }

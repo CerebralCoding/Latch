@@ -86,6 +86,53 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
     return lease
 }
 
+@Test func `a full durable queue admits a measurement after continuous cool samples`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath) {
+        var sensors = coolSensors(at: ProcessInfo.processInfo.systemUptime)
+        sensors.cpuCores = ProcessInfo.processInfo.activeProcessorCount
+        sensors.memoryTotalMiB = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
+        sensors.memoryAvailableMiB = sensors.memoryTotalMiB * 3 / 4
+        return sensors
+    }
+    let service = try fakeService(scheduler)
+    let jobs = try DurableJobs(scheduler: scheduler)
+    var ids: [String] = []
+    for index in 0..<DurableJobs.globalOutstandingLimit {
+        let submission = try MCPSubmission([
+            "requestKey": .string(UUID().uuidString), "name": .string("measurement \(index)"),
+            "executable": "/bin/sleep", "arguments": ["30"], "measurement": true,
+            "workingDirectory": .string(fixture.directory.path),
+        ])
+        ids.append(try jobs.submit(submission).id)
+    }
+    try jobs.recover(executable: fixture.executable)
+    try withExtendedLifetime(service) {
+        let readyDeadline = ProcessInfo.processInfo.systemUptime + 20
+        while try scheduler.snapshot().tasks.contains(where: { $0.pid == 0 }),
+            ProcessInfo.processInfo.systemUptime < readyDeadline
+        {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        #expect(try scheduler.snapshot().tasks.allSatisfy { $0.pid > 0 })
+        let deadline = ProcessInfo.processInfo.systemUptime + 20
+        var state = try scheduler.snapshot()
+        while !state.tasks.contains(where: { $0.state == .running }),
+            ProcessInfo.processInfo.systemUptime < deadline
+        {
+            try scheduler.refreshSensors()
+            Thread.sleep(forTimeInterval: 0.1)
+            state = try scheduler.snapshot()
+        }
+        #expect(state.tasks.first?.id == ids.first)
+        #expect(state.tasks.first?.state == .running)
+        #expect(state.tasks.dropFirst().allSatisfy { $0.state == .queued })
+        let admission = try #require(state.tasks.first?.admission)
+        let since = try #require(state.tasks.first?.coolSince)
+        #expect(admission.sensors.uptime - since >= 10)
+    }
+}
+
 @Test func `service clients wake from published sensors and preserve command output`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
