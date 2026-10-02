@@ -83,7 +83,7 @@ enum CLIHelp {
                 status     Report service state; exit 69 when stopped. \(output)
                 uninstall  Remove the installation; retain queue data and logs.
                 run        Serve in the foreground (not a queued workload).
-                Label: com.cerebralcoding.latch.scheduler
+                Label: \(ServiceInstallation.label)
                 Initial install refuses an existing installation. Use update to replace it.
                 \(file)
                 """

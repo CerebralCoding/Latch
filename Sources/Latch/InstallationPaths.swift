@@ -2,12 +2,14 @@ import Darwin
 import Foundation
 
 struct InstallationPaths {
-    static let identifier = "com.cerebralcoding.latch"
+    static let identifier = ServiceIdentity.identifier
     static let serviceIdentifier = identifier + ".scheduler"
     let home: URL
+    let label: String
 
-    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser, identifier: String = Self.identifier) {
         self.home = home.standardizedFileURL
+        label = identifier + ".scheduler"
     }
 
     var executable: URL { home.appendingPathComponent(".local/bin/latch") }
@@ -15,7 +17,7 @@ struct InstallationPaths {
     var logs: URL { state.appendingPathComponent("logs") }
     var updates: URL { state.appendingPathComponent("updates") }
     var cache: URL { home.appendingPathComponent(".cache/latch") }
-    var plist: URL { home.appendingPathComponent("Library/LaunchAgents/\(Self.serviceIdentifier).plist") }
+    var plist: URL { home.appendingPathComponent("Library/LaunchAgents/\(label).plist") }
 
     static func exists(_ url: URL) -> Bool {
         var info = stat()
@@ -86,7 +88,7 @@ enum ServiceInstall {
         let data = try PropertyListSerialization.data(
             fromPropertyList: ServiceInstallation.configuration(
                 executable: paths.executable.path, path: URL(fileURLWithPath: queue).standardizedFileURL.path,
-                logs: paths.logs.path), format: .xml, options: 0)
+                logs: paths.logs.path, label: paths.label), format: .xml, options: 0)
         guard renamex_np(staged.path, paths.executable.path, UInt32(RENAME_EXCL)) == 0 else {
             throw LatchError.system("install executable without replacing an existing file")
         }

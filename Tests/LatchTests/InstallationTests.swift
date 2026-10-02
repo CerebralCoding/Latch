@@ -48,7 +48,7 @@ private final class InstallationFixture {
     #expect(attributes[.type] as? FileAttributeType == .typeRegular)
     #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o755)
     #expect(f.paths.executable.path.hasSuffix("/.local/bin/latch"))
-    #expect(f.paths.plist.lastPathComponent == "com.cerebralcoding.latch.scheduler.plist")
+    #expect(f.paths.plist.lastPathComponent == InstallationPaths.serviceIdentifier + ".plist")
     let record = try JSONDecoder().decode(
         UpdateReceipt.self, from: Data(contentsOf: ServiceUpdate.receipt(in: f.paths.updates)))
     #expect(record.current.sha256 == (try BuildIdentity.digest(f.paths.executable)))

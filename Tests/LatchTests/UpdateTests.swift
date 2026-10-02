@@ -106,6 +106,26 @@ private final class UpdateFixture {
     }
 }
 
+@Test func `updates and rollbacks reject a different service identity before replacing code`() throws {
+    let f = try UpdateFixture()
+    _ = try f.apply()
+    let receipt = try Data(contentsOf: ServiceUpdate.receipt(in: f.updates))
+    for rollback in [false, true] {
+        #expect(throws: LatchError.self) {
+            try ServiceUpdate.apply(
+                source: f.source, target: f.target, updates: f.updates, scheduler: f.scheduler,
+                rollback: rollback, timeout: 0, restartService: true,
+                expectedIdentifier: "org.example.other-service", service: f.service)
+        }
+        #expect(f.events.isEmpty)
+        #expect(f.loaded)
+        #expect(try f.contents(f.target) == "new")
+        #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
+        #expect(try Data(contentsOf: ServiceUpdate.receipt(in: f.updates)) == receipt)
+        _ = try UpdateDrain.admit(in: f.scheduler.directory)
+    }
+}
+
 @Test func `failed service startup restores the old binary and service`() throws {
     let f = try UpdateFixture()
     f.failStart = true

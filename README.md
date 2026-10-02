@@ -24,6 +24,8 @@ Run as your normal macOS login user. The installer downloads the pinned release,
 
 The service starts immediately and at login. macOS restarts it after an unexpected exit. The installer refuses conflicting files, symlinks and incomplete installations rather than overwriting them.
 
+Source builds without an embedded application identifier or certificate-backed signing identifier use `<account>.latch.scheduler` and the matching `.plist` filename. Explicit application identifiers have `.scheduler` appended. `latch service status --verbose` reports the resolved label. Updates and rollbacks must retain the installed binary's service identifier.
+
 Ensure `~/.local/bin` is on your shell's `PATH`. For zsh, add this to `~/.zshrc` if needed, then open a new terminal:
 
 ```sh

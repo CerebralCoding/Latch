@@ -85,7 +85,9 @@ enum ServiceInstallation {
         "gui/\(getuid())"
     }
 
-    static func configuration(executable: String, path: String, logs: String) -> [String: Any] {
+    static func configuration(executable: String, path: String, logs: String, label: String = Self.label) -> [String:
+        Any]
+    {
         [
             "Label": label,
             "ProgramArguments": [executable, "service", "run", "--file", path],
@@ -160,7 +162,7 @@ enum ServiceInstallation {
             try PropertyListSerialization.propertyList(from: Data(contentsOf: paths.plist), format: nil)
             as? [String: Any]
         guard let arguments = config?["ProgramArguments"] as? [String], arguments.count == 5,
-            config?["Label"] as? String == label,
+            config?["Label"] as? String == paths.label,
             arguments[0] == paths.executable.path, Array(arguments[1...3]) == ["service", "run", "--file"],
             arguments[4].hasPrefix("/")
         else {
@@ -176,7 +178,7 @@ enum ServiceInstallation {
             .resolvingSymlinksInPath()
         let restarted = try ServiceUpdate.apply(
             source: source, target: executable, updates: paths.updates, scheduler: scheduler, rollback: rollback,
-            timeout: timeout, restartService: restartService,
+            timeout: timeout, restartService: restartService, expectedIdentifier: InstallationPaths.identifier,
             service: UpdateServiceControl(
                 loaded: isLoaded,
                 revision: { try SchedulerService.status(in: scheduler.directory).serviceRevision },

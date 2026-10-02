@@ -33,7 +33,7 @@ private final class InstallerFixture {
         // The downloaded stub needs an executable name that selects its mock lifecycle.
         contents = contents.replacingOccurrences(of: "$work/latch", with: "$work/installer-latch")
         try Data(contents.utf8).write(to: script)
-        let paths = InstallationPaths(home: home)
+        let paths = InstallationPaths(home: home, identifier: ReleasePreparation.identifier)
         if scenario == "update" || scenario == "symlink" || scenario == "conflict" {
             try manager.createDirectory(
                 at: paths.executable.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -121,7 +121,8 @@ func `installer fails closed and cleans downloads without touching installed com
 }
 
 @Test func `release preparation and installer reject invalid versions and missing credentials`() throws {
-    #expect(ReleasePreparation.identifier == InstallationPaths.identifier)
+    let releasePaths = InstallationPaths(identifier: ReleasePreparation.identifier)
+    #expect(releasePaths.plist.lastPathComponent == "com.cerebralcoding.latch.scheduler.plist")
     for version in ["", "latest", "1.2", "1.2.3.4", "1..3", "1.2.3/evil", "1.2.3-rc1"] {
         #expect(throws: ReleaseError.self) { try ReleasePreparation.validate(version: version) }
         let f = try InstallerFixture(scenario: "install")

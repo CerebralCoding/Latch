@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 struct BuildIdentity: Codable, Equatable {
-    static let version = "0.14.0"
+    static let version = "0.15.0"
     // Bump when daemon behavior or its client/state contract requires a service restart.
     static let serviceRevision = 13
     var release: String
@@ -44,7 +44,8 @@ enum ServiceUpdate {
 
     static func apply(
         source: URL, target: URL, updates: URL, scheduler: Scheduler, rollback: Bool = false,
-        timeout: Double = 600, restartService: Bool = false, service: UpdateServiceControl
+        timeout: Double = 600, restartService: Bool = false, expectedIdentifier: String? = nil,
+        service: UpdateServiceControl
     ) throws -> Bool {
         let manager = FileManager.default
         try InstallationPaths.privateDirectory(updates)
@@ -85,6 +86,12 @@ enum ServiceUpdate {
                 }
                 try manager.copyItem(at: candidate, to: staged)
                 try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staged.path)
+                guard
+                    ServiceIdentity.identifier(for: staged)
+                        == (expectedIdentifier ?? ServiceIdentity.identifier(for: target))
+                else {
+                    throw LatchError("replacement must use the installed service's identifier", exitCode: 74)
+                }
                 let hash = try BuildIdentity.digest(staged)
                 let next: BuildIdentity
                 if rollback {

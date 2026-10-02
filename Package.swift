@@ -1,11 +1,24 @@
 // swift-tools-version: 6.4
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
+import Foundation
 import PackageDescription
 
 #if !os(macOS) || !arch(arm64)
     #error("Latch requires Apple Silicon and macOS 26 or newer")
 #endif
+
+let localInfoPlist = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    .appendingPathComponent(".swiftpm/configuration/latch-Info.plist")
+let identityLinkerSettings: [LinkerSetting] =
+    FileManager.default.fileExists(atPath: localInfoPlist.path)
+    ? [
+        .unsafeFlags([
+            "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker",
+            localInfoPlist.path,
+        ])
+    ]
+    : []
 
 let package = Package(
     name: "Latch",
@@ -22,6 +35,7 @@ let package = Package(
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency")
             ],
+            linkerSettings: identityLinkerSettings,
         ),
         .testTarget(
             name: "LatchTests",
