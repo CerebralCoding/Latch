@@ -92,7 +92,7 @@ extension DurableJobs {
 
     func enqueueControl(_ control: MCPControl, id: String) throws -> MCPControl {
         try scheduler.transaction { state in
-            guard let job = state.jobs?.first(where: { $0.id == id }) else { throw MCPFailure.invalid("Unknown jobID") }
+            guard let job = state.jobs.first(where: { $0.id == id }) else { throw MCPFailure.invalid("Unknown jobID") }
             var controls = try controls(id)
             if let previous = controls.first(where: { $0.requestKey == control.requestKey }) {
                 guard previous.matches(control) else {

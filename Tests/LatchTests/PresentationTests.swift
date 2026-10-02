@@ -16,7 +16,10 @@ private func presentationView(_ state: SchedulerState, now: Double = 10, running
     -> SchedulerView
 {
     SchedulerView(
-        state: state, service: SchedulerService.Status(running: running, path: "/queue"), processLatch: latch, now: now)
+        state: state,
+        service: SchedulerService.Status(
+            running: running, pid: running ? 123 : nil, path: "/queue",
+            serviceRevision: running ? BuildIdentity.serviceRevision : nil), processLatch: latch, now: now)
 }
 
 @Test func `diagnostic flags and focused help preserve literal child arguments`() throws {

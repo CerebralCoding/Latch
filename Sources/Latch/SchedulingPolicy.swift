@@ -73,7 +73,7 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
     var requirements: TaskRequirements
     var state: State = .queued
     var queuedAt = Date()
-    var queuedUptime: Double? = ProcessInfo.processInfo.systemUptime
+    var queuedUptime = ProcessInfo.processInfo.systemUptime
     var startedAt: Date?
     var waitingFor: String?
     var coolSince: Double?
@@ -83,8 +83,9 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
 }
 
 struct SchedulerState: Codable, Equatable {
-    var version = 1
-    var jobs: [DurableJobRecord]?
+    static let schemaVersion = 1
+    var version = Self.schemaVersion
+    var jobs: [DurableJobRecord] = []
     var tasks: [ScheduledTask] = []
     var sensors: SensorSnapshot?
     var sensorError: String?

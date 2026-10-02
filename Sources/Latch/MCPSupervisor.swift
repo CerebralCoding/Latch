@@ -21,7 +21,7 @@ enum MCPSupervisor {
                 .resolvingSymlinksInPath()
             let watcher = try QueueWatcher(directory: scheduler.directory.path)
             let checkpoints =
-                try record.submission.checkpoints == true ? CheckpointCoordinator(id: id, scheduler: scheduler) : nil
+                try record.submission.checkpoints ? CheckpointCoordinator(id: id, scheduler: scheduler) : nil
             while true {
                 if FileManager.default.fileExists(atPath: store.file(id, "cancel").path) {
                     try store.publish(

@@ -16,7 +16,11 @@ enum SchedulerService {
             return Status(running: false, path: directory.deletingPathExtension().path)
         } catch let error as LatchError where error.exitCode == 75 {
             let data = try Data(contentsOf: directory.appendingPathComponent("service.json"))
-            return try JSONDecoder().decode(Status.self, from: data)
+            let status = try JSONDecoder().decode(Status.self, from: data)
+            guard status.running, let pid = status.pid, pid > 0,
+                let revision = status.serviceRevision, revision > 0
+            else { throw LatchError("invalid scheduler service metadata", exitCode: 74) }
+            return status
         }
     }
 

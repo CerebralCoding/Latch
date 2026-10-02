@@ -51,7 +51,9 @@ enum MCPWorker {
             }
             let scheduler = try Scheduler(path: decoded.latchPath)
             let submission = decoded.submission
-            guard let plan = try scheduler.snapshot().tasks.first(where: { $0.id == decoded.ticketID })?.plan else {
+            guard let ticket = try scheduler.snapshot().tasks.first(where: { $0.id == decoded.ticketID }),
+                let plan = ticket.plan
+            else {
                 throw LatchError("durable execution plan is missing", exitCode: 74)
             }
             status.plan = plan
@@ -69,9 +71,7 @@ enum MCPWorker {
                 return 0
             }
             unsetenv("LATCH_CHECKPOINT_FD")
-            let queued =
-                try scheduler.snapshot().tasks.first { $0.id == decoded.ticketID }?.queuedUptime
-                ?? ProcessInfo.processInfo.systemUptime
+            let queued = ticket.queuedUptime
             let reservation = try scheduler.reserve(
                 name: submission.name, arguments: [submission.executable] + plan.arguments,
                 requirements: plan.requirements, timeout: nil, useService: true, supervisorPID: decoded.parentPID,

@@ -129,7 +129,7 @@ private func checkpointState(_ client: MCPClient, id: String, state: String, ite
         // Equal timestamps exercise deterministic tie-breaking rather than UUID order alone.
         let timestamp = Date(timeIntervalSinceReferenceDate: 100)
         try scheduler.transaction { state in
-            for index in state.jobs!.indices { state.jobs?[index].createdAt = timestamp }
+            for index in state.jobs.indices { state.jobs[index].createdAt = timestamp }
         }
         var queuedIDs: [String] = []
         for index in 0..<12 {
@@ -474,7 +474,7 @@ func `MCP task result blocks until completion and retains the final result`(mode
     }
 }
 
-@Test func `MCP rejects malformed task metadata and keeps older clients compatible`() throws {
+@Test func `MCP rejects malformed task metadata`() throws {
     let fixture = try Fixture()
     let client = try MCPClient(fixture: fixture)
     for task: MCPValue in [false, ["ttl": -1], ["ttl": .number(1.5)], ["surprise": true]] {
@@ -489,13 +489,6 @@ func `MCP task result blocks until completion and retains the final result`(mode
             "tools/call",
             params: ["name": "latch_execute", "arguments": submission(fixture), "_meta": ["progressToken": true]])[
                 "error"]?["code"] == -32602)
-    let older = try MCPClient(fixture: fixture, initialize: false)
-    #expect(try older.handshake(version: "2025-06-18")["result"]?["capabilities"]?["tasks"] == nil)
-    #expect(try older.request("tasks/list")["error"]?["code"] == -32601)
-    // A peer without task support must ignore augmentation metadata and return the ordinary result.
-    #expect(
-        try older.request("tools/call", params: ["name": "latch_view", "task": [:]])["result"]?["structuredContent"]?[
-            "scheduler"] != nil)
 }
 
 @Test func `MCP request cancellation only stops waiting and explicit cancellation stops the job`() throws {
@@ -1106,14 +1099,14 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     let message: MCPValue = [
         "jsonrpc": "2.0", "id": "fragment", "method": "initialize",
         "params": [
-            "protocolVersion": "2025-06-18", "capabilities": [:], "clientInfo": ["name": "test", "version": "1"],
+            "protocolVersion": "2025-11-25", "capabilities": [:], "clientInfo": ["name": "test", "version": "1"],
         ],
     ]
     let data = try JSONEncoder().encode(message)
     try client.input.fileHandleForWriting.write(contentsOf: data.prefix(7))
     try client.input.fileHandleForWriting.write(contentsOf: data.dropFirst(7))
     try client.input.fileHandleForWriting.write(contentsOf: Data([13, 10]))
-    #expect(try client.response(id: "fragment")["result"]?["protocolVersion"] == "2025-06-18")
+    #expect(try client.response(id: "fragment")["result"]?["protocolVersion"] == "2025-11-25")
     try client.send(["jsonrpc": "2.0", "method": "notifications/initialized"])
     #expect(try client.tool("latch_view")["result"]?["structuredContent"]?["scheduler"] != nil)
 }
@@ -1163,7 +1156,6 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
             try second.tool("latch_submit", arguments: submission(fixture, key: "first", mode: "fail75"))["error"]?[
                 "code"] == -32602)
         let view = try second.tool("latch_view")["result"]?["structuredContent"]
-        #expect(view?["owner"] == nil)
         #expect(view?["globalOutstandingLimit"] == 64)
         guard case .array(let jobs) = view?["jobs"] else {
             Issue.record("missing shared jobs")
@@ -1300,16 +1292,6 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     #expect(try store.scheduler.snapshot().tasks.isEmpty)
     #expect(
         try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(record.id, "result.json"))) == final)
-}
-
-@Test func `MCP has no owner configuration or submission property`() throws {
-    #expect(try Options(arguments: ["mcp"]).command == .mcp)
-    #expect(throws: LatchError.self) { try Options(arguments: ["mcp", "--owner", "agent"]) }
-    #expect(throws: LatchError.self) { try Options(arguments: ["view", "--owner", "agent"]) }
-    let fixture = try Fixture()
-    var arguments = try #require(submission(fixture).object)
-    arguments["owner"] = "another"
-    #expect(throws: MCPFailure.self) { try MCPSubmission(.object(arguments)) }
 }
 
 private func interactiveSubmission(_ fixture: Fixture, mode: String, input: String) throws -> MCPValue {
@@ -1593,7 +1575,7 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     let store = try DurableJobs(scheduler: Scheduler(path: separate.lockPath))
     let job = try store.submit(MCPSubmission(submission(separate)))
     try store.scheduler.transaction {
-        $0.jobs?[0].state = "running"
+        $0.jobs[0].state = "running"
         $0.tasks[0].state = .running
     }
     let input = try MCPArguments(
@@ -1612,7 +1594,7 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     let fixture = try Fixture()
     let store = try DurableJobs(scheduler: Scheduler(path: fixture.lockPath))
     let job = try store.submit(MCPSubmission(interactiveSubmission(fixture, mode: "blocked-input", input: "pipe")))
-    try store.scheduler.transaction { $0.jobs?[0].state = "running" }
+    try store.scheduler.transaction { $0.jobs[0].state = "running" }
     for index in 0..<12 {
         let input = try MCPArguments(
             ["requestKey": .string("input-\(index)"), "text": "bytes"], allowed: ["requestKey", "text"])

@@ -79,7 +79,8 @@ private func waitForTask(_ scheduler: Scheduler, state: ScheduledTask.State = .q
 private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
     let lease = try FileLatch(path: scheduler.directory.appendingPathComponent("service.lock").path)
     try lease.acquire(shared: false, timeout: 0)
-    let status = SchedulerService.Status(running: true, pid: getpid(), path: scheduler.path)
+    let status = SchedulerService.Status(
+        running: true, pid: getpid(), path: scheduler.path, serviceRevision: BuildIdentity.serviceRevision)
     try JSONEncoder().encode(status).write(
         to: scheduler.directory.appendingPathComponent("service.json"), options: .atomic)
     return lease

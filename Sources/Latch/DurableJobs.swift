@@ -37,12 +37,12 @@ final class DurableJobs {
     }
 
     func records() throws -> [DurableJobRecord] {
-        try scheduler.snapshot().jobs ?? []
+        try scheduler.snapshot().jobs
     }
 
     func submit(_ submission: MCPSubmission) throws -> DurableJobRecord {
         try scheduler.transaction { state in
-            var records = state.jobs ?? []
+            var records = state.jobs
             if let existing = records.first(where: { $0.submission.requestKey == submission.requestKey }) {
                 guard existing.submission == submission else {
                     throw MCPFailure.invalid("requestKey already belongs to a different submission")
@@ -57,7 +57,7 @@ final class DurableJobs {
             let record = DurableJobRecord(id: UUID().uuidString, submission: submission)
             let plan = TaskPlanner.plan(
                 arguments: submission.arguments, measurement: submission.measurement,
-                classification: submission.classification ?? .sensitive)
+                classification: submission.classification)
             records.append(record)
             state.jobs = records
             state.tasks.append(
@@ -70,10 +70,10 @@ final class DurableJobs {
 
     func markTask(_ id: String) throws {
         try scheduler.transaction { state in
-            guard let index = state.jobs?.firstIndex(where: { $0.id == id }) else {
+            guard let index = state.jobs.firstIndex(where: { $0.id == id }) else {
                 throw MCPFailure.invalid("Unknown jobID")
             }
-            state.jobs?[index].protocolTask = true
+            state.jobs[index].protocolTask = true
         }
     }
 
@@ -82,17 +82,17 @@ final class DurableJobs {
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(result)
         try scheduler.transaction { state in
-            guard let index = state.jobs?.firstIndex(where: { $0.id == id }) else { return }
+            guard let index = state.jobs.firstIndex(where: { $0.id == id }) else { return }
             try data.write(to: file(id, "result.json"), options: .atomic)
             let phase = result["state"]?.string ?? "queued"
-            if state.jobs?[index].state != phase {
-                state.jobs?[index].state = phase
-                state.jobs?[index].updatedAt = Date()
+            if state.jobs[index].state != phase {
+                state.jobs[index].state = phase
+                state.jobs[index].updatedAt = Date()
             }
             if result["complete"] == true {
                 try settleControls(id)
-                state.jobs?[index].complete = true
-                state.jobs?[index].environment = [:]
+                state.jobs[index].complete = true
+                state.jobs[index].environment = [:]
                 if state.tasks.contains(where: { $0.id == id && $0.state == .running }) {
                     state.resetCooldowns()
                 }
@@ -107,9 +107,9 @@ final class DurableJobs {
 
     func forget(_ id: String) throws {
         try scheduler.transaction { state in
-            guard let record = state.jobs?.first(where: { $0.id == id }) else { return }
+            guard let record = state.jobs.first(where: { $0.id == id }) else { return }
             guard record.complete else { throw MCPFailure.invalid("Only completed jobs can be forgotten") }
-            state.jobs?.removeAll { $0.id == id }
+            state.jobs.removeAll { $0.id == id }
             for suffix in [
                 "result.json", "cancel", "status.json", "request.json", "supervisor.lock", "controls.json",
                 "output.json",
@@ -208,8 +208,8 @@ final class DurableJobs {
             var pid: Int32 = 0
             try check(posix_spawn(&pid, executable.path, &actions, &attributes, &argv, &env))
             try scheduler.transaction { state in
-                if let index = state.jobs?.firstIndex(where: { $0.id == id }) {
-                    state.jobs?[index].supervisorPID = pid
+                if let index = state.jobs.firstIndex(where: { $0.id == id }) {
+                    state.jobs[index].supervisorPID = pid
                 }
             }
         }

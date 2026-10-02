@@ -51,7 +51,7 @@ enum MCPDiagnostics {
         var summaries =
             scope == "outstanding"
             ? view.jobs
-            : (state.jobs ?? []).filter(\.complete).map { JobSummary(record: $0, observedAt: view.observedAt) }
+            : state.jobs.filter(\.complete).map { JobSummary(record: $0, observedAt: view.observedAt) }
         summaries.sort {
             if $0.createdAt == $1.createdAt { return scope == "history" ? $0.jobID > $1.jobID : $0.jobID < $1.jobID }
             return scope == "history" ? $0.createdAt > $1.createdAt : $0.createdAt < $1.createdAt

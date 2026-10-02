@@ -2,7 +2,8 @@ import Darwin
 import Foundation
 
 struct CheckpointMessage: Codable {
-    var version = 1
+    static let schemaVersion = 1
+    var version = Self.schemaVersion
     var kind: String
     var iteration: Int
 }
@@ -136,7 +137,9 @@ final class CheckpointCoordinator {
             let data = Data(buffer[..<end])
             buffer.removeSubrange(...end)
             let message = try JSONDecoder().decode(CheckpointMessage.self, from: data)
-            guard message.version == 1, message.iteration >= 0, message.iteration <= 9_007_199_254_740_991 else {
+            guard message.version == CheckpointMessage.schemaVersion, message.iteration >= 0,
+                message.iteration <= 9_007_199_254_740_991
+            else {
                 throw LatchError("invalid checkpoint message")
             }
             if message.kind == "ready", message.iteration == iteration {

@@ -3,11 +3,10 @@ import Darwin
 import Foundation
 
 struct BuildIdentity: Codable, Equatable {
-    static let version = "0.15.0"
-    // Bump when daemon behavior or its client/state contract requires a service restart.
-    static let serviceRevision = 13
+    static let version = "0.16.0"
+    static let serviceRevision = 1
     var release: String
-    var serviceRevision: Int?
+    var serviceRevision: Int
     var sha256: String
 
     static func digest(_ file: URL) throws -> String {
@@ -107,7 +106,7 @@ enum ServiceUpdate {
                 let runningRevision = try service.revision()
                 let restart =
                     wasLoaded
-                    && (restartService || next.serviceRevision == nil || runningRevision != next.serviceRevision)
+                    && (restartService || runningRevision != next.serviceRevision)
                 if !rollback, hash == currentHash {
                     if restart {
                         try service.stop()

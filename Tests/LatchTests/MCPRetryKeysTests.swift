@@ -26,7 +26,7 @@ import Testing
     let first = MCPRetryKeys()
     let second = MCPRetryKeys()
     #expect(first.prefix != second.prefix)
-    let tools = MCPTools.listing(tasks: true, retryKeyPrefix: first.prefix)
+    let tools = MCPTools.listing(retryKeyPrefix: first.prefix)
     for tool in tools where tool["inputSchema"]?["properties"]?["requestKey"] != nil {
         #expect(
             tool["inputSchema"]?["properties"]?["requestKey"]?["description"]?.string?.contains(first.prefix) == true)

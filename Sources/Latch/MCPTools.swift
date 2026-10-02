@@ -104,16 +104,14 @@ enum MCPTools {
             properties: ["jobID": ["type": "string"]], required: ["jobID"], readOnly: false),
     ]
 
-    static func listing(tasks: Bool, retryKeyPrefix: String? = nil) -> [MCPValue] {
+    static func listing(retryKeyPrefix: String? = nil) -> [MCPValue] {
         var execute = list[1].object!
         execute["name"] = "latch_execute"
         execute["description"] =
             .string(
                 "Execute an authorized foreground task through Latch and return its final status and bounded output. No agent resource planning. Blocks until completion; hosts supporting MCP tasks may await tasks/result. Request cancellation only stops waiting; explicit job cancellation stops work. Use a globally unique requestKey for each job; identical retries are deduplicated across all connections.\n"
                     + workloadGuidance)
-        if tasks {
-            execute["execution"] = ["taskSupport": "optional"]
-        }
+        execute["execution"] = ["taskSupport": "optional"]
         return (list + [.object(execute)] + interactiveTools + diagnosticTools).map { value in
             guard let retryKeyPrefix, var tool = value.object,
                 var schema = tool["inputSchema"]?.object,
@@ -176,8 +174,8 @@ struct MCPSubmission: Codable, Equatable {
     var input: String
     var columns: Int
     var rows: Int
-    var checkpoints: Bool?
-    var classification: Classification?
+    var checkpoints: Bool
+    var classification: Classification
 
     init(_ value: MCPValue?) throws {
         let input = try MCPArguments(value, allowed: MCPTools.submissionKeys)
@@ -204,8 +202,8 @@ struct MCPSubmission: Codable, Equatable {
             throw MCPFailure.invalid("arguments exceed 64 KiB")
         }
         measurement = try input.flag("measurement")
-        checkpoints = try input.flag("checkpoints") ? true : nil
-        if checkpoints == true { measurement = true }
+        checkpoints = try input.flag("checkpoints")
+        if checkpoints { measurement = true }
         guard let declared = Classification(rawValue: try input.text("classification", default: "sensitive")) else {
             throw MCPFailure.invalid("classification must be ordinary or sensitive")
         }

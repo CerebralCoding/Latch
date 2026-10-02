@@ -13,7 +13,8 @@ public final class LatchSession {
     }
 
     private struct Message: Codable {
-        var version = 1
+        static let schemaVersion = 1
+        var version = Self.schemaVersion
         var kind: String
         var iteration: Int
     }
@@ -66,7 +67,9 @@ public final class LatchSession {
                 guard count == 1 else { throw Failure(description: "Checkpoint supervisor disconnected") }
                 if byte == 10 {
                     let message = try JSONDecoder().decode(Message.self, from: response)
-                    guard message.version == 1, message.kind == expecting, message.iteration == iteration else {
+                    guard message.version == Message.schemaVersion, message.kind == expecting,
+                        message.iteration == iteration
+                    else {
                         throw Failure(description: "Invalid checkpoint response")
                     }
                     return

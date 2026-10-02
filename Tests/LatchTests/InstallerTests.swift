@@ -49,7 +49,7 @@ private final class InstallerFixture {
         }
     }
 
-    func run(arguments: [String] = ["--version", "0.11.0"]) throws -> (Int32, String) {
+    func run(arguments: [String] = ["--version", BuildIdentity.version]) throws -> (Int32, String) {
         let child = Child()
         child.process.executableURL = URL(fileURLWithPath: "/bin/sh")
         child.process.arguments = [script.path] + arguments
@@ -57,6 +57,7 @@ private final class InstallerFixture {
         environment["HOME"] = home.path
         environment["LATCH_INSTALLER_TEST_SCENARIO"] = scenario
         environment["LATCH_INSTALLER_TEST_BINARY"] = stub.path
+        environment["LATCH_INSTALLER_TEST_VERSION"] = BuildIdentity.version
         child.process.environment = environment
         child.process.standardOutput = child.stdout
         child.process.standardError = child.stderr
@@ -75,7 +76,9 @@ func `installer verifies before dispatching one Swift lifecycle command`(scenari
     #expect(status == 0, "\(errors)")
     let events = try f.events
     #expect(
-        events.contains("https://github.com/CerebralCoding/Latch/releases/download/v0.11.0/latch-0.11.0-macos-arm64"))
+        events.contains(
+            "https://github.com/CerebralCoding/Latch/releases/download/v\(BuildIdentity.version)/latch-\(BuildIdentity.version)-macos-arm64"
+        ))
     #expect(events.contains("--proto-redir =https"))
     #expect(events.contains(ReleasePreparation.team))
     #expect(events.contains(ReleasePreparation.identifier))

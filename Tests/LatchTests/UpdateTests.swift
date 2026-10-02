@@ -26,7 +26,9 @@ private final class UpdateFixture {
         try InstallationPaths.privateDirectory(updates)
         try JSONEncoder().encode(
             UpdateReceipt(
-                current: BuildIdentity(release: "fixture", serviceRevision: nil, sha256: BuildIdentity.digest(target)),
+                current: BuildIdentity(
+                    release: BuildIdentity.version, serviceRevision: BuildIdentity.serviceRevision,
+                    sha256: BuildIdentity.digest(target)),
                 previous: nil
             )
         ).write(to: ServiceUpdate.receipt(in: updates))
@@ -84,8 +86,8 @@ private final class UpdateFixture {
     #expect(try f.contents(f.target) == "new")
     #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
     #expect(try UpdateDrain.generation(in: f.scheduler.directory) != oldGeneration)
-    #expect(try f.apply(rollback: true))
-    #expect(f.events == ["stop", "start"])
+    #expect(try f.apply(rollback: true) == false)
+    #expect(f.events.isEmpty)
     #expect(try f.contents(f.target) == "old")
     #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "new")
 }

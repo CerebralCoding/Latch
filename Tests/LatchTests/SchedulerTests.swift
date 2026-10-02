@@ -328,12 +328,12 @@ func `rejects invalid scheduler options`(arguments: [String]) {
             try scheduler.reserve(
                 name: "batch", arguments: ["true"], requirements: TaskRequirements(mode: .batch), timeout: 0)
         }
-        let legacy = try FileLatch(path: fixture.lockPath)
-        #expect(throws: LatchError.self) { try legacy.acquire(shared: true, timeout: 0) }
+        let holder = try FileLatch(path: fixture.lockPath)
+        #expect(throws: LatchError.self) { try holder.acquire(shared: true, timeout: 0) }
     }
 }
 
-@Test func `legacy shared latch blocks an otherwise eligible measurement`() throws {
+@Test func `shared process latch blocks an otherwise eligible measurement`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath, collect: { idleSensors() })
     let now = ProcessInfo.processInfo.systemUptime

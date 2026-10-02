@@ -36,7 +36,9 @@ if tool.hasPrefix("installer-") {
         }
     case "installer-latch":
         if arguments == ["--version"] {
-            print(scenario == "bad-version" ? "9.9.9" : "0.11.0")
+            print(
+                scenario == "bad-version"
+                    ? "9.9.9" : ProcessInfo.processInfo.environment["LATCH_INSTALLER_TEST_VERSION"]!)
         } else if scenario == "command-failure" {
             exit(74)
         }

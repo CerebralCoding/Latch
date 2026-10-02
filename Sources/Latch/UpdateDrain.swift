@@ -44,10 +44,10 @@ final class UpdateDrain {
             if state.tasks.isEmpty {
                 try activity.acquire(shared: false, timeout: remaining)
                 try gate.acquire(shared: false, timeout: remaining)
-                // Older clients do not hold activity leases. Never restart over their visible queue.
+                // An admission begun before the drain can commit while activity acquisition waits.
                 guard try scheduler.snapshot().tasks.isEmpty else {
                     throw LatchError(
-                        "an older client submitted during the drain; quiesce older clients before updating",
+                        "accepted work remains queued; retry the update after it completes",
                         exitCode: 75)
                 }
                 return

@@ -62,7 +62,7 @@ final class Scheduler {
         }
         try transaction { state in
             if ticketID != nil {
-                guard state.jobs?.contains(where: { $0.id == id && !$0.complete }) == true,
+                guard state.jobs.contains(where: { $0.id == id && !$0.complete }),
                     let index = state.tasks.firstIndex(where: { $0.id == id && $0.state == .queued })
                 else { throw LatchError("durable admission ticket is missing", exitCode: 74) }
                 state.tasks[index].pid = getpid()
@@ -198,13 +198,15 @@ final class Scheduler {
             let previous: Data?
             do { previous = try Data(contentsOf: file) } catch CocoaError.fileReadNoSuchFile { previous = nil }
             var state = try previous.map { try JSONDecoder().decode(SchedulerState.self, from: $0) } ?? SchedulerState()
-            guard state.version == 1 else { throw LatchError("unsupported scheduler state version", exitCode: 74) }
+            guard state.version == SchedulerState.schemaVersion else {
+                throw LatchError("unsupported scheduler state version", exitCode: 74)
+            }
             var live: [ScheduledTask] = []
             for task in state.tasks {
                 guard UUID(uuidString: task.id) != nil else {
                     throw LatchError("invalid task ID in scheduler state", exitCode: 74)
                 }
-                if state.jobs?.contains(where: { $0.id == task.id && !$0.complete }) == true {
+                if state.jobs.contains(where: { $0.id == task.id && !$0.complete }) {
                     live.append(task)
                     continue
                 }

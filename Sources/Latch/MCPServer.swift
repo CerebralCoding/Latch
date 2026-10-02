@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 final class MCPServer {
+    static let protocolVersion = "2025-11-25"
     private struct Waiter {
         enum Kind { case tool, execute, taskResult, taskCancel, control, output }
         var requestID: MCPValue
@@ -27,7 +28,6 @@ final class MCPServer {
     private var jobs: [String: MCPJob] = [:]
     private var waiters: [Waiter] = []
     private var tasks: [String: MCPTask] = [:]
-    private var supportsTasks = false
     private var directoryDescriptor: Int32 = -1
     private var initialized = false
     private var ready = false
@@ -216,13 +216,11 @@ final class MCPServer {
             guard params.object != nil else { throw MCPFailure.invalid("params must be an object") }
             if method == "initialize" {
                 guard !initialized else { throw MCPFailure(code: -32600, message: "Already initialized") }
-                guard let requested = params["protocolVersion"]?.string, params["capabilities"]?.object != nil,
+                guard params["protocolVersion"]?.string != nil, params["capabilities"]?.object != nil,
                     params["clientInfo"]?["name"]?.string != nil, params["clientInfo"]?["version"]?.string != nil
                 else {
                     throw MCPFailure.invalid("initialize requires protocolVersion, capabilities, and clientInfo")
                 }
-                let version = ["2025-11-25", "2025-06-18"].contains(requested) ? requested : "2025-11-25"
-                supportsTasks = version == "2025-11-25"
                 var capabilities: [String: MCPValue] = ["tools": ["listChanged": false]]
                 capabilities["experimental"] = [
                     "com.cerebralcoding.latch/retryKeys": [
@@ -230,14 +228,12 @@ final class MCPServer {
                         "prefixMetadataKey": .string(MCPRetryKeys.prefixMetadataKey),
                     ]
                 ]
-                if supportsTasks {
-                    capabilities["tasks"] = ["list": [:], "cancel": [:], "requests": ["tools": ["call": [:]]]]
-                }
+                capabilities["tasks"] = ["list": [:], "cancel": [:], "requests": ["tools": ["call": [:]]]]
                 initialized = true
                 try respond(
                     id: id,
                     result: [
-                        "protocolVersion": .string(version), "capabilities": .object(capabilities),
+                        "protocolVersion": .string(Self.protocolVersion), "capabilities": .object(capabilities),
                         "serverInfo": ["name": "latch", "version": .string(BuildIdentity.version)],
                         "instructions": .string(MCPTools.instructions + "\n" + retryKeys.instructions),
                         "_meta": [MCPRetryKeys.prefixMetadataKey: .string(retryKeys.prefix)],
@@ -255,12 +251,12 @@ final class MCPServer {
                     try respond(
                         id: id,
                         result: [
-                            "tools": .array(MCPTools.listing(tasks: supportsTasks, retryKeyPrefix: retryKeys.prefix))
+                            "tools": .array(MCPTools.listing(retryKeyPrefix: retryKeys.prefix))
                         ])
                 case "tools/call":
                     guard let name = params["name"]?.string else { throw MCPFailure.invalid("tool name is required") }
                     let progress = try progress(params)
-                    let task = supportsTasks ? params["task"] : nil
+                    let task = params["task"]
                     if let task {
                         guard name == "latch_execute" else {
                             throw MCPFailure(code: -32601, message: "Task execution is supported only by latch_execute")
@@ -278,9 +274,6 @@ final class MCPServer {
                         : params["arguments"]
                     try call(name, arguments: arguments, id: id, progress: progress, task: task != nil)
                 case "tasks/get", "tasks/list", "tasks/result", "tasks/cancel":
-                    guard supportsTasks else {
-                        throw MCPFailure(code: -32601, message: "Tasks require protocol 2025-11-25")
-                    }
                     try taskRequest(method, params: params, id: id)
                 default: throw MCPFailure(code: -32601, message: "Method not found: \(method)")
                 }

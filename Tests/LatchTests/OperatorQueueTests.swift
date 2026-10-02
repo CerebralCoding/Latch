@@ -156,10 +156,12 @@ func `operator clear wakes queued CLI clients without starting their commands`(s
     }
 }
 
-@Test func `operator mutations reject a service with an uncertain revision`() throws {
+@Test func `operator mutations reject malformed running service metadata`() throws {
     let f = try OperatorFixture()
     let record = try f.submit()
-    try JSONEncoder().encode(SchedulerService.Status(running: true, pid: getpid(), path: f.fixture.lockPath)).write(
+    try JSONEncoder().encode(
+        SchedulerService.Status(running: true, pid: getpid(), path: f.fixture.lockPath, serviceRevision: 0)
+    ).write(
         to: f.scheduler.directory.appendingPathComponent("service.json"))
     try withExtendedLifetime(f.service) {
         #expect(throws: LatchError.self) { try f.queue.prioritize(record.id) }

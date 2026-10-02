@@ -23,7 +23,8 @@ struct SchedulerView: Encodable {
         var cooldownRemainingSeconds: Double?
     }
 
-    let version = 1
+    static let schemaVersion = 1
+    let version = Self.schemaVersion
     let observedAt = Date()
     var service: SchedulerService.Status
     var processLatch: String
@@ -94,7 +95,7 @@ struct SchedulerView: Encodable {
             capacity.memoryHeadroomMiB = max(0, sensors.memoryAvailableMiB - sensors.memoryTotalMiB / 10 - memory)
         }
         var position = 0
-        let records = Dictionary(uniqueKeysWithValues: (state.jobs ?? []).filter { !$0.complete }.map { ($0.id, $0) })
+        let records = Dictionary(uniqueKeysWithValues: state.jobs.filter { !$0.complete }.map { ($0.id, $0) })
         tasks = state.tasks.map { task in
             guard task.state == .queued else { return Task(task: task) }
             position += 1
@@ -125,7 +126,7 @@ struct SchedulerView: Encodable {
         }
         jobs = tasks.map { JobSummary(task: $0, record: records[$0.task.id], observedAt: observedAt) }
         let taskIDs = Set(tasks.map { $0.task.id })
-        jobs += (state.jobs ?? []).filter { !$0.complete && !taskIDs.contains($0.id) }
+        jobs += state.jobs.filter { !$0.complete && !taskIDs.contains($0.id) }
             .sorted { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }
             .map { JobSummary(record: $0, observedAt: observedAt) }
     }

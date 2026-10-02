@@ -39,7 +39,7 @@ struct JobSummary: Encodable {
         name = record.submission.name
         state = record.state
         classification =
-            record.submission.measurement ? "measurement" : record.submission.classification?.rawValue ?? "sensitive"
+            record.submission.measurement ? "measurement" : record.submission.classification.rawValue
         createdAt = record.createdAt
         complete = record.complete
         finishedAt = record.complete ? record.updatedAt : nil

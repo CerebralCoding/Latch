@@ -32,7 +32,7 @@ struct OperatorQueue {
                 let task = state.tasks[index]
                 guard task.state == .queued, task.startedAt == nil, task.residentMemoryMiB == nil else { continue }
                 // Admission uses the same state lock: cancellation wins before a job can start.
-                if state.jobs?.contains(where: { $0.id == task.id && !$0.complete }) == true {
+                if state.jobs.contains(where: { $0.id == task.id && !$0.complete }) {
                     try store.cancel(task.id)
                 }
                 state.tasks[index].state = .cancelling
