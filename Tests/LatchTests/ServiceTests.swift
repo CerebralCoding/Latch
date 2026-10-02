@@ -139,13 +139,12 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
 @Test func `running commands retain leases after the service stops`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
-    var service: FileLatch? = try fakeService(scheduler)
+    let service = try fakeService(scheduler)
     let child = try fixture.launch(["schedule", "--mode", "batch", "--cooldown", "0", "--", "/bin/sleep", "30"])
     try waitForTask(scheduler)
     try scheduler.transaction { $0.record(coolSensors(at: ProcessInfo.processInfo.systemUptime)) }
     try waitForTask(scheduler, state: .running)
-    withExtendedLifetime(service) {}
-    service = nil
+    service.release()
     #expect(try !SchedulerService.status(in: scheduler.directory).running)
     #expect(child.process.isRunning)
     #expect(try scheduler.snapshot().tasks.first?.state == .running)

@@ -2,6 +2,20 @@ import Darwin
 import Foundation
 
 enum HumanOutput {
+    static let about = """
+        Latch \(BuildIdentity.version)
+        Coordinate finite work on Apple Silicon Macs with macOS 26 or later.
+
+        Created by Sebastian Christiansen
+        Copyright © 2026 Sebastian Christiansen
+        License: MIT
+        Contact: mail@cerebralcoding.com
+        Source: https://github.com/CerebralCoding/Latch
+
+        If Latch helps your work, consider sponsoring its development:
+        https://github.com/sponsors/CerebralCoding
+        """
+
     static var terminalWidth: Int {
         var size = winsize()
         guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0, size.ws_col > 0 else { return 100 }
@@ -124,11 +138,18 @@ enum HumanOutput {
             lines.append(
                 "Sensors    Sampling paused during \(value.samplingPausedReason ?? "exclusive work")\(value.sensorAgeSeconds.map { "; last readings " + duration($0) + " ago" } ?? "")"
             )
+        } else if value.service.running, value.jobs.isEmpty, value.sensors != nil,
+            let age = value.sensorAgeSeconds,
+            (0...(SchedulingPolicy.idleSampleInterval + SchedulingPolicy.maximumSampleAge)).contains(age)
+        {
+            lines.append(
+                "Sensors    Idle cached readings \(duration(age)) old; sampling every \(duration(SchedulingPolicy.idleSampleInterval))"
+            )
         } else if value.sensorsFresh {
             lines.append("Sensors    Cached readings \(duration(value.sensorAgeSeconds)) old")
         } else {
             lines.append(
-                "Sensors    \(value.sensors == nil ? "No readings yet" : "Stale; last readings \(duration(value.sensorAgeSeconds)) ago")\(value.jobs.isEmpty && value.service.running ? "; idle sampling every 15s" : "")"
+                "Sensors    \(value.sensors == nil ? "No readings yet" : "Sampling \(value.service.running ? "overdue" : "stopped"); last readings \(duration(value.sensorAgeSeconds)) ago")"
             )
         }
         if let sensors = value.sensors {

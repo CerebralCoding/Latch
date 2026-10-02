@@ -73,7 +73,9 @@ enum SchedulerService {
                     try scheduler.refreshSensors()
                 }
                 watcher.wait(
-                    seconds: state.tasks.isEmpty ? 15 : SchedulingPolicy.sampleInterval, pids: state.tasks.map(\.pid))
+                    seconds: state.tasks.isEmpty
+                        ? SchedulingPolicy.idleSampleInterval : SchedulingPolicy.sampleInterval,
+                    pids: state.tasks.map(\.pid))
             }
         }
     }

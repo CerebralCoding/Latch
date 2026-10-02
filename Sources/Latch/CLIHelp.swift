@@ -27,6 +27,7 @@ enum CLIHelp {
         Use latch COMMAND --help or latch help COMMAND for command-specific help.
         Agents use MCP; operator queue overrides are for humans.
         latch --version prints the binary version.
+        latch --about prints author, license, contact, and sponsorship information.
         Exit codes: 64 usage, 69 service unavailable, 71 allocation, 74 I/O,
                     75 busy/timeout, 126 cannot execute, 127 command not found.
         run/schedule otherwise return the command's exit status.
@@ -47,7 +48,8 @@ enum CLIHelp {
                 \(purpose)
                 \(output)
                 Uses cached readings; never samples or reserves resources.
-                Stale readings during exclusive work are expected. No start-time estimate is made.
+                Idle readings are cached for 15 seconds; sampling pauses during exclusive work.
+                No start-time estimate is made.
                 \(file)
                 """
         case .sensors:
@@ -92,7 +94,7 @@ enum CLIHelp {
                 Usage: latch \(command.rawValue) [--timeout SECONDS] [--restart-service]
                 Drain accepted work before atomically replacing the installed binary.
                 Run update from the newly built binary. The prior binary is retained for rollback.
-                Restart a loaded service only for a revision change or --restart-service.
+                Replacing a binary restarts a loaded service. --restart-service forces a restart.
                 A stopped service stays stopped. Drain timeout defaults to 600 seconds.
                 Reconnect MCP hosts after replacement; retained results remain available by job ID.
                 Never submit installation or update commands through Latch itself.
@@ -139,6 +141,9 @@ enum CLIHelp {
                 \(file)
                 """
         case .version: return "Usage: latch --version\nPrint the binary version without contacting the service."
+        case .about:
+            return
+                "Usage: latch --about\nPrint author, license, contact, and sponsorship information without contacting the service."
         case .help: return overview
         }
     }

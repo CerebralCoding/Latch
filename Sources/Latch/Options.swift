@@ -2,7 +2,8 @@ import Foundation
 
 struct Options {
     enum Command: String {
-        case run, wait, status, schedule, tasks, sensors, service, view, mcp, update, rollback, `guard`, help, version
+        case run, wait, status, schedule, tasks, sensors, service, view, mcp, update, rollback, `guard`, help, version,
+            about
         case list = "--list"
         case prioritize = "--run"
         case clear = "--clear"
@@ -49,6 +50,11 @@ struct Options {
         if ["version", "--version"].contains(first) {
             guard arguments.count == 1 else { throw LatchError("unexpected arguments after version") }
             command = .version
+            return
+        }
+        if ["about", "--about"].contains(first) {
+            guard arguments.count == 1 else { throw LatchError("unexpected arguments after about") }
+            command = .about
             return
         }
         guard let command = Command(rawValue: first) else {

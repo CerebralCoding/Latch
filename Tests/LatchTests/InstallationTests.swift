@@ -132,6 +132,20 @@ private final class InstallationFixture {
     #expect(child.output.trimmingCharacters(in: .whitespacesAndNewlines) == BuildIdentity.version)
 }
 
+@Test func `about query needs no queue or service`() throws {
+    #expect(try Options(arguments: ["--about"]).command == .about)
+    #expect(throws: LatchError.self) { try Options(arguments: ["--about", "--file", "/queue"]) }
+    let fixture = try Fixture()
+    let child = try fixture.launch(["--about"], includeFile: false)
+    #expect(try fixture.finish(child) == 0)
+    let output = child.output
+    #expect(output.contains("Latch \(BuildIdentity.version)"))
+    #expect(output.contains("Copyright © 2026 Sebastian Christiansen"))
+    #expect(output.contains("mail@cerebralcoding.com"))
+    #expect(output.contains("https://github.com/sponsors/CerebralCoding"))
+    #expect(child.errors.isEmpty)
+}
+
 @Test func `uninstall retains queue and logs and permits a fresh installation`() throws {
     let f = try InstallationFixture()
     try f.install()

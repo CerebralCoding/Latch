@@ -153,6 +153,7 @@ struct SchedulerState: Codable, Equatable {
 
 enum SchedulingPolicy {
     static let sampleInterval = 1.0
+    static let idleSampleInterval = 15.0
     static let maximumSampleAge = 2.0
     static let quietPeriod = 2.0
 

@@ -104,6 +104,23 @@ private func presentationView(_ state: SchedulerState, now: Double = 10, running
     #expect(stale.tasks.last?.blockedBy == "waiting for fresh sensors")
 }
 
+@Test func `idle cached sensors are normal without relaxing admission freshness`() {
+    let sensors = presentationSensors()
+    let idle = presentationView(SchedulerState(sensors: sensors), now: 20)
+    #expect(!idle.sensorsFresh)
+    #expect(HumanOutput.view(idle, verbose: false, width: 200).contains("Idle cached readings 10.0s old"))
+    let overdue = presentationView(SchedulerState(sensors: sensors), now: 28)
+    #expect(HumanOutput.view(overdue, verbose: false, width: 200).contains("Sampling overdue"))
+    let stopped = presentationView(SchedulerState(sensors: sensors), now: 20, running: false)
+    #expect(HumanOutput.view(stopped, verbose: false, width: 200).contains("Sampling stopped"))
+    let task = ScheduledTask(
+        id: UUID().uuidString, name: "build", pid: 0, arguments: [], requirements: TaskRequirements())
+    let queued = SchedulerState(tasks: [task], sensors: sensors)
+    #expect(SchedulingPolicy.reason(for: task, in: queued, now: 20) == "waiting for fresh sensors")
+    #expect(
+        HumanOutput.view(presentationView(queued, now: 20), verbose: false, width: 200).contains("Sampling overdue"))
+}
+
 @Test func `view exposes measured blockers cooldown conditions and expected sensor pauses`() {
     var request = TaskRequirements(measurement: true, temperatureGuard: TemperatureGuard(cooldown: 5))
     var next = ScheduledTask(

@@ -589,7 +589,9 @@ private func mcpService(_ scheduler: Scheduler) throws -> FileLatch {
     return lock
 }
 
-private func admission(_ scheduler: Scheduler, expectedTasks: Int = 1) throws {
+private func admission(
+    _ scheduler: Scheduler, expectedTasks: Int = 1, cpuCores: Int = ProcessInfo.processInfo.activeProcessorCount
+) throws {
     let deadline = ProcessInfo.processInfo.systemUptime + 4
     while try scheduler.snapshot().tasks.count < expectedTasks, ProcessInfo.processInfo.systemUptime < deadline {
         Thread.sleep(forTimeInterval: 0.01)
@@ -601,7 +603,7 @@ private func admission(_ scheduler: Scheduler, expectedTasks: Int = 1) throws {
             $0.record(
                 SensorSnapshot(
                     sampledAt: Date(), uptime: now - Double(seconds),
-                    cpuCores: ProcessInfo.processInfo.activeProcessorCount, cpuActive: 0, busiestCore: 0,
+                    cpuCores: cpuCores, cpuActive: 0, busiestCore: 0,
                     gpuActive: 0, aneWatts: 0,
                     memoryAvailableMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576) * 8 / 10,
                     memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
@@ -685,7 +687,7 @@ private func submission(
         let barrier = try jobID(client.tool("latch_submit", arguments: .object(measured)))
         let later = try jobID(client.tool("latch_submit", arguments: ordinary()))
         for id in ids {
-            try admission(scheduler, expectedTasks: 5)
+            try admission(scheduler, expectedTasks: 5, cpuCores: 8)
             _ = try outputUntil(client, job: id, contains: "ready")
         }
         let parallel = try scheduler.snapshot()

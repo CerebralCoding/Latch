@@ -34,6 +34,10 @@ struct Latch {
                 print(BuildIdentity.version)
                 return
             }
+            if options.command == .about {
+                print(HumanOutput.about)
+                return
+            }
             if options.command == .help {
                 print(CLIHelp.text(for: options.helpCommand, service: options.helpServiceAction))
                 return
@@ -135,7 +139,7 @@ struct Latch {
                     exit(75)
                 }
             case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version,
-                .list, .prioritize, .clear:
+                .list, .prioritize, .clear, .about:
                 break
             }
         } catch let error as LatchError {
