@@ -88,15 +88,23 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
 
 @Test func `a full durable queue admits a measurement after continuous cool samples`() throws {
     let fixture = try Fixture()
-    let scheduler = try Scheduler(path: fixture.lockPath) {
-        var sensors = coolSensors(at: ProcessInfo.processInfo.systemUptime)
-        sensors.cpuCores = ProcessInfo.processInfo.activeProcessorCount
-        sensors.memoryTotalMiB = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
-        sensors.memoryAvailableMiB = sensors.memoryTotalMiB * 3 / 4
-        return sensors
-    }
+    let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try fakeService(scheduler)
     let jobs = try DurableJobs(scheduler: scheduler)
+    func publishCoolSamples(seconds: Int) throws -> SchedulerState {
+        try scheduler.transaction { state in
+            guard !state.tasks.contains(where: { $0.state == .running }) else { return state }
+            let now = ProcessInfo.processInfo.systemUptime
+            for offset in 0...seconds {
+                var sensors = coolSensors(at: now - Double(seconds - offset))
+                sensors.cpuCores = ProcessInfo.processInfo.activeProcessorCount
+                sensors.memoryTotalMiB = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
+                sensors.memoryAvailableMiB = sensors.memoryTotalMiB * 3 / 4
+                state.record(sensors)
+            }
+            return state
+        }
+    }
     var ids: [String] = []
     for index in 0..<DurableJobs.globalOutstandingLimit {
         let submission = try MCPSubmission([
@@ -106,25 +114,33 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
         ])
         ids.append(try jobs.submit(submission).id)
     }
-    try jobs.recover(executable: fixture.executable)
+    // Accepted tickets fill the queue; only its FIFO head needs a worker to test admission.
+    try jobs.launch(try #require(ids.first), executable: fixture.executable)
     try withExtendedLifetime(service) {
         let readyDeadline = ProcessInfo.processInfo.systemUptime + 20
-        while try scheduler.snapshot().tasks.contains(where: { $0.pid == 0 }),
+        var state = try scheduler.snapshot()
+        while state.tasks.first?.pid == 0,
             ProcessInfo.processInfo.systemUptime < readyDeadline
         {
             Thread.sleep(forTimeInterval: 0.05)
+            state = try scheduler.snapshot()
         }
-        #expect(try scheduler.snapshot().tasks.allSatisfy { $0.pid > 0 })
+        try #require((state.tasks.first?.pid ?? 0) > 0)
+        state = try publishCoolSamples(seconds: 9)
+        let sensors = try #require(state.sensors)
+        #expect(state.tasks.allSatisfy { $0.state == .queued })
+        #expect(
+            SchedulingPolicy.reason(for: state.tasks[0], in: state, now: sensors.uptime)
+                == "waiting for 10.0 seconds below temperature limits")
         let deadline = ProcessInfo.processInfo.systemUptime + 20
-        var state = try scheduler.snapshot()
         while !state.tasks.contains(where: { $0.state == .running }),
             ProcessInfo.processInfo.systemUptime < deadline
         {
-            try scheduler.refreshSensors()
-            Thread.sleep(forTimeInterval: 0.1)
+            _ = try publishCoolSamples(seconds: 10)
+            Thread.sleep(forTimeInterval: 0.01)
             state = try scheduler.snapshot()
         }
-        #expect(state.tasks.first?.id == ids.first)
+        #expect(state.tasks.map(\.id) == ids)
         #expect(state.tasks.first?.state == .running)
         #expect(state.tasks.dropFirst().allSatisfy { $0.state == .queued })
         let admission = try #require(state.tasks.first?.admission)
