@@ -1,8 +1,46 @@
 # Latch
 
-Latch is a small, headless scheduler for autonomous agents sharing one Mac. It queues finite work, isolates performance measurements, and waits for suitable thermal conditions before starting. Ordinary work can run in parallel when capacity and sensors allow it.
+Latch is a local workload scheduler for autonomous agents sharing an Apple Silicon Mac.
 
-**Apple Silicon and macOS 26+ only.** Install the precompiled, signed and notarized release binary; no Swift toolchain, Xcode, or administrator access is required to run Latch. Agents communicate through MCP. The CLI is for human inspection and service management.
+It exists to solve a problem that becomes surprisingly obvious once several agents are allowed to work independently on the same machine: they have no shared understanding of when they should compete for resources and when they absolutely should not.
+
+A build starting halfway through a benchmark can invalidate the measurement. Two agents launching expensive inference or compilation jobs at once can turn both into worse measurements of the machine rather than useful work. A benchmark started immediately after sustained load may produce different results simply because the CPU or GPU is still hot. And asking individual agents to reason about CPU usage, memory pressure, thermal state, cooldown periods, or what every other agent might currently be doing quickly becomes unreliable.
+
+Latch gives them one place to coordinate.
+
+Agents submit finite work to a shared scheduler instead of launching it directly. Latch decides when that work may start based on queue order, workload sensitivity, available capacity, memory pressure, thermal conditions, and machine activity. Ordinary jobs may overlap when doing so is safe, while sensitive work and measurements receive exclusive admission and, when necessary, wait for the machine to return to a suitable idle and thermal state.
+
+Latch is deliberately not an agent framework, sandbox, process manager, or distributed scheduler. It is a small coordination primitive for one Mac.
+
+**Apple Silicon and macOS 26+ only.** Install the precompiled, signed and notarized release binary; no Swift toolchain, Xcode, or administrator access is required to run Latch. Agents communicate through MCP. The CLI is primarily for human inspection, intervention, and service management.
+
+## Why Latch exists
+
+Latch started from a fairly mundane problem: I increasingly had multiple autonomous coding agents working on the same Mac.
+
+Most of the time, concurrent work is desirable. If one agent is reading files while another compiles something, there is little reason to serialize them. But some tasks depend heavily on the state of the machine itself.
+
+Benchmarks, profiling runs, inference measurements, compiler comparisons, and other performance-sensitive work are only useful when the conditions surrounding them are reasonably controlled. An unrelated agent deciding to start a build, run tests, invoke a model, or saturate memory bandwidth at the wrong moment can quietly invalidate the result.
+
+The obvious solution is to tell agents to wait.
+
+That works until there are several of them.
+
+Each agent can observe only part of the system, coordination through prompts is fragile, polling wastes resources, process ownership becomes ambiguous after reconnects, and manually chosen sleeps are a poor substitute for knowing whether the machine has actually cooled down or become quiet. The more autonomous the agents become, the less reasonable it is to expect each of them to independently implement the same scheduling logic correctly.
+
+Latch moves that responsibility out of the agents.
+
+The agent only needs to describe what kind of work it wants to perform. Latch owns the shared queue, admission decisions, thermal guards, resource reservations, process supervision, recovery state, and benchmark isolation.
+
+The resulting model is intentionally simple:
+
+- normal work can run concurrently when the machine has capacity;
+- sensitive work waits for exclusive access;
+- measurements additionally wait for controlled thermal and idle conditions;
+- finite jobs remain recoverable even if an agent disconnects;
+- agents coordinate through one scheduler instead of trying to coordinate with each other.
+
+The goal is not maximum utilization at all costs. It is to let autonomous agents share a powerful workstation without making performance-sensitive work nondeterministic or forcing every agent to become a miniature operating-system scheduler.
 
 ## Install
 
