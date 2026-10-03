@@ -32,18 +32,29 @@ final class QueueWatcher {
         close(directory)
     }
 
-    func wait(seconds: Double, pids: [Int32]) {
+    func watchSignal(_ number: Int32) throws {
+        var event = kevent(
+            ident: UInt(number), filter: Int16(EVFILT_SIGNAL), flags: UInt16(EV_ADD | EV_CLEAR),
+            fflags: 0, data: 0, udata: nil)
+        guard kevent(queue, &event, 1, nil, 0, nil) == 0 else {
+            throw LatchError.system("register command signal")
+        }
+    }
+
+    @discardableResult
+    func wait(seconds: Double, pids: [Int32]) -> Int32? {
         watchedPIDs.formIntersection(pids)
         for pid in pids where pid > 0 && watchedPIDs.insert(pid).inserted {
             var process = kevent(
                 ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT),
                 fflags: UInt32(NOTE_EXIT), data: 0, udata: nil)
             if kevent(queue, &process, 1, nil, 0, nil) != 0 {
-                return
+                return nil
             }
         }
         var event = kevent()
         var timeout = timespec(tv_sec: Int(seconds), tv_nsec: Int((seconds - floor(seconds)) * 1_000_000_000))
-        _ = kevent(queue, nil, 0, &event, 1, &timeout)
+        let count = kevent(queue, nil, 0, &event, 1, &timeout)
+        return count > 0 && event.filter == Int16(EVFILT_SIGNAL) ? Int32(event.ident) : nil
     }
 }

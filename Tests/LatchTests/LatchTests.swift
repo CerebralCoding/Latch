@@ -62,42 +62,48 @@ func `rejects invalid arguments`(arguments: [String]) {
 }
 
 @Test func `run preserves arguments streams and exit status`() throws {
-    let fixture = try Fixture()
+    let service = try OperatorFixture()
+    defer { withExtendedLifetime(service) {} }
+    let fixture = service.fixture
+    try service.publishSensors()
     let output = try fixture.launch(["run", "--", "/usr/bin/printf", "%s\\n", "a b", "", "--help"])
-    #expect(try fixture.finish(output) == 0)
+    #expect(try service.finish(output) == 0)
     #expect(output.output == "a b\n\n--help\n")
 
     let input = Pipe()
     let cat = try fixture.launch(["run", "--", "/bin/cat"], input: input)
     input.fileHandleForWriting.write(Data("piped input\n".utf8))
     try input.fileHandleForWriting.close()
-    #expect(try fixture.finish(cat) == 0)
+    #expect(try service.finish(cat) == 0)
     #expect(cat.output == "piped input\n")
 
     let failure = try fixture.launch(["run", "--", "/usr/bin/false"])
-    #expect(try fixture.finish(failure) == 1)
+    #expect(try service.finish(failure) == 1)
     let missing = try fixture.launch(["run", "--", "latch-test-command-that-does-not-exist"])
-    #expect(try fixture.finish(missing) == 127)
+    #expect(try service.finish(missing) == 127)
     #expect(missing.errors.contains("cannot execute"))
     let denied = try fixture.launch(["run", "--", fixture.lockPath])
-    #expect(try fixture.finish(denied) == 126)
+    #expect(try service.finish(denied) == 126)
     let free = try fixture.launch(["status"])
     #expect(try fixture.finish(free) == 0)
     #expect(free.output == "free\n")
 }
 
 @Test func `busy and timeout do not run the command`() throws {
-    let fixture = try Fixture()
+    let service = try OperatorFixture()
+    defer { withExtendedLifetime(service) {} }
+    let fixture = service.fixture
+    try service.publishSensors()
     let holder = try FileLatch(path: fixture.lockPath)
     try withExtendedLifetime(holder) {
         try holder.acquire(shared: false, timeout: 0)
         let marker = fixture.directory.appendingPathComponent("should-not-exist").path
         let immediate = try fixture.launch(["run", "--no-wait", "--", "/usr/bin/touch", marker])
-        #expect(try fixture.finish(immediate) == 75)
+        #expect(try service.finish(immediate) == 75)
         let clock = ContinuousClock()
         let start = clock.now
         let timed = try fixture.launch(["run", "--timeout", "0.1", "--", "/usr/bin/touch", marker])
-        #expect(try fixture.finish(timed) == 75)
+        #expect(try service.finish(timed) == 75)
         #expect(start.duration(to: clock.now) >= .milliseconds(100))
         #expect(!FileManager.default.fileExists(atPath: marker))
         let status = try fixture.launch(["status"])
@@ -122,38 +128,44 @@ func `rejects invalid arguments`(arguments: [String]) {
     }
 }
 
-@Test func `queued commands run one at A time and release on kill`() throws {
-    let fixture = try Fixture()
+@Test func `queued commands run one at A time and release on termination`() throws {
+    let service = try OperatorFixture()
+    defer { withExtendedLifetime(service) {} }
+    let fixture = service.fixture
+    try service.publishSensors()
     let first = try fixture.launch(["run", "--", "/bin/sleep", "30"])
-    try fixture.waitUntilHeld()
+    try fixture.waitUntilHeld(onWait: service.publishSensors)
     let second = try fixture.launch([
         "run", "--", "/usr/bin/touch", fixture.directory.appendingPathComponent("ran").path,
     ])
     Thread.sleep(forTimeInterval: 0.1)
     #expect(second.process.isRunning)
     #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("ran").path))
-    #expect(kill(first.process.processIdentifier, SIGKILL) == 0)
-    #expect(try fixture.finish(first) == SIGKILL)
+    #expect(kill(first.process.processIdentifier, SIGTERM) == 0)
+    #expect(try service.finish(first) == SIGTERM)
     #expect(first.process.terminationReason == .uncaughtSignal)
-    #expect(try fixture.finish(second) == 0)
+    #expect(try service.finish(second) == 0)
     #expect(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("ran").path))
     let free = try fixture.launch(["status"])
     #expect(try fixture.finish(free) == 0)
 }
 
 @Test func `shared processes overlap and wait is A checkpoint`() throws {
-    let fixture = try Fixture()
+    let service = try OperatorFixture()
+    defer { withExtendedLifetime(service) {} }
+    let fixture = service.fixture
+    try service.publishSensors()
     let first = try fixture.launch(["run", "--shared", "--", "/bin/sleep", "30"])
-    try fixture.waitUntilHeld()
+    try fixture.waitUntilHeld(onWait: service.publishSensors)
     let second = try fixture.launch(["run", "--shared", "--no-wait", "--", "/usr/bin/true"])
-    #expect(try fixture.finish(second) == 0)
+    #expect(try service.finish(second) == 0)
     let checkpoint = try fixture.launch(["wait", "--no-wait"])
     #expect(try fixture.finish(checkpoint) == 0)
     let exclusive = try fixture.launch(["run", "--no-wait", "--", "/usr/bin/true"])
     #expect(try fixture.finish(exclusive) == 75)
     #expect(first.process.isRunning)
     #expect(kill(first.process.processIdentifier, SIGTERM) == 0)
-    #expect(try fixture.finish(first) == SIGTERM)
+    #expect(try service.finish(first) == SIGTERM)
     let free = try fixture.launch(["status"])
     #expect(try fixture.finish(free) == 0)
 }
@@ -237,28 +249,34 @@ final class Fixture {
         return child
     }
 
-    func finish(_ child: Child) throws -> Int32 {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    func finish(_ child: Child, timeout: Duration = .seconds(5), onWait: (() throws -> Void)? = nil) throws -> Int32 {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         while child.process.isRunning, ContinuousClock.now < deadline {
+            try onWait?()
             Thread.sleep(forTimeInterval: 0.005)
         }
-        try #require(!child.process.isRunning, "child did not exit within five seconds")
+        try #require(!child.process.isRunning, "child did not exit within \(timeout)")
         child.process.waitUntilExit()
         return child.process.terminationStatus
     }
 
-    func waitUntilHeld() throws {
+    func waitUntilHeld(onWait: (() throws -> Void)? = nil) throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while ContinuousClock.now < deadline {
+            try onWait?()
             let probe = try FileLatch(path: lockPath)
             do {
                 try probe.acquire(shared: false, timeout: 0)
+                probe.release()
             } catch let error as LatchError where error.exitCode == 75 {
                 return
             }
             Thread.sleep(forTimeInterval: 0.005)
         }
-        Issue.record("child did not acquire latch within five seconds")
+        let tasks = try Scheduler(path: lockPath).snapshot().tasks
+        Issue.record(
+            "child did not acquire latch within five seconds; tasks: \(tasks)"
+        )
         throw LatchError("test timed out")
     }
 }

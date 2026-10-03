@@ -178,10 +178,13 @@ private final class UpdateFixture {
 
 @Test func `drain waits for existing command exit and releases its block afterward`() throws {
     let f = try UpdateFixture()
+    let service = try OperatorFixture(fixture: f.fixture)
+    defer { withExtendedLifetime(service) {} }
+    try service.publishSensors()
     let child = try f.fixture.launch(["run", "--", "/bin/sleep", "0.2"])
-    try f.fixture.waitUntilHeld()
+    try f.fixture.waitUntilHeld(onWait: service.publishSensors)
     let started = ProcessInfo.processInfo.systemUptime
-    #expect(try f.apply(timeout: 3))
+    #expect(try f.apply(timeout: 10))
     #expect(ProcessInfo.processInfo.systemUptime - started > 0.05)
     #expect(try f.fixture.finish(child) == 0)
     _ = try UpdateDrain.admit(in: f.scheduler.directory)

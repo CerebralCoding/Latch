@@ -43,6 +43,24 @@ struct OperatorQueue {
         }
     }
 
+    func stop() throws -> [String] {
+        try requireMatchingService()
+        let store = try DurableJobs(scheduler: scheduler)
+        return try scheduler.transaction { state in
+            var ids = state.jobs.filter { !$0.complete }.map(\.id)
+            for task in state.tasks where !ids.contains(task.id) { ids.append(task.id) }
+            for id in ids { try store.cancel(id) }
+            for task in state.tasks where !state.jobs.contains(where: { $0.id == task.id }) {
+                ScheduledCommand.resumeCancelledSupervisor(task)
+            }
+            for index in state.tasks.indices where state.tasks[index].state == .queued {
+                state.tasks[index].state = .cancelling
+                state.tasks[index].waitingFor = "queued task cancelled by operator"
+            }
+            return ids
+        }
+    }
+
     private func requireMatchingService() throws {
         let status = try SchedulerService.status(in: scheduler.directory)
         guard status.running && status.serviceRevision == BuildIdentity.serviceRevision else {

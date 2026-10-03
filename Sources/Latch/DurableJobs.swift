@@ -109,6 +109,25 @@ final class DurableJobs {
     func clearOwn(scopeToken: String) throws -> [String] {
         let scope = try SubmissionScope.validate(scopeToken, in: scheduler.directory)
         return try scheduler.transaction { state in
+            var ids: [String] = []
+            for record in state.jobs where !record.complete && record.submissionScope == scope {
+                guard let index = state.tasks.firstIndex(where: { $0.id == record.id }),
+                    state.tasks[index].state == .queued,
+                    state.tasks[index].startedAt == nil, state.tasks[index].residentMemoryMiB == nil
+                else { continue }
+                // Admission holds the same state lock, so a selected job cannot start before cancellation.
+                try cancel(record.id)
+                state.tasks[index].state = .cancelling
+                state.tasks[index].waitingFor = "queued task cancelled within submission scope"
+                ids.append(record.id)
+            }
+            return ids
+        }
+    }
+
+    func stopOwn(scopeToken: String) throws -> [String] {
+        let scope = try SubmissionScope.validate(scopeToken, in: scheduler.directory)
+        return try scheduler.transaction { state in
             let ids = state.jobs.filter { !$0.complete && $0.submissionScope == scope }.map(\.id)
             for id in ids { try cancel(id) }
             return ids

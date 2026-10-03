@@ -4,21 +4,21 @@ import Testing
 
 @testable import Latch
 
-private final class OperatorFixture {
+final class OperatorFixture {
     let fixture: Fixture
     let scheduler: Scheduler
     let store: DurableJobs
     let service: FileLatch
     var queue: OperatorQueue { OperatorQueue(scheduler: scheduler) }
 
-    init() throws {
-        fixture = try Fixture()
-        scheduler = try Scheduler(path: fixture.lockPath)
+    init(fixture: Fixture? = nil) throws {
+        self.fixture = try fixture ?? Fixture()
+        scheduler = try Scheduler(path: self.fixture.lockPath)
         store = try DurableJobs(scheduler: scheduler)
         service = try FileLatch(path: scheduler.directory.appendingPathComponent("service.lock").path)
         try service.acquire(shared: false, timeout: 0)
         let status = SchedulerService.Status(
-            running: true, pid: getpid(), path: fixture.lockPath,
+            running: true, pid: getpid(), path: self.fixture.lockPath,
             serviceRevision: BuildIdentity.serviceRevision)
         try JSONEncoder().encode(status).write(to: scheduler.directory.appendingPathComponent("service.json"))
     }
@@ -31,12 +31,29 @@ private final class OperatorFixture {
                 "measurement": .bool(measurement),
             ]))
     }
+
+    func publishSensors() throws {
+        try scheduler.transaction { state in
+            state.record(
+                SensorSnapshot(
+                    sampledAt: Date(), uptime: ProcessInfo.processInfo.systemUptime,
+                    cpuCores: 8, cpuActive: 0, busiestCore: 0, gpuActive: 0, aneWatts: 0,
+                    memoryAvailableMiB: 24000, memoryTotalMiB: 32000, memoryPressure: "normal",
+                    thermalState: "nominal",
+                    diskBytesPerSecond: 0, unavailable: [], cpuTemperature: 30, gpuTemperature: 30))
+        }
+    }
+
+    func finish(_ child: Child) throws -> Int32 {
+        try fixture.finish(child, timeout: .seconds(10), onWait: publishSensors)
+    }
 }
 
 @Test func `operator flags have distinct strict contracts from command execution`() throws {
     let id = UUID().uuidString
     #expect(try Options(arguments: ["--list"]).command == .list)
     #expect(try Options(arguments: ["--clear"]).command == .clear)
+    #expect(try Options(arguments: ["--stop"]).command == .stop)
     let options = try Options(arguments: ["--run", id.lowercased(), "--file", "/queue"])
     #expect(options.command == .prioritize)
     #expect(options.jobID == id)
@@ -45,7 +62,8 @@ private final class OperatorFixture {
     for arguments in [
         ["--run"], ["--run", "not-an-id"], ["--run", id, id], ["--list", "--clear"],
         ["--clear", "--run", id], ["--run", id, "--standalone"], ["--run", id, "--", "/usr/bin/true"],
-        ["--clear", "--timeout", "30"], ["--list", "--shared"],
+        ["--clear", "--timeout", "30"], ["--list", "--shared"], ["--stop", "--clear"],
+        ["--stop", "--timeout", "30"], ["--stop", "--standalone"], ["--stop", "--", "/usr/bin/true"],
     ] { #expect(throws: LatchError.self) { try Options(arguments: arguments) } }
 }
 
@@ -110,6 +128,101 @@ private final class OperatorFixture {
     #expect(throws: LatchError.self) { try f.queue.prioritize(queued.id) }
 }
 
+@Test func `operator stop cancels all outstanding work and retains completed results`() throws {
+    let f = try OperatorFixture()
+    let running = try f.submit("running")
+    let queued = try f.submit("queued")
+    let parked = try f.submit("parked")
+    let completed = try f.submit("completed")
+    try f.store.publish(completed.id, result: ["complete": true, "state": "completed", "succeeded": true])
+    try f.scheduler.transaction { state in
+        state.tasks[0].state = .running
+        state.tasks[0].startedAt = Date()
+        state.tasks[2].state = .parked
+        state.tasks[2].residentMemoryMiB = 100
+    }
+    let stop = try f.fixture.launch(["--stop"])
+    #expect(try f.fixture.finish(stop) == 0)
+    #expect(stop.output.contains("3 outstanding job(s)"))
+    for id in [running.id, queued.id, parked.id] {
+        #expect(FileManager.default.fileExists(atPath: f.store.file(id, "cancel").path))
+    }
+    #expect(!FileManager.default.fileExists(atPath: f.store.file(completed.id, "cancel").path))
+    #expect(try f.store.records().first { $0.id == completed.id }?.complete == true)
+    #expect(try SchedulerService.status(in: f.scheduler.directory).running)
+    let next = try f.submit("after-stop")
+    #expect(!FileManager.default.fileExists(atPath: f.store.file(next.id, "cancel").path))
+}
+
+@Test(arguments: ["descendant", "orphan", "run-descendant", "run-orphan"], [false, true])
+func `operator stop terminates scheduled CLI process groups including TERM resistant descendants`(
+    mode: String, stopped: Bool
+) throws {
+    let f = try OperatorFixture()
+    try withExtendedLifetime(f.service) {
+        let marker = f.fixture.directory.appendingPathComponent("descendant-pid")
+        let workload = f.fixture.executable.deletingLastPathComponent().appendingPathComponent("LatchTestWorkload")
+        let isRun = mode.hasPrefix("run-")
+        let workloadMode = isRun ? String(mode.dropFirst(4)) : mode
+        let options = isRun ? ["run", "--shared"] : ["schedule", "--mode", "batch", "--cooldown", "0"]
+        let child = try f.fixture.launch(options + ["--", workload.path, workloadMode, marker.path])
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        while !FileManager.default.fileExists(atPath: marker.path), ProcessInfo.processInfo.systemUptime < deadline {
+            try f.publishSensors()
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        let descendant = try #require(Int32(String(contentsOf: marker, encoding: .utf8)))
+        defer { _ = kill(descendant, SIGKILL) }
+        if stopped {
+            let supervisor = child.process.processIdentifier
+            #expect(kill(supervisor, SIGSTOP) == 0)
+            var info = proc_bsdinfo()
+            let deadline = ProcessInfo.processInfo.systemUptime + 2
+            while ProcessInfo.processInfo.systemUptime < deadline {
+                _ = proc_pidinfo(supervisor, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+                if info.pbi_status == SSTOP { break }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            #expect(info.pbi_status == SSTOP)
+        }
+        let stop = try f.fixture.launch(["--stop"])
+        #expect(try f.fixture.finish(stop) == 0)
+        #expect(
+            try f.fixture.finish(child, timeout: .seconds(10)) == (workloadMode == "descendant" ? SIGKILL : SIGTERM))
+        var info = proc_bsdinfo()
+        #expect(
+            proc_pidinfo(descendant, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == 0
+                || info.pbi_status == SZOMB)
+        #expect(try f.scheduler.snapshot().tasks.isEmpty)
+        #expect(try SchedulerService.status(in: f.scheduler.directory).running)
+    }
+}
+
+@Test func `scheduled CLI supervision preserves literal arguments streams cwd and exit status`() throws {
+    let f = try OperatorFixture()
+    try withExtendedLifetime(f.service) {
+        let input = Pipe()
+        let workload = f.fixture.executable.deletingLastPathComponent().appendingPathComponent("LatchTestWorkload")
+        let arguments = ["a b", "", "--help", "$(must remain literal)"]
+        let child = try f.fixture.launch(
+            ["schedule", "--mode", "batch", "--cooldown", "0", "--", workload.path, "report"] + arguments,
+            input: input)
+        try input.fileHandleForWriting.write(contentsOf: Data("piped input".utf8))
+        try input.fileHandleForWriting.close()
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        while child.process.isRunning, ProcessInfo.processInfo.systemUptime < deadline {
+            try f.publishSensors()
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        #expect(try f.fixture.finish(child) == 1)
+        let report = try JSONDecoder().decode([String: [String]].self, from: Data(child.output.utf8))
+        #expect(report["arguments"] == arguments)
+        #expect(report["workingDirectory"] == [FileManager.default.currentDirectoryPath])
+        #expect(child.errors == "separate stderr")
+        #expect(try f.scheduler.snapshot().tasks.isEmpty)
+    }
+}
+
 @Test func `operator list excludes completed results and escapes job names`() throws {
     let f = try OperatorFixture()
     #expect(try f.queue.list() == "No outstanding jobs.")
@@ -135,8 +248,10 @@ private final class OperatorFixture {
     #expect(clear.output.contains("2 queued job(s)"))
 }
 
-@Test(arguments: [false, true])
-func `operator clear wakes queued CLI clients without starting their commands`(standalone: Bool) throws {
+@Test(arguments: [false, true], ["--clear", "--stop"])
+func `operator cancellation wakes queued CLI clients without starting their commands`(
+    standalone: Bool, operation: String
+) throws {
     let f = try OperatorFixture()
     let gate = try FileLatch(path: f.fixture.lockPath)
     try gate.acquire(shared: false, timeout: 0)
@@ -144,13 +259,17 @@ func `operator clear wakes queued CLI clients without starting their commands`(s
         let marker = f.fixture.directory.appendingPathComponent("must-not-run")
         let child = try f.fixture.launch(
             ["schedule"] + (standalone ? ["--standalone"] : []) + ["--", "/usr/bin/touch", marker.path])
+        let run = try f.fixture.launch(["run", "--", "/usr/bin/touch", marker.path])
         let deadline = ProcessInfo.processInfo.systemUptime + 4
-        while try f.scheduler.snapshot().tasks.isEmpty, ProcessInfo.processInfo.systemUptime < deadline {
+        while try f.scheduler.snapshot().tasks.count < 2, ProcessInfo.processInfo.systemUptime < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
-        #expect(try f.queue.clear().count == 1)
+        let cancel = try f.fixture.launch([operation])
+        #expect(try f.fixture.finish(cancel) == 0)
         #expect(try f.fixture.finish(child) == 75)
+        #expect(try f.fixture.finish(run) == 75)
         #expect(child.errors.contains("cancelled by operator"))
+        #expect(run.errors.contains("cancelled by operator"))
         #expect(!FileManager.default.fileExists(atPath: marker.path))
         #expect(try f.scheduler.snapshot().tasks.isEmpty)
     }
@@ -166,6 +285,7 @@ func `operator clear wakes queued CLI clients without starting their commands`(s
     try withExtendedLifetime(f.service) {
         #expect(throws: LatchError.self) { try f.queue.prioritize(record.id) }
         #expect(throws: LatchError.self) { try f.queue.clear() }
+        #expect(throws: LatchError.self) { try f.queue.stop() }
         let state = try f.scheduler.snapshot()
         #expect(state.tasks.first?.state == .queued)
     }
@@ -177,6 +297,7 @@ func `operator clear wakes queued CLI clients without starting their commands`(s
     f.service.release()
     #expect(throws: LatchError.self) { try f.queue.prioritize(record.id) }
     #expect(throws: LatchError.self) { try f.queue.clear() }
+    #expect(throws: LatchError.self) { try f.queue.stop() }
     #expect(try f.queue.list().contains(record.id))
     #expect(try f.scheduler.snapshot().tasks.first?.state == .queued)
 }

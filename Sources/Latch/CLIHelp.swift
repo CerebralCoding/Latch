@@ -14,12 +14,13 @@ enum CLIHelp {
         Operate
           --run JOB_ID         Prioritize a queued job; never preempts running work
           --clear              Cancel never-started jobs; preserve started work
+          --stop               Cancel all outstanding jobs, including running work
           service ACTION       install, start, stop, status, uninstall, run
           update | rollback    Drain work and replace the installed binary
 
         Execute
           schedule … -- COMMAND    FIFO scheduling with resource and thermal guards
-          run … -- COMMAND         Hold a process latch for a command
+          run … -- COMMAND         Queue a command; --shared permits overlap
           wait | guard             Wait for a checkpoint, then release
           mcp                      Agent transport over stdin/stdout
 
@@ -76,6 +77,17 @@ enum CLIHelp {
                 Requires the matching running service. Human operator override only.
                 \(file)
                 """
+        case .stop:
+            return """
+                Usage: latch --stop [--file PATH]
+                Request cancellation of all outstanding jobs in the selected queue, across all scopes.
+                Includes running jobs and parked checkpoints. Completed results and retry keys remain.
+                Active workloads receive TERM, then KILL after two seconds if necessary.
+                Cancellation is asynchronous; use --list or view to check outstanding work.
+                The scheduler stays running and accepts subsequent submissions. Unmanaged processes are unaffected.
+                Requires the matching running service. Human operator override only.
+                \(file)
+                """
         case .service:
             let action = service?.rawValue ?? "install|start|stop|status|uninstall|run"
             return """
@@ -106,11 +118,13 @@ enum CLIHelp {
                 : command == .wait ? " [--timeout SECONDS | --no-wait]" : ""
             return """
                 Usage: latch \(command.rawValue) [--file PATH]\(syntax)
-                run holds a process latch until the foreground command and inherited holders exit.
+                run queues the command through the running scheduler with FIFO admission and thermal guards.
                 --shared permits shared work while excluding exclusive work.
+                Defaults: 1 CPU core, 512 MiB, CPU <=85°C, GPU <=80°C; no measurement quiet window.
+                Operator --clear and --stop apply to run jobs, including their workload process groups.
                 wait only waits for exclusive holders to leave; it protects no subsequent work.
                 status prints free (0) or held (75), including shared holders. It is not admission eligibility.
-                run/wait do not provide FIFO scheduling or sensor guards; prefer schedule for heavy work.
+                Use schedule for measurements or explicit resource and temperature requirements.
                 Command arguments, streams, signals, and exit status are preserved. Do not nest latches.
                 \(file)
                 """

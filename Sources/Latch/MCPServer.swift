@@ -360,9 +360,11 @@ final class MCPServer {
             _ = try MCPArguments(arguments, allowed: [])
             try toolResult(
                 id: id, value: ["scopeToken": .string(try SubmissionScope.create(in: scheduler.directory))])
-        case "latch_clear_own":
+        case "latch_clear_own", "latch_stop_own":
             let input = try MCPArguments(arguments, allowed: ["scopeToken"])
-            let ids = try store.clearOwn(scopeToken: input.text("scopeToken", maximum: 128))
+            let token = try input.text("scopeToken", maximum: 128)
+            let ids =
+                try name == "latch_clear_own" ? store.clearOwn(scopeToken: token) : store.stopOwn(scopeToken: token)
             try toolResult(
                 id: id, value: ["jobIDs": .array(ids.map(MCPValue.string)), "resultsRetained": true])
         case "latch_view":

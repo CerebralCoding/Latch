@@ -7,6 +7,7 @@ struct Options {
         case list = "--list"
         case prioritize = "--run"
         case clear = "--clear"
+        case stop = "--stop"
     }
 
     enum ServiceAction: String { case run, install, start, stop, status, uninstall }
@@ -202,8 +203,13 @@ struct Options {
         if command == .prioritize, jobID == nil {
             throw LatchError("--run requires a queued job ID from --list")
         }
-        if command == .schedule || command == .guard {
+        if command == .run {
+            requirements.mode = shared ? .batch : .isolated
+            requirements.temperatureGuard = TemperatureGuard(maxCPU: 85, maxGPU: 80, cooldown: 0)
+        }
+        if [.run, .schedule, .guard].contains(command) {
             requirements.measurement = requirements.mode == .isolated
+            if command == .run { requirements.measurement = false }
             try requirements.validate()
         }
     }

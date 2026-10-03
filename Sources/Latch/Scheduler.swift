@@ -158,6 +158,9 @@ final class Scheduler {
                 state.resetCooldowns()
             }
             state.tasks.removeAll { $0.id == id }
+            if !state.jobs.contains(where: { $0.id == id }) {
+                try? FileManager.default.removeItem(at: directory.appendingPathComponent("jobs/\(id).cancel"))
+            }
         }
         try? FileManager.default.removeItem(atPath: leasePath(id))
     }

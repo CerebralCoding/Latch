@@ -85,7 +85,7 @@ New submissions and controls need a stable retry key. Latch supplies a unique pr
 
 Results expose `complete`, `state`, `succeeded`, `exitCode`, `terminationReason` and `phase`. Check these together: a command failure differs from an admission or execution failure. `terminationReason: "unknown"` means execution is uncertain; never blindly replay it. Disconnecting or cancelling a tool request stops only the wait. Use `latch_cancel`, then `latch_wait`, to stop work and retrieve its final status.
 
-For bulk cancellation, call `latch_create_scope`, retain its private `scopeToken`, and attach it to each submission and retry. `latch_clear_own(scopeToken: ...)` cancels that scope's outstanding jobs and returns IDs for `latch_wait`; final results and retry keys remain available. Tokens survive reconnects and are omitted from global diagnostics. Each agent must create and keep its own token: possession authorizes a submission group, rather than identifying an agent through a shared connection. Unscoped jobs cannot be adopted or bulk-cleared. Retrying scope creation returns a new empty scope; unused scopes add no durable records.
+For bulk cancellation, call `latch_create_scope`, retain its private `scopeToken`, and attach it to each submission and retry. `latch_clear_own(scopeToken: ...)` cancels only never-started queued jobs; it preserves running jobs and started checkpoints, including parked iterations or iterations queued for their next permit. `latch_stop_own(scopeToken: ...)` cancels all outstanding jobs in the scope, including running and parked work. Both return IDs for `latch_wait`; final results and retry keys remain available. Tokens survive reconnects and are omitted from global diagnostics. Each agent must create and keep its own token: possession authorizes a submission group, rather than identifying an agent through a shared connection. Unscoped jobs cannot be adopted or bulk-cleared. Retrying scope creation returns a new empty scope; unused scopes add no durable records.
 
 ### What belongs in the queue
 
@@ -104,7 +104,8 @@ Keep the workload in its submitted foreground process. Do not detach it, backgro
 | `latch_wait` | Wait for status and bounded final output |
 | `latch_cancel` | Cancel a job and its process group; TERM escalates to KILL after two seconds |
 | `latch_create_scope` | Issue a private capability for an agent's submission group |
-| `latch_clear_own` | Cancel outstanding jobs bearing that private scope token; retain results |
+| `latch_clear_own` | Cancel only never-started queued jobs in the scope; preserve started work |
+| `latch_stop_own` | Cancel all outstanding jobs in the scope, including running and parked work |
 | `latch_view` | Compact cached service/admission diagnostics and up to ten outstanding summaries; `verbose: true` expands evidence and outstanding work |
 | `latch_jobs` | Page outstanding summaries or retained history |
 | `latch_job` | Retrieve one durable job's submission and detailed result, without stdout/stderr |
@@ -149,13 +150,16 @@ latch view --json
 latch --list
 latch --run JOB_ID
 latch --clear
+latch --stop
 ```
 
 `view` gives a short service, queue and admission summary. `--verbose` expands sensors, thresholds, reservations and paths; `--json` emits structured data. `tasks` and `--list` show up to ten outstanding jobs, with running work first, full copyable IDs, classification and elapsed time. Use `--verbose` for all jobs. Completed history is available through MCP.
 
-`--run JOB_ID` prioritizes an existing queued ticket. It never launches a new command, preempts running work or bypasses guards. `--clear` cancels never-started jobs; running work and started checkpoints, including parked iterations, are preserved. Cancellation is asynchronous. These queue overrides are for human operators, not agents.
+`--run JOB_ID` prioritizes an existing queued ticket. It never launches a new command, preempts running work or bypasses guards. `--clear` cancels never-started jobs; running work and started checkpoints, including parked iterations, are preserved. `--stop` cancels all outstanding jobs in the selected queue, across scopes, including running CLI/MCP work and parked checkpoints. Both include `latch run` jobs. Active workloads receive TERM, then KILL after two seconds if needed. Cancellation is asynchronous; completed results remain available. The scheduler stays running and accepts subsequent work. Unmanaged processes are unaffected. These queue overrides are for human operators, not agents.
 
-For human-submitted work, `schedule` protects the complete command:
+`latch run -- COMMAND` also uses the running scheduler and shared FIFO queue. It defaults to exclusive non-measurement admission, 1 CPU core, 512 MiB, CPU <=85°C and GPU <=80°C; `--shared` allows overlap. Use `schedule` for measurements or explicit resource and thermal requirements.
+
+For human-submitted measurements, `schedule` protects the complete command:
 
 ```sh
 # Isolate a benchmark and wait for CPU/GPU temperatures <=50°C for ten seconds.

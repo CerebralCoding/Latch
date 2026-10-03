@@ -64,7 +64,7 @@ struct Latch {
                 exit(try MCPServer(path: options.resolvedPath()).run())
             }
             let path = try options.resolvedPath()
-            if [.list, .prioritize, .clear].contains(options.command) {
+            if [.list, .prioritize, .clear, .stop].contains(options.command) {
                 let queue = try OperatorQueue(scheduler: Scheduler(path: path))
                 switch options.command {
                 case .list:
@@ -79,6 +79,11 @@ struct Latch {
                 case .clear:
                     let ids = try queue.clear()
                     print("Cancellation requested for \(ids.count) queued job(s). Already-started work is preserved.")
+                case .stop:
+                    let ids = try queue.stop()
+                    print(
+                        "Cancellation requested for \(ids.count) outstanding job(s), including running work. Service remains running."
+                    )
                 default: break
                 }
                 return
@@ -99,7 +104,7 @@ struct Latch {
                 }
                 return
             }
-            if options.command == .schedule || options.command == .guard {
+            if [.run, .schedule, .guard].contains(options.command) {
                 let scheduler = try Scheduler(path: path)
                 let reservation = try scheduler.reserve(
                     name: options.taskName ?? options.childArguments.first ?? "temperature guard",
@@ -113,21 +118,12 @@ struct Latch {
                         return
                     }
                     try reservation.inheritAcrossExec()
-                    try execute(options.childArguments)
+                    try ScheduledCommand.run(options.childArguments, scheduler: scheduler, reservation: reservation)
                 }
                 return
             }
             let latch = try FileLatch(path: path)
             switch options.command {
-            case .run:
-                let updatePermit = try UpdateDrain.admit(in: Scheduler(path: path).directory)
-                defer { withExtendedLifetime(updatePermit) {} }
-                try latch.acquire(shared: options.shared, timeout: options.timeout)
-                try withExtendedLifetime(latch) {
-                    try updatePermit.inheritAcrossExec()
-                    try latch.inheritAcrossExec()
-                    try execute(options.childArguments)
-                }
             case .wait:
                 try latch.acquire(shared: true, timeout: options.timeout)
             case .status:
@@ -138,8 +134,8 @@ struct Latch {
                     print("held")
                     exit(75)
                 }
-            case .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version,
-                .list, .prioritize, .clear, .about:
+            case .run, .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version,
+                .list, .prioritize, .clear, .stop, .about:
                 break
             }
         } catch let error as LatchError {
@@ -160,20 +156,4 @@ struct Latch {
         FileHandle.standardOutput.write(Data([10]))
     }
 
-    static func execute(_ arguments: [String]) throws {
-        var pointers: [UnsafeMutablePointer<CChar>?] = []
-        defer { for pointer in pointers { free(pointer) } }
-        for argument in arguments {
-            guard let pointer = strdup(argument) else {
-                throw LatchError("out of memory", exitCode: 71)
-            }
-            pointers.append(pointer)
-        }
-        pointers.append(nil)
-        pointers.withUnsafeBufferPointer { buffer in
-            _ = execvp(buffer[0], buffer.baseAddress!)
-        }
-        let code: Int32 = errno == ENOENT ? 127 : 126
-        throw LatchError("cannot execute \(arguments[0]): \(String(cString: strerror(errno)))", exitCode: code)
-    }
 }

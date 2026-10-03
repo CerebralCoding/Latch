@@ -851,7 +851,7 @@ private func jobID(_ response: MCPValue) throws -> String {
     }
 }
 
-@Test func `scoped bulk clear isolates agents sharing a connection and survives reconnects`() throws {
+@Test func `scoped clear preserves running work and stop isolates agents across reconnects`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
@@ -891,14 +891,13 @@ private func jobID(_ response: MCPValue) throws -> String {
         #expect(try client.tool("latch_clear_own", arguments: ["scopeToken": "forged"])["error"]?["code"] == -32602)
         let cleared = try client.tool("latch_clear_own", arguments: ["scopeToken": .string(ownToken)])["result"]?[
             "structuredContent"]
-        #expect(cleared?["jobIDs"] == .array([running, queued].map(MCPValue.string)))
+        #expect(cleared?["jobIDs"] == [.string(queued)])
         #expect(cleared?["resultsRetained"] == true)
-        for id in [running, queued] {
-            #expect(
-                try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
-                    "structuredContent"]?["state"] == "cancelled")
-        }
-        for id in [foreign, unscoped] {
+        #expect(
+            try client.tool("latch_wait", arguments: ["jobID": .string(queued), "timeoutSeconds": 4])["result"]?[
+                "structuredContent"]?["state"] == "cancelled")
+        #expect(try scheduler.snapshot().tasks.first { $0.id == running }?.state == .running)
+        for id in [running, foreign, unscoped] {
             #expect(
                 try client.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 0])["result"]?[
                     "structuredContent"]?["complete"] == false)
@@ -909,6 +908,21 @@ private func jobID(_ response: MCPValue) throws -> String {
         #expect(try jobID(reconnected.tool("latch_submit", arguments: queuedArguments)) == queued)
         #expect(
             try reconnected.tool("latch_clear_own", arguments: ["scopeToken": .string(ownToken)])["result"]?[
+                "structuredContent"]?["jobIDs"] == [])
+        #expect(try reconnected.tool("latch_stop_own")["error"]?["code"] == -32602)
+        #expect(try reconnected.tool("latch_stop_own", arguments: ["scopeToken": "forged"])["error"]?["code"] == -32602)
+        let next = try jobID(reconnected.tool("latch_submit", arguments: scoped(submission(fixture), token: ownToken)))
+        let stopped = try reconnected.tool("latch_stop_own", arguments: ["scopeToken": .string(ownToken)])["result"]?[
+            "structuredContent"]
+        #expect(stopped?["jobIDs"] == .array([running, next].map(MCPValue.string)))
+        #expect(stopped?["resultsRetained"] == true)
+        for id in [running, next] {
+            #expect(
+                try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])["result"]?[
+                    "structuredContent"]?["state"] == "cancelled")
+        }
+        #expect(
+            try reconnected.tool("latch_stop_own", arguments: ["scopeToken": .string(ownToken)])["result"]?[
                 "structuredContent"]?["jobIDs"] == [])
         #expect(
             try reconnected.tool("latch_submit", arguments: scoped(queuedArguments, token: otherToken))["error"]?[
@@ -941,7 +955,7 @@ private func jobID(_ response: MCPValue) throws -> String {
         tools.compactMap { $0["name"]?.string } == [
             "latch_view", "latch_submit", "latch_wait", "latch_cancel", "latch_forget", "latch_execute", "latch_signal",
             "latch_input", "latch_resize", "latch_control", "latch_read", "latch_jobs", "latch_job",
-            "latch_create_scope", "latch_clear_own",
+            "latch_create_scope", "latch_clear_own", "latch_stop_own",
         ])
     #expect(initialized["result"]?["capabilities"]?["tasks"]?["requests"]?["tools"]?["call"] == [:])
     #expect(tools[5]["execution"]?["taskSupport"] == "optional")
@@ -1286,7 +1300,7 @@ func `MCP cancels the workload process group and escalates after TERM`(mode: Str
     }
 }
 
-@Test func `MCP handles fragmented requests and the older supported version`() throws {
+@Test func `MCP handles fragmented requests using the current protocol`() throws {
     let fixture = try Fixture()
     let client = try MCPClient(fixture: fixture, initialize: false)
     let message: MCPValue = [

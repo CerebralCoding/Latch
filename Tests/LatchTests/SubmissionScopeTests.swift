@@ -29,7 +29,7 @@ import Testing
     #expect((permissions[.posixPermissions] as? NSNumber)?.intValue == 0o600)
 }
 
-@Test func `bulk cancellation never touches foreign unscoped or completed jobs`() throws {
+@Test func `scoped clear preserves started work while stop cancels all outstanding own jobs`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let store = try DurableJobs(scheduler: scheduler)
@@ -54,15 +54,32 @@ import Testing
         try scheduler.transaction { snapshot in
             for index in snapshot.tasks.indices where [a.id, b.id].contains(snapshot.tasks[index].id) {
                 snapshot.tasks[index].state = state
+                if state == .running { snapshot.tasks[index].startedAt = Date() }
+                if state == .parked { snapshot.tasks[index].residentMemoryMiB = 100 }
             }
         }
+    }
+    let checkpointWaiting = try submit(scope: ownScope)
+    try scheduler.transaction { state in
+        let index = try #require(state.tasks.firstIndex { $0.id == checkpointWaiting.id })
+        state.tasks[index].residentMemoryMiB = 100
     }
     let unscoped = try submit(scope: nil)
     let completed = try submit(scope: ownScope)
     try store.publish(completed.id, result: ["complete": true, "state": "completed", "succeeded": true])
-    let expected = own.map(\.id)
-    #expect(try store.clearOwn(scopeToken: ownToken) == expected)
-    #expect(try DurableJobs(scheduler: Scheduler(path: fixture.lockPath)).clearOwn(scopeToken: ownToken) == expected)
+    let before = try scheduler.snapshot()
+    #expect(try store.clearOwn(scopeToken: ownToken) == [own[0].id])
+    #expect(try DurableJobs(scheduler: Scheduler(path: fixture.lockPath)).clearOwn(scopeToken: ownToken).isEmpty)
+    let cleared = try scheduler.snapshot()
+    #expect(cleared.tasks.first { $0.id == own[0].id }?.state == .cancelling)
+    #expect(FileManager.default.fileExists(atPath: store.file(own[0].id, "cancel").path))
+    for id in [own[1].id, own[2].id, checkpointWaiting.id] {
+        #expect(cleared.tasks.first { $0.id == id } == before.tasks.first { $0.id == id })
+        #expect(!FileManager.default.fileExists(atPath: store.file(id, "cancel").path))
+    }
+    let expected = own.map(\.id) + [checkpointWaiting.id]
+    #expect(try store.stopOwn(scopeToken: ownToken) == expected)
+    #expect(try DurableJobs(scheduler: Scheduler(path: fixture.lockPath)).stopOwn(scopeToken: ownToken) == expected)
     for id in expected { #expect(FileManager.default.fileExists(atPath: store.file(id, "cancel").path)) }
     for id in foreign.map(\.id) + [unscoped.id, completed.id] {
         #expect(!FileManager.default.fileExists(atPath: store.file(id, "cancel").path))
@@ -74,5 +91,6 @@ import Testing
     }
     #expect(throws: MCPFailure.self) { try store.submit(unscoped.submission, scope: ownScope) }
     #expect(throws: MCPFailure.self) { try store.clearOwn(scopeToken: otherScope) }
-    #expect(try store.records().count == own.count + foreign.count + 2)
+    #expect(throws: MCPFailure.self) { try store.stopOwn(scopeToken: otherScope) }
+    #expect(try store.records().count == own.count + foreign.count + 3)
 }

@@ -67,7 +67,7 @@ enum MCPWorker {
                 status.admitted = true
                 status.taskID = decoded.ticketID
                 try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
-                try Latch.execute([submission.executable] + plan.arguments)
+                try execute([submission.executable] + plan.arguments)
                 return 0
             }
             unsetenv("LATCH_CHECKPOINT_FD")
@@ -91,7 +91,7 @@ enum MCPWorker {
                 status.taskID = reservation.id
                 try JSONEncoder().encode(status).write(to: URL(fileURLWithPath: decoded.statusPath), options: .atomic)
                 try reservation.inheritAcrossExec()
-                try Latch.execute([submission.executable] + committed.arguments)
+                try execute([submission.executable] + committed.arguments)
             }
         } catch {
             status.error = String(describing: error)
@@ -102,6 +102,17 @@ enum MCPWorker {
             return status.code ?? 74
         }
         return 0
+    }
+
+    private static func execute(_ arguments: [String]) throws {
+        let argv = arguments.map { strdup($0) }
+        defer { for pointer in argv { free(pointer) } }
+        guard argv.allSatisfy({ $0 != nil }) else { throw LatchError("out of memory", exitCode: 71) }
+        var pointers = argv + [nil]
+        _ = execvp(pointers[0], &pointers)
+        throw LatchError(
+            "cannot execute \(arguments[0]): \(String(cString: strerror(errno)))",
+            exitCode: errno == ENOENT ? 127 : 126)
     }
 }
 
