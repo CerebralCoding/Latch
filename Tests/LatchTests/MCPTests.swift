@@ -96,6 +96,66 @@ private final class MCPClient {
     }
 }
 
+@Test func `retained results load only when requested and remain recoverable offline`() throws {
+    let f = try OperatorFixture()
+    var records: [DurableJobRecord] = []
+    for index in 0..<128 {
+        let record = try f.submit("retained \(index)")
+        try f.store.publish(
+            record.id,
+            result: [
+                "jobID": .string(record.id), "complete": true,
+                "state": "completed", "succeeded": true, "stdout": "retained output",
+            ])
+        records.append(record)
+    }
+    let corrupt = try #require(records.first)
+    try Data("invalid result".utf8).write(to: f.store.file(corrupt.id, "result.json"), options: .atomic)
+    let retained = try #require(records.last)
+    try f.store.markTask(retained.id)
+    f.service.release()
+    let client = try MCPClient(fixture: f.fixture)
+    #expect(try client.request("tools/list")["result"]?["tools"] != nil)
+    #expect(try client.tool("latch_view")["result"]?["structuredContent"] != nil)
+    let retry = try client.tool(
+        "latch_submit",
+        arguments: [
+            "requestKey": .string(retained.submission.requestKey), "name": .string(retained.submission.name),
+            "executable": .string(retained.submission.executable),
+            "workingDirectory": .string(f.fixture.directory.path),
+        ])
+    #expect(try jobID(retry) == retained.id)
+    let result = try client.tool("latch_wait", arguments: ["jobID": .string(retained.id), "timeoutSeconds": 0])
+    #expect(result["result"]?["structuredContent"]?["stdout"] == "retained output")
+    #expect(
+        try client.request("tasks/get", params: ["taskId": .string(retained.id)])["result"]?["status"] == "completed")
+    #expect(
+        try client.request("tasks/result", params: ["taskId": .string(retained.id)])["result"]?["structuredContent"]?[
+            "succeeded"] == true)
+    try Data("not read again".utf8).write(to: f.store.file(retained.id, "result.json"), options: .atomic)
+    #expect(
+        try client.tool("latch_wait", arguments: ["jobID": .string(retained.id), "timeoutSeconds": 0])["result"]?[
+            "structuredContent"]?["stdout"] == "retained output")
+    #expect(
+        try client.tool("latch_forget", arguments: ["jobID": .string(corrupt.id)])["result"]?["structuredContent"]?[
+            "forgotten"] == true)
+    #expect(try client.tool("latch_view")["result"]?["structuredContent"] != nil)
+    try f.store.publish(
+        retained.id,
+        result: [
+            "jobID": .string(retained.id), "complete": true,
+            "state": "completed", "succeeded": true, "stdout": "retained output",
+        ])
+    for record in records.dropFirst().prefix(70) {
+        #expect(
+            try client.tool("latch_job", arguments: ["jobID": .string(record.id)])["result"]?["structuredContent"]?[
+                "result"]?["succeeded"] == true)
+    }
+    #expect(
+        try client.tool("latch_wait", arguments: ["jobID": .string(retained.id), "timeoutSeconds": 0])["result"]?[
+            "structuredContent"]?["stdout"] == "retained output")
+}
+
 private func checkpointState(_ client: MCPClient, id: String, state: String, iteration: Int) throws -> MCPValue {
     let deadline = ProcessInfo.processInfo.systemUptime + 5
     while ProcessInfo.processInfo.systemUptime < deadline {

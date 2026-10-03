@@ -171,7 +171,7 @@ latch schedule --name build --mode batch --cpu 4 --memory-mib 4096 -- make -j4
 
 Unlike MCP, the human CLI accepts explicit peak resource requirements and guard overrides. Match reservations to your command's actual usage and worker limits. Defaults are isolated mode, one CPU core, 512 MiB, CPU/GPU <=55°C for five seconds; isolated CLI work also requires a quiet window. `--timeout` bounds admission only, never runtime. `--no-wait` makes one admission attempt. `--gpu`, `--io` and `--bandwidth` reserve those resources for batch work.
 
-`run` is a sensor-free process lock; `wait` and `guard` wait and immediately release, protecting no subsequent work. Prefer `schedule` for heavy work. `status` reports only whether the process lock is free (exit 0) or held (exit 75), not whether a task is eligible for admission.
+`run` requires the running scheduler and uses FIFO admission and thermal guards. `wait` and `guard` wait and immediately release, protecting no subsequent work. Use `schedule` for measurements or explicit resource requirements. `status` reports only whether the process lock is free (exit 0) or held (exit 75), not whether a task is eligible for admission.
 
 `view`, `tasks`, `--list`, `sensors` and `service status` accept either `--verbose` or `--json`; redirection never changes the format. `view` uses cached readings. `sensors` actively samples the machine, so use it outside measurements rather than in a polling loop. Use `latch COMMAND --help` or `latch help COMMAND` for focused syntax.
 
@@ -235,7 +235,7 @@ State includes commands, retained output and control receipts, plus environment 
 
 Jobs and retry keys survive disconnects and service outages. Required sensor failures prevent new starts; corrupt state raises an error instead of discarding work. If the scheduler is unavailable, restore the service rather than bypassing coordination. Latch never automatically replays uncertain execution.
 
-CLI `run` and `schedule` preserve command arguments, streams, signals and exit status. Inherited lock descriptors keep reservations alive until the last holder closes, including descendants; commands that close them can release early. Never nest an exclusive latch on the same path.
+CLI `run` and `schedule` preserve command arguments, streams, signals and exit status. Reservations remain held while the supervised process group runs, including descendants. `--stop` can still cancel that work if the foreground Latch process is killed. Never nest an exclusive latch on the same path.
 
 | Exit code before command execution | Meaning |
 | --- | --- |

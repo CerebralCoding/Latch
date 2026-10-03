@@ -20,7 +20,7 @@ final class Scheduler {
     let path: String
     let directory: URL
     private let collect: () throws -> SensorSnapshot
-    private var cachedState: (data: Data, state: SchedulerState)?
+    private var cachedState: (identity: FileIdentity, state: SchedulerState, unfinishedJobs: Set<String>)?
 
     init(path: String, collect: @escaping () throws -> SensorSnapshot = NativeSensors.sample) throws {
         self.path = path
@@ -202,19 +202,22 @@ final class Scheduler {
         try mutex.acquire(shared: false, timeout: nil)
         return try withExtendedLifetime(mutex) {
             let file = directory.appendingPathComponent("state.json")
-            let previous: Data?
-            do { previous = try Data(contentsOf: file) } catch CocoaError.fileReadNoSuchFile { previous = nil }
+            let identity = try FileIdentity.read(file.path)
             var state: SchedulerState
-            if let previous, let cachedState, previous == cachedState.data {
+            let unfinishedJobs: Set<String>
+            if let identity, let cachedState, identity == cachedState.identity {
                 state = cachedState.state
+                unfinishedJobs = cachedState.unfinishedJobs
             } else {
-                state = try previous.map { try JSONDecoder().decode(SchedulerState.self, from: $0) } ?? SchedulerState()
+                state =
+                    try identity.map { _ in try JSONDecoder().decode(SchedulerState.self, from: Data(contentsOf: file))
+                    } ?? SchedulerState()
+                unfinishedJobs = Set(state.jobs.lazy.filter { !$0.complete }.map(\.id))
             }
             guard state.version == SchedulerState.schemaVersion else {
                 throw LatchError("unsupported scheduler state version", exitCode: 74)
             }
             let original = state
-            let unfinishedJobs = Set(state.jobs.lazy.filter { !$0.complete }.map(\.id))
             var live: [ScheduledTask] = []
             for task in state.tasks {
                 guard UUID(uuidString: task.id) != nil else {
@@ -240,17 +243,22 @@ final class Scheduler {
             }
             state.tasks = live
             let result = try body(&state)
-            if let previous, state == original {
-                cachedState = (previous, state)
+            if let identity, state == original {
+                cachedState = (identity, state, unfinishedJobs)
                 return result
             }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             let data = try encoder.encode(state)
-            if data != previous {
-                try data.write(to: file, options: .atomic)
+            try data.write(to: file, options: .atomic)
+            if let identity = try FileIdentity.read(file.path) {
+                let unfinished =
+                    state.jobs == original.jobs
+                    ? unfinishedJobs : Set(state.jobs.lazy.filter { !$0.complete }.map(\.id))
+                cachedState = (identity, state, unfinished)
+            } else {
+                cachedState = nil
             }
-            cachedState = (data, state)
             return result
         }
     }

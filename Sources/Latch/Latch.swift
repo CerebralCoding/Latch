@@ -18,6 +18,16 @@ struct LatchError: Error, CustomStringConvertible {
 @main
 struct Latch {
     static func main() {
+        if CommandLine.arguments.count == 9, CommandLine.arguments[1] == "__command_guardian",
+            let parent = Int32(CommandLine.arguments[4]), let ready = Int32(CommandLine.arguments[5]),
+            let lease = Int32(CommandLine.arguments[6]), let gate = Int32(CommandLine.arguments[7]),
+            let update = Int32(CommandLine.arguments[8])
+        {
+            exit(
+                CommandGuardian.run(
+                    path: CommandLine.arguments[2], id: CommandLine.arguments[3], parent: parent,
+                    ready: ready, descriptors: [lease, gate] + (update == -1 ? [] : [update])))
+        }
         if CommandLine.arguments.count == 6, CommandLine.arguments[1] == "__mcp_supervisor",
             let lease = Int32(CommandLine.arguments[4]), let activity = Int32(CommandLine.arguments[5])
         {

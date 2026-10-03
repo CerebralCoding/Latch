@@ -251,8 +251,10 @@ final class MCPJob {
     let store: DurableJobs
     var record: DurableJobRecord
     private var value: MCPValue
+    private var resultIdentity: FileIdentity?
+    private(set) var lastAccess = ProcessInfo.processInfo.systemUptime
     var complete: Bool {
-        value["complete"] == true
+        record.complete || value["complete"] == true
     }
 
     var cancelAt: Double? {
@@ -272,9 +274,12 @@ final class MCPJob {
     }
 
     func update(now _: Double) throws {
-        do {
-            value = try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(id, "result.json")))
-        } catch CocoaError.fileReadNoSuchFile {}
+        guard !complete else { return }
+        let file = store.file(id, "result.json")
+        if let identity = try FileIdentity.read(file.path), identity != resultIdentity {
+            value = try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: file))
+            resultIdentity = identity
+        }
         if let pid = record.supervisorPID {
             _ = waitpid(pid, nil, WNOHANG)
         }
@@ -287,6 +292,13 @@ final class MCPJob {
     }
 
     func result(includeOutput: Bool) throws -> MCPValue {
+        lastAccess = ProcessInfo.processInfo.systemUptime
+        if record.complete, value["complete"] != true {
+            value = try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: store.file(id, "result.json")))
+            guard value["complete"] == true else {
+                throw LatchError("completed job result is incomplete", exitCode: 74)
+            }
+        }
         var result = value.object ?? [:]
         if !includeOutput {
             for key in ["stdout", "stderr", "stdoutTruncated", "stderrTruncated"] {

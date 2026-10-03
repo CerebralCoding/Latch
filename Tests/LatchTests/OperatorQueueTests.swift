@@ -223,6 +223,42 @@ func `operator stop terminates scheduled CLI process groups including TERM resis
     }
 }
 
+@Test(arguments: ["run", "schedule"], ["descendant", "orphan"])
+func `operator stop reaches CLI workloads after their foreground supervisor is killed`(
+    command: String, mode: String
+) throws {
+    let f = try OperatorFixture()
+    defer { _ = try? f.queue.stop() }
+    let marker = f.fixture.directory.appendingPathComponent("surviving-child")
+    let workload = f.fixture.executable.deletingLastPathComponent().appendingPathComponent("LatchTestWorkload")
+    let options = command == "run" ? ["run", "--shared"] : ["schedule", "--mode", "batch", "--cooldown", "0"]
+    let child = try f.fixture.launch(options + ["--", workload.path, mode, marker.path])
+    let deadline = ProcessInfo.processInfo.systemUptime + 5
+    while !FileManager.default.fileExists(atPath: marker.path), ProcessInfo.processInfo.systemUptime < deadline {
+        try f.publishSensors()
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    let descendant = try #require(Int32(String(contentsOf: marker, encoding: .utf8)))
+    defer { _ = kill(descendant, SIGKILL) }
+    #expect(kill(child.process.processIdentifier, SIGKILL) == 0)
+    #expect(try f.fixture.finish(child) == SIGKILL)
+    #expect(try f.scheduler.snapshot().tasks.count == 1)
+    let gate = try FileLatch(path: f.fixture.lockPath)
+    #expect(throws: LatchError.self) { try gate.acquire(shared: false, timeout: 0) }
+    #expect(try f.queue.stop().count == 1)
+    let releasedBy = ProcessInfo.processInfo.systemUptime + 6
+    while try !f.scheduler.snapshot().tasks.isEmpty, ProcessInfo.processInfo.systemUptime < releasedBy {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    var info = proc_bsdinfo()
+    #expect(
+        proc_pidinfo(descendant, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == 0
+            || info.pbi_status == SZOMB)
+    #expect(try f.scheduler.snapshot().tasks.isEmpty)
+    try gate.acquire(shared: false, timeout: 0)
+    #expect(try SchedulerService.status(in: f.scheduler.directory).running)
+}
+
 @Test func `operator list excludes completed results and escapes job names`() throws {
     let f = try OperatorFixture()
     #expect(try f.queue.list() == "No outstanding jobs.")
@@ -246,6 +282,37 @@ func `operator stop terminates scheduled CLI process groups including TERM resis
     let clear = try f.fixture.launch(["--clear"])
     #expect(try f.fixture.finish(clear) == 0)
     #expect(clear.output.contains("2 queued job(s)"))
+}
+
+@Test func `CLI work completes and releases its reservation after the foreground supervisor dies`() throws {
+    let f = try OperatorFixture()
+    let input = Pipe()
+    defer {
+        try? input.fileHandleForWriting.close()
+        _ = try? f.queue.stop()
+    }
+    let marker = f.fixture.directory.appendingPathComponent("foreground-output")
+    let child = try f.fixture.launch(["run", "--shared", "--", "/usr/bin/tee", marker.path], input: input)
+    try input.fileHandleForWriting.write(contentsOf: Data("started".utf8))
+    let deadline = ProcessInfo.processInfo.systemUptime + 5
+    while (try? String(contentsOf: marker, encoding: .utf8)) != "started",
+        ProcessInfo.processInfo.systemUptime < deadline
+    {
+        try f.publishSensors()
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    try #require(try String(contentsOf: marker, encoding: .utf8) == "started")
+    #expect(kill(child.process.processIdentifier, SIGKILL) == 0)
+    #expect(try f.fixture.finish(child) == SIGKILL)
+    #expect(try f.scheduler.snapshot().tasks.count == 1)
+    try input.fileHandleForWriting.close()
+    let releasedBy = ProcessInfo.processInfo.systemUptime + 5
+    while try !f.scheduler.snapshot().tasks.isEmpty, ProcessInfo.processInfo.systemUptime < releasedBy {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    #expect(try f.scheduler.snapshot().tasks.isEmpty)
+    let gate = try FileLatch(path: f.fixture.lockPath)
+    try gate.acquire(shared: false, timeout: 0)
 }
 
 @Test(arguments: [false, true], ["--clear", "--stop"])

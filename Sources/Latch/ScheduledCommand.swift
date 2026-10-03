@@ -15,17 +15,21 @@ enum ScheduledCommand {
             signal(SIGCHLD, previousCHLD)
         }
         for number in forwarded + [SIGCHLD] { try watcher.watchSignal(number) }
-        let pid = try spawn(arguments)
+        let group = try CommandGuardian.start(scheduler: scheduler, reservation: reservation)
+        var guardianFinished = false
+        defer { if !guardianFinished { CommandGuardian.finish(group) } }
+        let pid = try spawn(arguments, group: group)
+        _ = kill(group, SIGUSR2)
         let terminal = open("/dev/tty", O_RDWR | O_CLOEXEC)
         let foreground = terminal >= 0 ? tcgetpgrp(terminal) : -1
         let controlsTerminal = foreground > 0 && foreground == getpgrp()
-        if controlsTerminal { _ = tcsetpgrp(terminal, pid) }
+        if controlsTerminal { _ = tcsetpgrp(terminal, group) }
         var reaped = false
         defer {
-            if controlsTerminal, tcgetpgrp(terminal) == pid { _ = tcsetpgrp(terminal, foreground) }
+            if controlsTerminal, tcgetpgrp(terminal) == group { _ = tcsetpgrp(terminal, foreground) }
             if terminal >= 0 { close(terminal) }
             if !reaped {
-                _ = kill(-pid, SIGKILL)
+                _ = kill(-group, SIGKILL)
                 _ = waitpid(pid, nil, 0)
             }
         }
@@ -34,12 +38,12 @@ enum ScheduledCommand {
         while true {
             let now = ProcessInfo.processInfo.systemUptime
             if cancelAt == nil, FileManager.default.fileExists(atPath: store.file(reservation.id, "cancel").path) {
-                _ = kill(-pid, SIGTERM)
-                _ = kill(-pid, SIGCONT)
+                _ = kill(-group, SIGTERM)
+                _ = kill(-group, SIGCONT)
                 cancelAt = now
             }
             if let cancelAt, now >= cancelAt + 2, !killSent {
-                _ = kill(-pid, SIGKILL)
+                _ = kill(-group, SIGKILL)
                 killSent = true
             }
             var status = siginfo_t()
@@ -49,21 +53,21 @@ enum ScheduledCommand {
             if status.si_pid == pid, status.si_code == CLD_STOPPED {
                 // Return terminal control to the caller while the foreground workload is suspended.
                 _ = waitid(P_PID, id_t(pid), &status, WSTOPPED | WNOHANG)
-                if cancelAt == nil, controlsTerminal, tcgetpgrp(terminal) == pid,
+                if cancelAt == nil, controlsTerminal, tcgetpgrp(terminal) == group,
                     [SIGTTIN, SIGTTOU].contains(status.si_status)
                 {
-                    _ = kill(-pid, SIGCONT)
+                    _ = kill(-group, SIGCONT)
                 } else if cancelAt == nil,
                     !FileManager.default.fileExists(atPath: store.file(reservation.id, "cancel").path)
                 {
                     if controlsTerminal { _ = tcsetpgrp(terminal, foreground) }
                     _ = kill(getpid(), SIGSTOP)
-                    if controlsTerminal { _ = tcsetpgrp(terminal, pid) }
-                    _ = kill(-pid, SIGCONT)
+                    if controlsTerminal { _ = tcsetpgrp(terminal, group) }
+                    _ = kill(-group, SIGCONT)
                 }
             }
             let exited = status.si_pid == pid && [CLD_EXITED, CLD_KILLED, CLD_DUMPED].contains(status.si_code)
-            let descendants = exited ? try liveGroupMembers(pid, excluding: pid) : []
+            let descendants = exited ? try liveGroupMembers(group, excluding: pid).filter { $0 != group } : []
             if exited, descendants.isEmpty {
                 var termination: Int32 = 0
                 guard waitpid(pid, &termination, 0) == pid else {
@@ -71,6 +75,8 @@ enum ScheduledCommand {
                 }
                 reaped = true
                 if controlsTerminal { _ = tcsetpgrp(terminal, foreground) }
+                CommandGuardian.finish(group)
+                guardianFinished = true
                 try scheduler.withdraw(reservation.id)
                 let number = termination & 0x7f
                 if number != 0 {
@@ -82,7 +88,7 @@ enum ScheduledCommand {
             }
             let delay = cancelAt.map { killSent ? 3600 : max(0, $0 + 2 - now) } ?? 3600
             if let number = watcher.wait(seconds: delay, pids: exited ? descendants : [pid]), number != SIGCHLD {
-                _ = kill(-pid, number)
+                _ = kill(-group, number)
             }
         }
     }
@@ -99,7 +105,7 @@ enum ScheduledCommand {
         _ = kill(task.pid, SIGCONT)
     }
 
-    private static func spawn(_ arguments: [String]) throws -> Int32 {
+    private static func spawn(_ arguments: [String], group: Int32) throws -> Int32 {
         var attributes: posix_spawnattr_t?
         func check(_ code: Int32) throws {
             guard code == 0 else {
@@ -108,7 +114,7 @@ enum ScheduledCommand {
         }
         try check(posix_spawnattr_init(&attributes))
         defer { posix_spawnattr_destroy(&attributes) }
-        try check(posix_spawnattr_setpgroup(&attributes, 0))
+        try check(posix_spawnattr_setpgroup(&attributes, group))
         var defaults = sigset_t(0)
         for number in [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGTSTP, SIGCONT, SIGCHLD, SIGPIPE, SIGTTOU, SIGTTIN] {
             sigaddset(&defaults, number)
@@ -135,7 +141,7 @@ enum ScheduledCommand {
         return pid
     }
 
-    private static func liveGroupMembers(_ group: Int32, excluding leader: Int32) throws -> [Int32] {
+    static func liveGroupMembers(_ group: Int32, excluding leader: Int32) throws -> [Int32] {
         let needed = proc_listpids(UInt32(PROC_PGRP_ONLY), UInt32(group), nil, 0)
         guard needed >= 0 else { throw LatchError.system("inspect scheduled process group") }
         var pids = [Int32](repeating: 0, count: Int(needed) / MemoryLayout<Int32>.stride + 16)

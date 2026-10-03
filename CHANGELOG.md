@@ -8,6 +8,8 @@ Latch is unreleased. These entries describe development versions recorded in Git
 - `latch_stop_own` cancels all outstanding jobs in a submission scope, including running and parked work.
 - Human `--stop` cancels all outstanding work in the selected queue across submission scopes, including running processes and parked checkpoints, without stopping the scheduler service.
 - `latch run` participates in the shared FIFO scheduler and thermal admission. Human `--clear` and `--stop` cover its work, with supervised process-group cancellation and signal forwarding.
+- CLI process groups remain cancellable after loss of the foreground supervisor, with reservations retained until work exits.
+- Completed MCP results load on demand and remain cached; routine updates avoid repeated history reads and duplicate result decoding.
 
 ## 0.16.0
 
