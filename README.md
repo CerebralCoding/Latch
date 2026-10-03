@@ -251,3 +251,5 @@ CLI `run` and `schedule` preserve command arguments, streams, signals and exit s
 After execution starts, `run` and `schedule` return the command's own status, which can overlap these codes. Pre-execution errors include a `latch:` diagnostic on stderr.
 
 MIT license: [LICENSE](LICENSE). The native sensor implementation's macmon notice is retained in [LICENSES/macmon.txt](LICENSES/macmon.txt).
+
+If Latch helps you get reliable measurements or coordinate your agents, please [sponsor me on GitHub](https://github.com/sponsors/CerebralCoding). Your support helps me keep developing and maintaining it. — Sebastian Christiansen
