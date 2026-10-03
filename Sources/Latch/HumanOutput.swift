@@ -4,7 +4,7 @@ import Foundation
 enum HumanOutput {
     static let about = """
         Latch \(BuildIdentity.version)
-        Coordinate finite work on Apple Silicon Macs with macOS 26 or later.
+        Local workload scheduler for autonomous agents sharing an Apple Silicon Mac.
 
         Created by Sebastian Christiansen
         Copyright © 2026 Sebastian Christiansen
