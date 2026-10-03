@@ -144,6 +144,7 @@ Request progress notifications with `_meta.progressToken`. Notifications report 
 ## Human commands
 
 ```sh
+latch --about
 latch view
 latch view --verbose
 latch view --json
@@ -153,7 +154,7 @@ latch --clear
 latch --stop
 ```
 
-`view` gives a short service, queue and admission summary. `--verbose` expands sensors, thresholds, reservations and paths; `--json` emits structured data. `tasks` and `--list` show up to ten outstanding jobs, with running work first, full copyable IDs, classification and elapsed time. Use `--verbose` for all jobs. Completed history is available through MCP.
+`--about` prints the version, author, copyright, license, contact and sponsorship information without contacting the service. `view` gives a short service, queue and admission summary. `--verbose` expands sensors, thresholds, reservations and paths; `--json` emits structured data. `tasks` and `--list` show up to ten outstanding jobs, with running work first, full copyable IDs, classification and elapsed time. Use `--verbose` for all jobs. Completed history is available through MCP.
 
 `--run JOB_ID` prioritizes an existing queued ticket. It never launches a new command, preempts running work or bypasses guards. `--clear` cancels never-started jobs; running work and started checkpoints, including parked iterations, are preserved. `--stop` cancels all outstanding jobs in the selected queue, across scopes, including running CLI/MCP work and parked checkpoints. Both include `latch run` jobs. Active workloads receive TERM, then KILL after two seconds if needed. Cancellation is asynchronous; completed results remain available. The scheduler stays running and accepts subsequent work. Unmanaged processes are unaffected. These queue overrides are for human operators, not agents.
 

@@ -21,7 +21,7 @@ enum CLIHelp {
         Execute
           schedule … -- COMMAND    FIFO scheduling with resource and thermal guards
           run … -- COMMAND         Queue a command; --shared permits overlap
-          wait | guard             Wait for a checkpoint, then release
+          wait | guard             Wait without protecting subsequent work
           mcp                      Agent transport over stdin/stdout
 
         Diagnostics use short text by default; --verbose expands it, --json emits data.

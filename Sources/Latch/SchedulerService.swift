@@ -140,7 +140,9 @@ enum ServiceInstallation {
             if !(ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").contains(
                 Substring(executable.deletingLastPathComponent().path))
             {
-                print("Add ~/.local/bin to your shell and agent PATH to run latch by name.")
+                print(
+                    "Add ~/.local/bin to your shell PATH to run latch by name. MCP hosts use the absolute executable path."
+                )
             }
         case .start:
             let installedQueue = try installedPath()

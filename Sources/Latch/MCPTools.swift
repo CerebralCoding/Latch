@@ -11,11 +11,11 @@ enum MCPTools {
     static let instructions = """
         Prefer latch_execute for authorized foreground tasks: one call waits until completion, with optional MCP task execution for capable hosts.
         \(workloadGuidance)
-        Latch owns resource budgets, worker limits, isolation, temperature guards, and scheduling.
-        Agents must not calculate budgets or inspect the queue to plan admission. Optionally mark performance measurements with measurement=true.
+        Latch owns resource reservations, isolation, temperature guards, and scheduling. Reservations are advisory, not OS-enforced limits.
+        Agents must not calculate budgets, add worker flags just for Latch, or inspect the queue to plan admission. Set measurement=true for benchmarks, profiling, and performance comparisons.
         Classify independent non-sensitive work with classification=ordinary to allow jobs to overlap. Latch scales admission with the machine's core count, available memory, pressure, temperatures, and fresh sensors after each start; there is no fixed parallel-job cap. Sensitive work (the default) is exclusive; measurement=true and checkpoints=true always require exclusive cooling and quiet-window admission. Latch chooses budgets, preserves command arguments, and never recognizes tools or injects worker limits.
         Admission is FIFO: an older sensitive or measurement ticket blocks newer ordinary work while existing jobs drain. A human operator may explicitly reorder or clear queued work through CLI controls; agents must not use those overrides.
-        Set checkpoints=true only for an executable using LatchSession. The executable, not the agent, exchanges iteration permits. Latch owns cooling and FIFO reentry; parked processes retain memory. No runtime limit or automatic replay.
+        Set checkpoints=true only for an executable implementing Latch's checkpoint protocol; Swift executables can use LatchSession. The executable, not the agent, exchanges iteration permits. Latch owns cooling and FIFO reentry; parked processes retain memory. No runtime limit or automatic replay.
         Keep the full workload in the submitted command. latch_view is optional diagnostics, not a required planning step.
         For hosts with short request timeouts, use latch_submit then latch_wait on the returned jobID; repeat only when pending.
         Each new submission or control needs a stable retry key. Use the Latch-issued prefix from tool discovery plus a distinct operation suffix; no UUID-generation command is needed. Hosts can instead inject com.cerebralcoding.latch/retryKey in tools/call _meta. Reuse the complete original key for identical retries, including after reconnecting; never replace an uncertain key or derive it solely from command text.
@@ -81,7 +81,7 @@ enum MCPTools {
                 "checkpoints": [
                     "type": "boolean", "default": false,
                     "description":
-                        "Only for executables implementing LatchSession checkpoints. Keeps the process alive and gates each iteration; implies measurement=true.",
+                        "Only for executables implementing Latch's checkpoint protocol, such as Swift executables using LatchSession. Keeps the process alive and gates each iteration; implies measurement=true.",
                 ],
                 "input": [
                     "type": "string", "enum": ["closed", "pipe", "terminal"], "default": "closed",
