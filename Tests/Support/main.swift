@@ -19,7 +19,15 @@ if tool.hasPrefix("installer-") {
     case "installer-uname": print(arguments == ["-s"] ? "Darwin" : scenario == "intel" ? "x86_64" : "arm64")
     case "installer-sw_vers": print(scenario == "old-os" ? "25.0" : "26.0")
     case "installer-stat": print("501")
-    case "installer-codesign": exit(scenario == "bad-signature" ? 1 : 0)
+    case "installer-codesign":
+        if scenario == "bad-signature" { exit(1) }
+        let index = arguments.firstIndex(of: "--test-requirement")!
+        let parser = Process()
+        parser.executableURL = URL(fileURLWithPath: "/usr/bin/csreq")
+        parser.arguments = ["-r", arguments[index + 1]]
+        try parser.run()
+        parser.waitUntilExit()
+        exit(parser.terminationStatus)
     case "installer-curl":
         if scenario == "network-failure" { exit(22) }
         let index = arguments.firstIndex(of: "--output")!

@@ -56,7 +56,7 @@ actual=$(/usr/bin/shasum -a 256 "$work/latch")
 [ "${actual%% *}" = "$expected" ] || fail 'download checksum mismatch'
 
 requirement='anchor apple generic and identifier "com.cerebralcoding.latch" and certificate leaf[subject.OU] = "YKF838CLKT" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
-/usr/bin/codesign --verify --strict --verbose=2 --test-requirement "$requirement" "$work/latch"
+/usr/bin/codesign --verify --strict --verbose=2 --test-requirement "=$requirement" "$work/latch"
 /bin/chmod 755 "$work/latch"
 [ "$("$work/latch" --version)" = "$version" ] || fail 'release version does not match download'
 

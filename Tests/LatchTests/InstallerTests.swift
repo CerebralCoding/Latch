@@ -141,13 +141,13 @@ func `installer fails closed and cleans downloads without touching installed com
     #expect(!FileManager.default.fileExists(atPath: output.path))
 }
 
-@Test func `release trust requirement rejects a locally built unsigned or ad hoc executable`() throws {
+@Test func `release verification parses inline requirements and rejects an untrusted executable`() throws {
     let fixture = try Fixture()
+    try ReleasePreparation.verify(binary: fixture.executable, requirement: "always")
     #expect(throws: ReleaseError.self) {
-        try ReleasePreparation.run(
-            "/usr/bin/codesign",
-            [
-                "--verify", "--strict", "--test-requirement", ReleasePreparation.requirement, fixture.executable.path,
-            ])
+        try ReleasePreparation.verify(binary: fixture.executable, requirement: "never")
+    }
+    #expect(throws: ReleaseError.self) {
+        try ReleasePreparation.verify(binary: fixture.executable)
     }
 }

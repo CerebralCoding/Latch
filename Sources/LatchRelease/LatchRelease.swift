@@ -34,6 +34,11 @@ enum ReleasePreparation {
         return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func verify(binary: URL, requirement: String = ReleasePreparation.requirement) throws {
+        _ = try run(
+            "/usr/bin/codesign", ["--verify", "--strict", "--test-requirement", "=" + requirement, binary.path])
+    }
+
     static func prepare(binary: URL, output: URL, installer: URL, identity: String, profile: String) throws {
         guard !identity.isEmpty, !profile.isEmpty else {
             throw ReleaseError.invalid("Developer ID Application identity and notarytool keychain profile are required")
@@ -57,7 +62,7 @@ enum ReleasePreparation {
                 "--force", "--sign", identity, "--identifier", identifier, "--options", "runtime", "--timestamp",
                 asset.path,
             ])
-        _ = try run("/usr/bin/codesign", ["--verify", "--strict", "--test-requirement", requirement, asset.path])
+        try verify(binary: asset)
         let archive = output.appendingPathComponent("notarization.zip")
         _ = try run("/usr/bin/ditto", ["-c", "-k", asset.path, archive.path])
         let response = try run(
