@@ -68,8 +68,7 @@ enum ReleasePreparation {
             "/usr/bin/codesign",
             [
                 "--force", "--sign", identity, "--identifier", identifier, "--options", "runtime", "--timestamp",
-                asset.path,
-            ] + (keychain.map { ["--keychain", $0.path] } ?? []))
+            ] + (keychain.map { ["--keychain", $0.path] } ?? []) + [asset.path])
         try verify(binary: asset)
         let archive = output.appendingPathComponent("notarization.zip")
         _ = try run("/usr/bin/ditto", ["-c", "-k", asset.path, archive.path])
