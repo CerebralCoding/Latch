@@ -23,7 +23,7 @@ private func hostedEnvironment(_ directory: URL) -> [String: String] {
     for (name, value) in [
         ("GITHUB_ACTIONS", "false"), ("RUNNER_ENVIRONMENT", "self-hosted"),
         ("GITHUB_REPOSITORY", "someone/Latch"), ("GITHUB_REF", "refs/heads/topic"),
-        ("GITHUB_REF", "refs/tags/v0.17.0"), ("GITHUB_ACTOR", "someone"),
+        ("GITHUB_REF", "refs/tags/v0.18.0"), ("GITHUB_ACTOR", "someone"),
         ("GITHUB_TRIGGERING_ACTOR", "someone"), ("GITHUB_EVENT_NAME", "pull_request"), ("RUNNER_TEMP", "relative"),
     ] {
         var environment = hostedEnvironment(fixture.directory)

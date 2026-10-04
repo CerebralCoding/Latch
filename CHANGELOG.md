@@ -2,10 +2,12 @@
 
 Versions before 0.17.0 describe development milestones. Changes made while a version remained unchanged are grouped under that version.
 
-## Unreleased
+## 0.18.0
 
-- Standardized human actions as `list`, `prioritize JOB_ID`, `clear`, and `stop`, with one canonical job-listing command.
-- Added consistent `--option=value` parsing, end-of-options handling, missing-value errors, and focused command help.
+- Standardized human commands as `list`, `prioritize JOB_ID`, `clear`, and `stop`, replacing the previous action flags and duplicate job-listing command.
+- Added consistent `--option=value` parsing, duplicate-option checks, missing-value errors, and `--` handling that preserves child command arguments.
+- Improved command-specific help and service option validation.
+- Refined the README's structure, sponsorship footer, and feedback guidance.
 
 ## 0.17.0
 
