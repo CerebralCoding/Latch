@@ -407,7 +407,7 @@ After execution starts, `run` and `schedule` return the command's own status, wh
 
 ## Support
 
-If Latch helps you get reliable measurements or coordinate your agents, please [sponsor me on GitHub](https://github.com/sponsors/CerebralCoding). Your support helps me keep developing and maintaining it. — Sebastian Christiansen
+If Latch helps you get reliable measurements or coordinate your agents, please [sponsor me on GitHub](https://github.com/sponsors/CerebralCoding). Your support helps me keep developing and maintaining it.
 
 ## Contributing
 
