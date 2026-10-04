@@ -1,29 +1,147 @@
-name: Prepare signed release (no publication)
+name: Release Latch
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version already approved and committed on main
+        required: true
+        default: '0.17.0'
+        type: string
+      notes:
+        description: Exact release notes to include in reviewed artifacts and publication
+        required: true
+        type: string
+      publish:
+        description: Publish after preparation and environment approval
+        default: false
+        type: boolean
+      prerelease:
+        description: Mark the release as a beta prerelease
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 
+concurrency:
+  group: latch-release
+  cancel-in-progress: false
+
 jobs:
-  prepare:
-    if: vars.LATCH_RELEASE_PREPARATION_ENABLED == 'true'
-    environment: release-preparation
+  verify:
+    if: github.repository == 'CerebralCoding/Latch' && github.ref == 'refs/heads/main' && github.actor == 'CerebralCoding' && github.triggering_actor == 'CerebralCoding'
     runs-on: xcode-27
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
     steps:
       - uses: actions/checkout@v6
-      - run: swift --version
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require Swift 6.4
+        run: |
+          version="$(swift --version)"
+          printf '%s\n' "$version"
+          [[ "$version" == *"Swift version 6.4."* ]]
       - run: swift format lint --strict --recursive --configuration .swift-format Package.swift Sources Tests
-      - run: swift test -c release
-      - name: Sign and notarize using the runner's configured keychain
+      - run: swift test -c release --no-parallel
+      - name: Verify approved version and unused publication tag
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(.build/release/latch --version)" == "$RELEASE_VERSION" ]]
+          if [[ "$PUBLISH" == true ]] && git show-ref --verify --quiet "refs/tags/v$RELEASE_VERSION"; then
+            echo '::error::This version already has a tag. Existing releases are never overwritten.'
+            exit 1
+          fi
+
+  prepare:
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.actor == 'CerebralCoding' && github.triggering_actor == 'CerebralCoding'
+    environment: release
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    outputs:
+      artifact-id: ${{ steps.artifacts.outputs.artifact-id }}
+    steps:
+      - name: Require environment configuration
+        env:
+          ENABLED: ${{ vars.LATCH_RELEASE_PREPARATION_ENABLED }}
+          SIGNING_IDENTITY: ${{ vars.LATCH_DEVELOPER_ID_APPLICATION }}
+          NOTARY_PROFILE: ${{ vars.LATCH_NOTARY_KEYCHAIN_PROFILE }}
+        run: |
+          [[ "$ENABLED" == true && -n "$SIGNING_IDENTITY" && -n "$NOTARY_PROFILE" ]]
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: swift build -c release
+      - name: Sign and notarize with temporary hosted credentials
         env:
           SIGNING_IDENTITY: ${{ vars.LATCH_DEVELOPER_ID_APPLICATION }}
           NOTARY_PROFILE: ${{ vars.LATCH_NOTARY_KEYCHAIN_PROFILE }}
-        run: swift run -c release LatchRelease --binary .build/release/latch --output .build/release-artifacts --installer install.sh --signing-identity "$SIGNING_IDENTITY" --notary-profile "$NOTARY_PROFILE"
+          LATCH_SIGNING_P12_BASE64: ${{ secrets.LATCH_SIGNING_P12_BASE64 }}
+          LATCH_SIGNING_P12_PASSWORD: ${{ secrets.LATCH_SIGNING_P12_PASSWORD }}
+          LATCH_NOTARY_KEY_BASE64: ${{ secrets.LATCH_NOTARY_KEY_BASE64 }}
+          LATCH_NOTARY_KEY_ID: ${{ secrets.LATCH_NOTARY_KEY_ID }}
+          LATCH_NOTARY_ISSUER_ID: ${{ secrets.LATCH_NOTARY_ISSUER_ID }}
+        run: .build/release/LatchRelease --hosted --binary .build/release/latch --output .build/release-artifacts --installer install.sh --signing-identity "$SIGNING_IDENTITY" --notary-profile "$NOTARY_PROFILE"
+      - name: Include exact operator release notes
+        env:
+          RELEASE_NOTES: ${{ inputs.notes }}
+        run: printf '%s\n' "$RELEASE_NOTES" > .build/release-artifacts/release-notes.md
       - uses: actions/upload-artifact@v7
+        id: artifacts
         with:
           name: signed-release-for-review
           path: .build/release-artifacts/
           if-no-files-found: error
+      - name: Remove temporary credentials even after failure
+        if: always()
+        run: |
+          if [[ -x .build/release/LatchRelease ]]; then
+            .build/release/LatchRelease --cleanup-hosted
+          fi
+
+  publish:
+    needs: prepare
+    if: inputs.publish && github.ref == 'refs/heads/main' && github.actor == 'CerebralCoding' && github.triggering_actor == 'CerebralCoding'
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          path: release-artifacts
+          digest-mismatch: error
+      - name: Publish the exact prepared artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          binary="release-artifacts/latch-$RELEASE_VERSION-macos-arm64"
+          expected="$(cat "$binary.sha256")"
+          actual="$(sha256sum "$binary")"
+          [[ "${actual%% *}" == "$expected" ]]
+          flags=(--latest)
+          if [[ "$PRERELEASE" == true ]]; then
+            flags=(--prerelease --latest=false)
+          fi
+          gh api "repos/$GH_REPO/git/refs" --method POST \
+            -f ref="refs/tags/v$RELEASE_VERSION" -f sha="$RELEASE_COMMIT"
+          gh release create "v$RELEASE_VERSION" \
+            "$binary" "$binary.sha256" \
+            release-artifacts/install.sh release-artifacts/LICENSE \
+            release-artifacts/macmon-LICENSE.txt release-artifacts/notarization.json \
+            --verify-tag --title "Latch $RELEASE_VERSION" \
+            --notes-file release-artifacts/release-notes.md "${flags[@]}"

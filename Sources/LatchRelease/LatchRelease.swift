@@ -23,6 +23,12 @@ enum ReleasePreparation {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = ProcessInfo.processInfo.environment.filter {
+            ![
+                "LATCH_SIGNING_P12_BASE64", "LATCH_SIGNING_P12_PASSWORD", "LATCH_NOTARY_KEY_BASE64",
+                "LATCH_NOTARY_KEY_ID", "LATCH_NOTARY_ISSUER_ID",
+            ].contains($0.key)
+        }
         let output = Pipe()
         if capture { process.standardOutput = output }
         try process.run()
@@ -39,7 +45,9 @@ enum ReleasePreparation {
             "/usr/bin/codesign", ["--verify", "--strict", "--test-requirement", "=" + requirement, binary.path])
     }
 
-    static func prepare(binary: URL, output: URL, installer: URL, identity: String, profile: String) throws {
+    static func prepare(
+        binary: URL, output: URL, installer: URL, identity: String, profile: String, keychain: URL? = nil
+    ) throws {
         guard !identity.isEmpty, !profile.isEmpty else {
             throw ReleaseError.invalid("Developer ID Application identity and notarytool keychain profile are required")
         }
@@ -61,7 +69,7 @@ enum ReleasePreparation {
             [
                 "--force", "--sign", identity, "--identifier", identifier, "--options", "runtime", "--timestamp",
                 asset.path,
-            ])
+            ] + (keychain.map { ["--keychain", $0.path] } ?? []))
         try verify(binary: asset)
         let archive = output.appendingPathComponent("notarization.zip")
         _ = try run("/usr/bin/ditto", ["-c", "-k", asset.path, archive.path])
@@ -70,7 +78,7 @@ enum ReleasePreparation {
             [
                 "notarytool", "submit", archive.path, "--keychain-profile", profile, "--wait", "--output-format",
                 "json",
-            ], capture: true)
+            ] + (keychain.map { ["--keychain", $0.path] } ?? []), capture: true)
         guard let result = try JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any],
             result["status"] as? String == "Accepted"
         else {
@@ -101,18 +109,33 @@ enum ReleasePreparation {
 struct LatchRelease {
     static func main() {
         do {
-            let arguments = Array(CommandLine.arguments.dropFirst())
+            var arguments = Array(CommandLine.arguments.dropFirst())
+            let environment = ProcessInfo.processInfo.environment
+            if arguments == ["--cleanup-hosted"] {
+                try HostedSigning.cleanup(directory: HostedSigning.directory(environment: environment))
+                return
+            }
+            let hosted = arguments.first == "--hosted"
+            if hosted { arguments.removeFirst() }
             guard arguments.count == 10,
                 arguments[0] == "--binary", arguments[2] == "--output", arguments[4] == "--installer",
                 arguments[6] == "--signing-identity", arguments[8] == "--notary-profile"
             else {
                 throw ReleaseError.invalid(
-                    "usage: LatchRelease --binary PATH --output PATH --installer PATH --signing-identity IDENTITY --notary-profile PROFILE"
+                    "usage: LatchRelease [--hosted] --binary PATH --output PATH --installer PATH --signing-identity IDENTITY --notary-profile PROFILE; LatchRelease --cleanup-hosted"
                 )
             }
-            try ReleasePreparation.prepare(
-                binary: URL(fileURLWithPath: arguments[1]), output: URL(fileURLWithPath: arguments[3]),
-                installer: URL(fileURLWithPath: arguments[5]), identity: arguments[7], profile: arguments[9])
+            func prepare(keychain: URL?) throws {
+                try ReleasePreparation.prepare(
+                    binary: URL(fileURLWithPath: arguments[1]), output: URL(fileURLWithPath: arguments[3]),
+                    installer: URL(fileURLWithPath: arguments[5]), identity: arguments[7], profile: arguments[9],
+                    keychain: keychain)
+            }
+            if hosted {
+                try HostedSigning(environment: environment).prepare(profile: arguments[9]) { try prepare(keychain: $0) }
+            } else {
+                try prepare(keychain: nil)
+            }
         } catch {
             FileHandle.standardError.write(Data("release preparation: \(error)\n".utf8))
             exit(1)
