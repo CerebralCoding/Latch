@@ -1,6 +1,11 @@
 # Changelog
 
-Latch is unreleased. These entries describe development versions recorded in Git, not published releases. Changes made while a version remained unchanged are grouped under that version.
+Versions before 0.17.0 describe development milestones. Changes made while a version remained unchanged are grouped under that version.
+
+## Unreleased
+
+- Standardized human actions as `list`, `prioritize JOB_ID`, `clear`, and `stop`, with one canonical job-listing command.
+- Added consistent `--option=value` parsing, end-of-options handling, missing-value errors, and focused command help.
 
 ## 0.17.0
 

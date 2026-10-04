@@ -38,7 +38,7 @@ private func task(_ mode: TaskRequirements.Mode = .batch, cores: Int = 1, gpu: B
     ["schedule", "--memory-mib", "-1", "--", "true"],
     ["schedule", "--mode", "anything", "--", "true"],
     ["schedule", "--gpu", "--gpu", "--", "true"],
-    ["run", "--gpu", "--", "true"], ["tasks", "--timeout", "1"],
+    ["run", "--gpu", "--", "true"], ["list", "--timeout", "1"],
     ["sensors", "--file", "ignored"], ["schedule", "--name", "", "--", "true"],
 ])
 func `rejects invalid scheduler options`(arguments: [String]) {
@@ -412,7 +412,7 @@ func `rejects invalid scheduler options`(arguments: [String]) {
             Thread.sleep(forTimeInterval: 0.01)
         }
         #expect(try scheduler.snapshot().tasks.first?.name == "parked-agent")
-        let inspection = try fixture.launch(["tasks", "--json"])
+        let inspection = try fixture.launch(["view", "--json"])
         #expect(try fixture.finish(inspection) == 0)
         let value = try JSONDecoder().decode(MCPValue.self, from: Data(inspection.output.utf8))
         guard case .array(let tasks) = value["tasks"] else {

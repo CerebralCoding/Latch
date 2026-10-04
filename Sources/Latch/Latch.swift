@@ -103,12 +103,10 @@ struct Latch {
                     options.serviceAction!, path: path, verbose: options.verbose, json: options.json)
                 return
             }
-            if options.command == .view || options.command == .tasks {
+            if options.command == .view {
                 let view = try SchedulerView(scheduler: Scheduler(path: path))
                 if options.json {
                     try printJSON(view)
-                } else if options.command == .tasks {
-                    print(HumanOutput.list(view.jobs, verbose: options.verbose))
                 } else {
                     print(HumanOutput.view(view, verbose: options.verbose))
                 }
@@ -144,7 +142,7 @@ struct Latch {
                     print("held")
                     exit(75)
                 }
-            case .run, .help, .schedule, .tasks, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version,
+            case .run, .help, .schedule, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version,
                 .list, .prioritize, .clear, .stop, .about:
                 break
             }

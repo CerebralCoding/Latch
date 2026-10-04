@@ -13,7 +13,7 @@ import Testing
 }
 
 @Test(arguments: [
-    [], ["unknown"], ["run"], ["run", "--"], ["run", "--", ""],
+    ["unknown"], ["run"], ["run", "--"], ["run", "--", ""],
     ["run", "echo"], ["wait", "--shared"], ["status", "--timeout", "1"],
     ["wait", "--timeout", "nan"], ["wait", "--timeout", "inf"],
     ["wait", "--timeout", "-1"], ["wait", "--timeout", "1e100"],
@@ -240,7 +240,12 @@ final class Fixture {
     func launch(_ arguments: [String], input: Pipe? = nil, includeFile: Bool = true) throws -> Child {
         let child = Child()
         child.process.executableURL = executable
-        child.process.arguments = includeFile ? [arguments[0], "--file", lockPath] + arguments.dropFirst() : arguments
+        var invocation = arguments
+        if includeFile, let command = arguments.first {
+            let position = command == "service" && arguments.count > 1 ? 2 : 1
+            invocation.insert(contentsOf: ["--file", lockPath], at: position)
+        }
+        child.process.arguments = invocation
         child.process.standardOutput = child.stdout
         child.process.standardError = child.stderr
         child.process.standardInput = input ?? Pipe()

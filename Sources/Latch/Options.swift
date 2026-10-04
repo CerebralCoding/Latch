@@ -2,12 +2,10 @@ import Foundation
 
 struct Options {
     enum Command: String {
-        case run, wait, status, schedule, tasks, sensors, service, view, mcp, update, rollback, `guard`, help, version,
-            about
-        case list = "--list"
-        case prioritize = "--run"
-        case clear = "--clear"
-        case stop = "--stop"
+        case run, wait, status, schedule, sensors, service, view, mcp, update, rollback, `guard`, help
+        case list, prioritize, clear, stop
+        case version = "--version"
+        case about = "--about"
     }
 
     enum ServiceAction: String { case run, install, start, stop, status, uninstall }
@@ -30,10 +28,14 @@ struct Options {
 
     init(arguments: [String]) throws {
         guard let first = arguments.first else {
-            throw LatchError("expected a command; see latch --help")
+            command = .help
+            return
         }
         if ["help", "--help", "-h"].contains(first) {
             command = .help
+            if first != "help", arguments.count != 1 {
+                throw LatchError("use latch help COMMAND or latch COMMAND --help")
+            }
             if arguments.count > 1 {
                 guard arguments.count <= 3, let target = Command(rawValue: arguments[1]), target != .help else {
                     throw LatchError("expected a command after help")
@@ -48,12 +50,12 @@ struct Options {
             }
             return
         }
-        if ["version", "--version"].contains(first) {
+        if first == "--version" {
             guard arguments.count == 1 else { throw LatchError("unexpected arguments after version") }
             command = .version
             return
         }
-        if ["about", "--about"].contains(first) {
+        if first == "--about" {
             guard arguments.count == 1 else { throw LatchError("unexpected arguments after about") }
             command = .about
             return
@@ -66,54 +68,102 @@ struct Options {
             requirements.temperatureGuard = TemperatureGuard()
         }
         var index = 1
+        if command == .service {
+            if arguments.count > 1, ["--help", "-h"].contains(arguments[1]) {
+                guard arguments.count == 2 else { throw LatchError("unexpected arguments after service help") }
+                self.command = .help
+                helpCommand = .service
+                return
+            }
+            guard arguments.count > 1, let action = ServiceAction(rawValue: arguments[1]) else {
+                throw LatchError(
+                    "service requires run, install, start, stop, status, or uninstall; see latch service --help")
+            }
+            serviceAction = action
+            index = 2
+        }
+        let valueOptions: Set<String> = [
+            "--file", "--timeout", "--name", "--mode", "--cpu", "--memory-mib",
+            "--max-cpu-temp", "--max-gpu-temp", "--cooldown",
+        ]
         var seen: Set<String> = []
+        var operandsOnly = false
         while index < arguments.count {
-            let argument = arguments[index]
+            let raw = arguments[index]
             index += 1
-            if argument != "--", !seen.insert(argument).inserted {
+            if !operandsOnly, raw == "--" {
+                if command == .run || command == .schedule {
+                    childArguments = Array(arguments[index...])
+                    break
+                }
+                operandsOnly = true
+                continue
+            }
+            if operandsOnly || !raw.hasPrefix("-") {
+                if command == .run || command == .schedule {
+                    throw LatchError("\(command.rawValue) requires -- before the command")
+                }
+                guard command == .prioritize, jobID == nil, let id = UUID(uuidString: raw) else {
+                    throw LatchError("unexpected operand '\(raw)'; see latch \(command.rawValue) --help")
+                }
+                jobID = id.uuidString
+                continue
+            }
+            let parts = raw.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let argument = String(parts[0])
+            let inlineValue = parts.count == 2 ? String(parts[1]) : nil
+            if inlineValue != nil, !valueOptions.contains(argument) {
+                throw LatchError("option '\(argument)' does not accept a value")
+            }
+            if !seen.insert(argument).inserted {
                 throw LatchError("duplicate option '\(argument)'")
             }
+            func optionValue() throws -> String {
+                if let inlineValue { return inlineValue }
+                guard index < arguments.count, !arguments[index].hasPrefix("--"), arguments[index] != "-h" else {
+                    throw LatchError(
+                        "\(argument) requires a value; use \(argument)=VALUE for a value beginning with '-'")
+                }
+                let result = arguments[index]
+                index += 1
+                return result
+            }
             switch argument {
-            case let id where command == .prioritize && UUID(uuidString: id) != nil:
-                guard jobID == nil else { throw LatchError("--run accepts one job ID") }
-                jobID = UUID(uuidString: id)!.uuidString
-            case let action where command == .service && ServiceAction(rawValue: action) != nil:
-                guard serviceAction == nil else { throw LatchError("service accepts one action") }
-                serviceAction = ServiceAction(rawValue: action)
             case "--help", "-h":
                 helpCommand = command
                 helpServiceAction = serviceAction
                 self.command = .help
                 return
             case "--verbose", "--json":
-                guard [.view, .tasks, .sensors, .list, .service].contains(command) else {
+                guard [.view, .sensors, .list, .service].contains(command) else {
                     throw LatchError("\(argument) is only valid for diagnostic commands")
                 }
                 if argument == "--verbose" { verbose = true } else { json = true }
             case "--file":
-                guard ![.sensors, .update, .rollback].contains(command), file == nil, index < arguments.count,
-                    !arguments[index].isEmpty
+                if command == .service, let action = serviceAction, [.start, .stop, .uninstall].contains(action) {
+                    throw LatchError("service \(action.rawValue) uses the installed configuration; --file is not valid")
+                }
+                let path = try optionValue()
+                guard ![.sensors, .update, .rollback].contains(command), file == nil, !path.isEmpty
                 else {
                     throw LatchError("--file requires one nonempty path")
                 }
-                file = arguments[index]
-                index += 1
+                file = path
             case "--shared":
                 guard command == .run, !shared else {
                     throw LatchError("--shared may be specified once for run")
                 }
                 shared = true
             case "--timeout":
+                let text = try optionValue()
                 guard [.run, .wait, .schedule, .guard, .update, .rollback].contains(command), timeout == nil,
-                    index < arguments.count,
-                    let value = Double(arguments[index]), value.isFinite,
+                    let value = Double(text), value.isFinite,
                     value >= 0, value <= Double(Int32.max)
                 else {
                     throw LatchError(
                         "--timeout requires seconds between 0 and \(Int32.max); cannot combine with --no-wait")
                 }
                 timeout = value
-                index += 1
             case "--restart-service":
                 guard [.update, .rollback].contains(command) else {
                     throw LatchError("--restart-service is only valid for update or rollback")
@@ -125,11 +175,10 @@ struct Options {
                 }
                 timeout = 0
             case "--name", "--mode", "--cpu", "--memory-mib":
-                guard [.schedule, .guard].contains(command), index < arguments.count else {
+                guard [.schedule, .guard].contains(command) else {
                     throw LatchError("\(argument) requires a value and is only valid for schedule or guard")
                 }
-                let value = arguments[index]
-                index += 1
+                let value = try optionValue()
                 switch argument {
                 case "--name":
                     guard !value.isEmpty, value.count <= 128 else {
@@ -165,12 +214,11 @@ struct Options {
                 }
                 standalone = true
             case "--max-cpu-temp", "--max-gpu-temp", "--cooldown":
-                guard [.schedule, .guard].contains(command), index < arguments.count,
-                    let value = Double(arguments[index]), value.isFinite
+                let text = try optionValue()
+                guard [.schedule, .guard].contains(command), let value = Double(text), value.isFinite
                 else {
                     throw LatchError("\(argument) requires a finite number for schedule or guard")
                 }
-                index += 1
                 if argument == "--max-cpu-temp" {
                     requirements.temperatureGuard?.maxCPU = value
                 }
@@ -180,28 +228,19 @@ struct Options {
                 if argument == "--cooldown" {
                     requirements.temperatureGuard?.cooldown = value
                 }
-            case "--":
-                guard command == .run || command == .schedule else {
-                    throw LatchError("only run and schedule accept a command")
-                }
-                childArguments = Array(arguments[index...])
-                index = arguments.count
             default:
-                throw LatchError("unexpected argument '\(argument)'; use -- before the command")
+                throw LatchError("unknown option '\(argument)'; see latch \(command.rawValue) --help")
             }
         }
         if command == .run || command == .schedule, childArguments.isEmpty || childArguments[0].isEmpty {
             throw LatchError("\(command.rawValue) requires -- followed by a command")
-        }
-        if command == .service, serviceAction == nil {
-            throw LatchError("service requires run, install, start, stop, status, or uninstall")
         }
         if command == .service, verbose || json, serviceAction != .status {
             throw LatchError("--verbose and --json are only valid for service status")
         }
         if verbose && json { throw LatchError("choose --verbose or --json, not both") }
         if command == .prioritize, jobID == nil {
-            throw LatchError("--run requires a queued job ID from --list")
+            throw LatchError("prioritize requires one queued job ID from latch list")
         }
         if command == .run {
             requirements.mode = shared ? .batch : .isolated

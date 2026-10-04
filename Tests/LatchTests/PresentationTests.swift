@@ -23,7 +23,7 @@ private func presentationView(_ state: SchedulerState, now: Double = 10, running
 }
 
 @Test func `diagnostic flags and focused help preserve literal child arguments`() throws {
-    for command in ["view", "tasks", "--list", "sensors"] {
+    for command in ["view", "list", "sensors"] {
         #expect(try Options(arguments: [command, "--verbose"]).verbose)
         #expect(try Options(arguments: [command, "--json"]).json)
         #expect(throws: LatchError.self) { try Options(arguments: [command, "--json", "--verbose"]) }
@@ -76,7 +76,7 @@ private func presentationView(_ state: SchedulerState, now: Double = 10, running
     let statusJSON = try fixture.launch(["service", "status", "--json"])
     #expect(try fixture.finish(statusJSON) == 69)
     #expect(try JSONDecoder().decode(MCPValue.self, from: Data(statusJSON.output.utf8))["running"] == false)
-    let list = try fixture.launch(["--list", "--json"])
+    let list = try fixture.launch(["list", "--json"])
     #expect(try fixture.finish(list) == 0)
     #expect(list.output.trimmingCharacters(in: .whitespacesAndNewlines) == "[]")
 }

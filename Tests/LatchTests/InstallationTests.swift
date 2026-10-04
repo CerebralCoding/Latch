@@ -125,7 +125,7 @@ private final class InstallationFixture {
 
 @Test func `version query needs no queue or service`() throws {
     #expect(try Options(arguments: ["--version"]).command == .version)
-    #expect(throws: LatchError.self) { try Options(arguments: ["version", "--file", "/queue"]) }
+    #expect(throws: LatchError.self) { try Options(arguments: ["--version", "--file", "/queue"]) }
     let fixture = try Fixture()
     let child = try fixture.launch(["--version"], includeFile: false)
     #expect(try fixture.finish(child) == 0)

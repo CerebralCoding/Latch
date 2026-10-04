@@ -181,20 +181,22 @@ Request progress notifications with `_meta.progressToken`. Notifications report 
 
 ## Human commands
 
+Actions are subcommands; options modify the selected command. Use `--help` (or `-h`), `--version`, and `--about` for information. Running `latch` without arguments shows help. Option values accept both `--file PATH` and `--file=PATH`; use the equals form for values beginning with `--`.
+
 ```sh
 latch --about
 latch view
 latch view --verbose
 latch view --json
-latch --list
-latch --run JOB_ID
-latch --clear
-latch --stop
+latch list
+latch prioritize JOB_ID
+latch clear
+latch stop
 ```
 
-`--about` prints the version, author, copyright, license, contact and sponsorship information without contacting the service. `view` gives a short service, queue and admission summary. `--verbose` expands sensors, thresholds, reservations and paths; `--json` emits structured data. `tasks` and `--list` show up to ten outstanding jobs, with running work first, full copyable IDs, classification and elapsed time. Use `--verbose` for all jobs. Completed history is available through MCP.
+`--about` prints the version, author, copyright, license, contact and sponsorship information without contacting the service. `view` gives a short service, queue and admission summary. `--verbose` expands sensors, thresholds, reservations and paths; `--json` emits structured data. `list` shows up to ten outstanding jobs, with running work first, full copyable IDs, classification and elapsed time. Use `--verbose` for all jobs. Completed history is available through MCP.
 
-`--run JOB_ID` prioritizes an existing queued ticket. It never launches a new command, preempts running work or bypasses guards. `--clear` cancels never-started jobs; running work and started checkpoints, including parked iterations, are preserved. `--stop` cancels all outstanding jobs in the selected queue, across scopes, including running CLI/MCP work and parked checkpoints. Both include `latch run` jobs. Active workloads receive TERM, then KILL after two seconds if needed. Cancellation is asynchronous; completed results remain available. The scheduler stays running and accepts subsequent work. Unmanaged processes are unaffected. These queue overrides are for human operators, not agents.
+`prioritize JOB_ID` prioritizes an existing queued ticket. It never launches a new command, preempts running work or bypasses guards. `clear` cancels never-started jobs; running work and started checkpoints, including parked iterations, are preserved. `stop` cancels all outstanding jobs in the selected queue, across scopes, including running CLI/MCP work and parked checkpoints. Both include `latch run` jobs. Active workloads receive TERM, then KILL after two seconds if needed. Cancellation is asynchronous; completed results remain available. The scheduler stays running and accepts subsequent work. Unmanaged processes are unaffected. These queue overrides are for human operators, not agents.
 
 `latch run -- COMMAND` also uses the running scheduler and shared FIFO queue. It defaults to exclusive non-measurement admission, 1 CPU core, 512 MiB, CPU <=85°C and GPU <=80°C; `--shared` allows overlap. Use `schedule` for measurements or explicit resource and thermal requirements.
 
@@ -212,7 +214,9 @@ Unlike MCP, the human CLI accepts explicit peak resource requirements and guard 
 
 `run` requires the running scheduler and uses FIFO admission and thermal guards. `wait` and `guard` wait and immediately release, protecting no subsequent work. Use `schedule` for measurements or explicit resource requirements. `status` reports only whether the process lock is free (exit 0) or held (exit 75), not whether a task is eligible for admission.
 
-`view`, `tasks`, `--list`, `sensors` and `service status` accept either `--verbose` or `--json`; redirection never changes the format. `view` uses cached readings. `sensors` actively samples the machine, so use it outside measurements rather than in a polling loop. Use `latch COMMAND --help` or `latch help COMMAND` for focused syntax.
+`view`, `list`, `sensors` and `service status` accept either `--verbose` or `--json`; redirection never changes the format. `view` uses cached readings. `sensors` actively samples the machine, so use it outside measurements rather than in a polling loop. Use `latch COMMAND --help` or `latch help COMMAND` for focused syntax.
+
+Standalone `--` ends Latch's option parsing. `run` and `schedule` require it before the executable and forward everything after it unchanged, including the child command's options: `latch run -- make --jobs=4`. For other commands, arguments after `--` are operands, never options. Service actions precede their options: `latch service status --verbose`. Service `start`, `stop`, and `uninstall` use the installed configuration and do not accept `--file`. `latch stop` cancels workloads; `latch service stop` unloads the scheduler and retains accepted work.
 
 ## Updates and service management
 
@@ -274,7 +278,7 @@ State includes commands, retained output and control receipts, plus environment 
 
 Jobs and retry keys survive disconnects and service outages. Required sensor failures prevent new starts; corrupt state raises an error instead of discarding work. If the scheduler is unavailable, restore the service rather than bypassing coordination. Latch never automatically replays uncertain execution.
 
-CLI `run` and `schedule` preserve command arguments, streams, signals and exit status. Reservations remain held while the supervised process group runs, including descendants. `--stop` can still cancel that work if the foreground Latch process is killed. Never nest an exclusive latch on the same path.
+CLI `run` and `schedule` preserve command arguments, streams, signals and exit status. Reservations remain held while the supervised process group runs, including descendants. `stop` can still cancel that work if the foreground Latch process is killed. Never nest an exclusive latch on the same path.
 
 | Exit code before command execution | Meaning |
 | --- | --- |

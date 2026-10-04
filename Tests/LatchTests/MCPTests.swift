@@ -882,7 +882,7 @@ private func jobID(_ response: MCPValue) throws -> String {
             client.tool("latch_submit", arguments: interactiveSubmission(fixture, mode: "pipe-input", input: "pipe")))
         try admission(scheduler, expectedTasks: 3)
         _ = try outputUntil(client, job: a, contains: "ready")
-        let priority = try fixture.launch(["--run", c])
+        let priority = try fixture.launch(["prioritize", c])
         #expect(try fixture.finish(priority) == 0)
         #expect(try scheduler.snapshot().tasks.filter { $0.state == .queued }.map(\.id) == [c, b])
         #expect(try scheduler.snapshot().tasks.filter { $0.state == .running }.map(\.id) == [a])
@@ -892,7 +892,7 @@ private func jobID(_ response: MCPValue) throws -> String {
                 "structuredContent"]?["succeeded"] == true)
         try admission(scheduler, expectedTasks: 2)
         _ = try outputUntil(client, job: c, contains: "ready")
-        let clear = try fixture.launch(["--clear"])
+        let clear = try fixture.launch(["clear"])
         #expect(try fixture.finish(clear) == 0)
         #expect(clear.output.contains("1 queued job(s)"))
         let cancelled = try client.tool("latch_wait", arguments: ["jobID": .string(b), "timeoutSeconds": 4])["result"]?[

@@ -49,21 +49,21 @@ final class OperatorFixture {
     }
 }
 
-@Test func `operator flags have distinct strict contracts from command execution`() throws {
+@Test func `operator commands have distinct strict contracts from command execution`() throws {
     let id = UUID().uuidString
-    #expect(try Options(arguments: ["--list"]).command == .list)
-    #expect(try Options(arguments: ["--clear"]).command == .clear)
-    #expect(try Options(arguments: ["--stop"]).command == .stop)
-    let options = try Options(arguments: ["--run", id.lowercased(), "--file", "/queue"])
+    #expect(try Options(arguments: ["list"]).command == .list)
+    #expect(try Options(arguments: ["clear"]).command == .clear)
+    #expect(try Options(arguments: ["stop"]).command == .stop)
+    let options = try Options(arguments: ["prioritize", id.lowercased(), "--file", "/queue"])
     #expect(options.command == .prioritize)
     #expect(options.jobID == id)
     #expect(options.file == "/queue")
     #expect(try Options(arguments: ["run", "--", "/usr/bin/true"]).command == .run)
     for arguments in [
-        ["--run"], ["--run", "not-an-id"], ["--run", id, id], ["--list", "--clear"],
-        ["--clear", "--run", id], ["--run", id, "--standalone"], ["--run", id, "--", "/usr/bin/true"],
-        ["--clear", "--timeout", "30"], ["--list", "--shared"], ["--stop", "--clear"],
-        ["--stop", "--timeout", "30"], ["--stop", "--standalone"], ["--stop", "--", "/usr/bin/true"],
+        ["prioritize"], ["prioritize", "not-an-id"], ["prioritize", id, id], ["list", "clear"],
+        ["clear", "prioritize", id], ["prioritize", id, "--standalone"], ["prioritize", id, "--", "/usr/bin/true"],
+        ["clear", "--timeout", "30"], ["list", "--shared"], ["stop", "clear"],
+        ["stop", "--timeout", "30"], ["stop", "--standalone"], ["stop", "--", "/usr/bin/true"],
     ] { #expect(throws: LatchError.self) { try Options(arguments: arguments) } }
 }
 
@@ -141,7 +141,7 @@ final class OperatorFixture {
         state.tasks[2].state = .parked
         state.tasks[2].residentMemoryMiB = 100
     }
-    let stop = try f.fixture.launch(["--stop"])
+    let stop = try f.fixture.launch(["stop"])
     #expect(try f.fixture.finish(stop) == 0)
     #expect(stop.output.contains("3 outstanding job(s)"))
     for id in [running.id, queued.id, parked.id] {
@@ -185,7 +185,7 @@ func `operator stop terminates scheduled CLI process groups including TERM resis
             }
             #expect(info.pbi_status == SSTOP)
         }
-        let stop = try f.fixture.launch(["--stop"])
+        let stop = try f.fixture.launch(["stop"])
         #expect(try f.fixture.finish(stop) == 0)
         #expect(
             try f.fixture.finish(child, timeout: .seconds(10)) == (workloadMode == "descendant" ? SIGKILL : SIGTERM))
@@ -266,7 +266,7 @@ func `operator stop reaches CLI workloads after their foreground supervisor is k
     let b = try f.submit("benchmark")
     let done = try f.submit("done")
     try f.store.publish(done.id, result: ["complete": true, "state": "completed"])
-    let listing = try f.fixture.launch(["--list"])
+    let listing = try f.fixture.launch(["list"])
     #expect(try f.fixture.finish(listing) == 0)
     let text = listing.output
     #expect(text.contains(a.id))
@@ -276,10 +276,10 @@ func `operator stop reaches CLI workloads after their foreground supervisor is k
     #expect(!text.contains(done.id))
     #expect(!text.contains("\u{1B}"))
     #expect(text.split(separator: "\n").count == 3)
-    let run = try f.fixture.launch(["--run", b.id])
+    let run = try f.fixture.launch(["prioritize", b.id])
     #expect(try f.fixture.finish(run) == 0)
     #expect(try f.scheduler.snapshot().tasks.first?.id == b.id)
-    let clear = try f.fixture.launch(["--clear"])
+    let clear = try f.fixture.launch(["clear"])
     #expect(try f.fixture.finish(clear) == 0)
     #expect(clear.output.contains("2 queued job(s)"))
 }
@@ -315,7 +315,7 @@ func `operator stop reaches CLI workloads after their foreground supervisor is k
     try gate.acquire(shared: false, timeout: 0)
 }
 
-@Test(arguments: [false, true], ["--clear", "--stop"])
+@Test(arguments: [false, true], ["clear", "stop"])
 func `operator cancellation wakes queued CLI clients without starting their commands`(
     standalone: Bool, operation: String
 ) throws {

@@ -169,7 +169,7 @@ enum HumanOutput {
             lines += ["", "Work"]
             lines += ordered.prefix(6).map { "  \($0.state) · \(safe($0.name)) (\($0.classification))" }
             if ordered.count > 6 { lines.append("\(ordered.count - 6) more jobs · use --verbose for all") }
-            lines.append("Use --list for copyable job IDs.")
+            lines.append("Use latch list for copyable job IDs.")
         }
         if verbose {
             lines += [

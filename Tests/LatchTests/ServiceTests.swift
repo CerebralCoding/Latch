@@ -59,7 +59,7 @@ private func coolSensors(at uptime: Double) -> SensorSnapshot {
     for arguments in [
         ["service"], ["service", "start", "stop"], ["guard", "--cooldown", "nan"],
         ["guard", "--cooldown", "-1"], ["guard", "--max-cpu-temp", "126"],
-        ["guard", "--max-gpu-temp", "0"], ["guard", "--", "true"], ["tasks", "--standalone"],
+        ["guard", "--max-gpu-temp", "0"], ["guard", "--", "true"], ["list", "--standalone"],
     ] {
         #expect(throws: LatchError.self) { try Options(arguments: arguments) }
     }
