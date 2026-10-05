@@ -6,6 +6,7 @@ enum ScheduledCommand {
         let store = try DurableJobs(scheduler: scheduler)
         let watcher = try QueueWatcher(directory: store.directory.path)
         let forwarded: [Int32] = [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGTSTP, SIGCONT]
+        for number in forwarded + [SIGCHLD] { try watcher.watchSignal(number) }
         let previousSignals = forwarded.map { ($0, signal($0, SIG_IGN)) }
         let previousTTOU = signal(SIGTTOU, SIG_IGN)
         let previousCHLD = signal(SIGCHLD, SIG_DFL)
@@ -14,7 +15,6 @@ enum ScheduledCommand {
             signal(SIGTTOU, previousTTOU)
             signal(SIGCHLD, previousCHLD)
         }
-        for number in forwarded + [SIGCHLD] { try watcher.watchSignal(number) }
         let group = try CommandGuardian.start(scheduler: scheduler, reservation: reservation)
         var guardianFinished = false
         defer { if !guardianFinished { CommandGuardian.finish(group) } }

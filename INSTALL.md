@@ -11,7 +11,7 @@ Follow these instructions when the user asks you to install and configure Latch,
 3. For a new installation, download the version-pinned installer from the official release. Run these commands separately in the current working directory:
 
    ```sh
-   /usr/bin/curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.18.0/install.sh --output latch-install.sh
+   /usr/bin/curl --fail --location --proto '=https' --proto-redir '=https' https://github.com/CerebralCoding/Latch/releases/download/v0.19.0/install.sh --output latch-install.sh
    /bin/sh latch-install.sh
    ```
 
