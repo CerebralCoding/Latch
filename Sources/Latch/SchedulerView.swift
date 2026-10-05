@@ -121,8 +121,22 @@ struct SchedulerView: Encodable {
                 }
             return Task(
                 task: task, queuePosition: position, blockedBy: blocked,
-                blockerDetail: Self.detail(blocked, task: task, state: state),
+                blockerDetail: Self.detail(blocked, task: task, state: state, now: now),
                 cooldownRemainingSeconds: remaining)
+        }
+        if let head = tasks.first(where: { $0.task.state == .queued }) {
+            for index in tasks.indices where tasks[index].blockedBy == "waiting for earlier queued tasks" {
+                tasks[index].blockerDetail =
+                    "FIFO: earlier \(JobSummary.classification(head.task.requirements)) job \(head.task.name) (\(head.task.id)) is next. "
+                    + (head.blockerDetail ?? "Eligible at this snapshot; admission is not reserved")
+            }
+        }
+        for index in tasks.indices where tasks[index].task.state == .queued {
+            let elapsed = max(0, now - tasks[index].task.queuedUptime)
+            if elapsed >= 60, let detail = tasks[index].blockerDetail {
+                tasks[index].blockerDetail =
+                    "\(detail). Queue age \(HumanOutput.duration(elapsed)); this is the current blocker, not the cause of the entire wait"
+            }
         }
         jobs = tasks.map { JobSummary(task: $0, record: records[$0.task.id], observedAt: observedAt) }
         let taskIDs = Set(tasks.map { $0.task.id })
@@ -131,13 +145,46 @@ struct SchedulerView: Encodable {
             .map { JobSummary(record: $0, observedAt: observedAt) }
     }
 
-    private static func detail(_ reason: String?, task: ScheduledTask, state: SchedulerState) -> String? {
-        guard let reason, let sensors = state.sensors else { return reason }
+    func admissionProgress(for id: String) -> (message: String, identity: String)? {
+        guard let entry = tasks.first(where: { $0.task.id == id && $0.task.state == .queued }),
+            jobs.first(where: { $0.jobID == id })?.state != "cancelling"
+        else { return nil }
+        let head = tasks.first { $0.task.state == .queued }
+        let runningIDs = tasks.filter { $0.task.state == .running }.map { $0.task.id }.sorted()
+        let identity = [entry.blockedBy ?? "eligible", head?.task.id ?? "", head?.blockedBy ?? ""] + runningIDs
+        return (
+            entry.blockerDetail ?? "Eligible at this snapshot; admission is not reserved",
+            identity.joined(separator: "|")
+        )
+    }
+
+    private static func detail(_ reason: String?, task: ScheduledTask, state: SchedulerState, now: Double) -> String? {
+        guard let reason else { return nil }
+        if reason == "isolated task is running" || reason == "waiting for running tasks to drain" {
+            let running = state.tasks.filter { $0.state == .running }
+            let names = running.prefix(3).map { "\($0.name) (\($0.id))" }.joined(separator: "; ")
+            let extra = running.count > 3 ? "; and \(running.count - 3) more" : ""
+            return
+                "Waiting for running work: \(names)\(extra). Running jobs finish without preemption or a runtime limit"
+        }
+        guard let sensors = state.sensors else { return reason }
         let limits = QuietLimits(baseline: state.idleBaseline)
         switch reason {
         case "waiting for a quiet window: background CPU load":
+            func precise(_ value: Double) -> String {
+                String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), value)
+            }
+            let cores = Double(sensors.cpuCores)
+            let baseline = state.idleBaseline.map { precise($0.cpuActive * 100) + "%" } ?? "not calibrated"
             return
-                "CPU activity \(HumanOutput.percent(sensors.cpuActive)); requires ≤\(HumanOutput.percent(limits.cpuActive))"
+                "CPU activity \(precise(sensors.cpuActive * 100))%; requires ≤\(precise(limits.cpuActive * 100))% "
+                + "(idle baseline \(baseline), excess \(precise(max(0, sensors.cpuActive - limits.cpuActive) * 100)) percentage points). "
+                + "Unweighted busy-core equivalents \(precise(sensors.cpuActive * cores)) / limit \(precise(limits.cpuActive * cores)) across \(sensors.cpuCores) cores. "
+                + "Measurement quiet limits do not relax with waiting; no process attribution is available"
+        case "waiting for a quiet CPU/GPU/ANE/disk window":
+            let elapsed = state.quietSince.map { max(0, min(now, sensors.uptime) - $0) } ?? 0
+            return
+                "Measurement activity is below the quiet limits; observed quiet interval \(HumanOutput.duration(elapsed)) / \(HumanOutput.duration(SchedulingPolicy.quietPeriod)). Excess activity or a sampling gap restarts this interval"
         case "waiting for a quiet window: background single-core CPU load":
             return
                 "Busiest core \(HumanOutput.percent(sensors.busiestCore)); requires ≤\(HumanOutput.percent(limits.busiestCore))"

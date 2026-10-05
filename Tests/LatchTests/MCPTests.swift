@@ -69,7 +69,7 @@ private final class MCPClient {
         try message { $0["method"] == .string(method) && (token == nil || $0["params"]?["progressToken"] == token) }
     }
 
-    private func message(timeout: Double = 6, matching: (MCPValue) -> Bool) throws -> MCPValue {
+    fileprivate func message(timeout: Double = 6, matching: (MCPValue) -> Bool) throws -> MCPValue {
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         while ProcessInfo.processInfo.systemUptime < deadline {
             if let index = received.firstIndex(where: matching) {
@@ -415,7 +415,8 @@ func `parked checkpoints survive reconnect and handle cancellation or supervisor
             ],
         ])
         let queued = try client.notification("notifications/progress", token: 42)
-        #expect(queued["params"]?["message"] == "queued")
+        #expect(queued["params"]?["message"]?.string?.hasPrefix(MCPTools.pendingGuidance) == true)
+        #expect(queued["params"]?["message"]?.string?.contains("Current status: queued") == true)
         #expect(queued["params"]?["progress"] == 1)
         #expect(queued["params"]?["total"] == nil)
         #expect(try client.request("ping")["result"] == [:])
@@ -516,9 +517,12 @@ func `MCP task result blocks until completion and retains the final result`(mode
             "jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "cancelled-wait"],
         ])
         try admission(scheduler)
-        let running = try client.notification("notifications/tasks/status")
+        let running = try client.message {
+            $0["method"] == "notifications/tasks/status"
+                && $0["params"]?["statusMessage"]?.string?.hasSuffix("Current status: running") == true
+        }
         #expect(running["params"]?["status"] == "working")
-        #expect(running["params"]?["statusMessage"] == "running")
+        #expect(running["params"]?["statusMessage"]?.string?.hasPrefix(MCPTools.pendingGuidance) == true)
         let deadline = ProcessInfo.processInfo.systemUptime + 4
         while !FileManager.default.fileExists(atPath: marker.path), ProcessInfo.processInfo.systemUptime < deadline {
             Thread.sleep(forTimeInterval: 0.01)
@@ -531,6 +535,56 @@ func `MCP task result blocks until completion and retains the final result`(mode
         #expect(result["result"]?["structuredContent"]?["complete"] == true)
         #expect(try other.request("tasks/result", params: ["taskId": .string(id)])["result"] == result["result"])
         #expect(try client.request("tasks/cancel", params: ["taskId": .string(id)])["error"]?["code"] == -32602)
+    }
+}
+
+@Test func `MCP pending waits explain FIFO blockers across reconnects`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        var firstArguments = submission(fixture).object!
+        firstArguments["name"] = "latency check"
+        firstArguments["measurement"] = true
+        let first = try jobID(client.tool("latch_submit", arguments: .object(firstArguments)))
+        var secondArguments = submission(fixture).object!
+        secondArguments["name"] = "correctness check"
+        secondArguments["classification"] = "ordinary"
+        let second = try jobID(client.tool("latch_submit", arguments: .object(secondArguments)))
+        let now = ProcessInfo.processInfo.systemUptime
+        try scheduler.transaction { state in
+            state.sensors = SensorSnapshot(
+                sampledAt: Date(), uptime: now, cpuCores: ProcessInfo.processInfo.activeProcessorCount,
+                cpuActive: 0.2, busiestCore: 0.3, gpuActive: 0, aneWatts: 0,
+                memoryAvailableMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
+                memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
+                memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
+                unavailable: [], cpuTemperature: 40, gpuTemperature: 38)
+            for index in state.tasks.indices { state.tasks[index].coolSince = now - 30 }
+        }
+        let pending = try client.tool("latch_wait", arguments: ["jobID": .string(second), "timeoutSeconds": 0])[
+            "result"]?["structuredContent"]
+        #expect(pending?["complete"] == false)
+        #expect(
+            pending?["progressMessage"]?.string?.contains("FIFO: earlier measurement job latency check (\(first))")
+                == true)
+        #expect(pending?["progressMessage"]?.string?.contains("CPU activity 20.00%") == true)
+        try client.input.fileHandleForWriting.close()
+        #expect(try fixture.finish(client.child) == 0)
+        let reconnected = try MCPClient(fixture: fixture)
+        let recovered = try reconnected.tool("latch_wait", arguments: ["jobID": .string(second), "timeoutSeconds": 0])[
+            "result"]?["structuredContent"]
+        #expect(recovered?["progressMessage"]?.string?.contains(first) == true)
+        #expect(recovered?["complete"] == false)
+        for id in [second, first] {
+            _ = try reconnected.tool("latch_cancel", arguments: ["jobID": .string(id)])
+            let final = try reconnected.tool("latch_wait", arguments: ["jobID": .string(id), "timeoutSeconds": 4])[
+                "result"]?["structuredContent"]
+            #expect(final?["complete"] == true)
+            #expect(final?["state"] == "cancelled")
+            #expect(final?["progressMessage"]?.string?.contains("FIFO:") != true)
+        }
     }
 }
 
@@ -569,7 +623,9 @@ func `MCP task result blocks until completion and retains the final result`(mode
                 "name": "latch_wait", "arguments": ["jobID": .string(id)], "_meta": ["progressToken": "waiting"],
             ],
         ])
-        #expect(try client.notification("notifications/progress", token: "waiting")["params"]?["message"] == "queued")
+        #expect(
+            try client.notification("notifications/progress", token: "waiting")["params"]?["message"]?.string?
+                .hasPrefix(MCPTools.pendingGuidance) == true)
         #expect(
             try client.request(
                 "tools/call",

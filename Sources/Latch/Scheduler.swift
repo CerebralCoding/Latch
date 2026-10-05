@@ -20,6 +20,7 @@ final class Scheduler {
     let path: String
     let directory: URL
     private let collect: () throws -> SensorSnapshot
+    private var coldHistory = ColdHistory()
     private var cachedState: (identity: FileIdentity, state: SchedulerState, unfinishedJobs: Set<String>)?
 
     init(path: String, collect: @escaping () throws -> SensorSnapshot = NativeSensors.sample) throws {
@@ -165,26 +166,37 @@ final class Scheduler {
         try? FileManager.default.removeItem(atPath: leasePath(id))
     }
 
+    func observeActivity(_ state: SchedulerState) {
+        if state.tasks.contains(where: { $0.state != .queued || $0.startedAt != nil || $0.residentMemoryMiB != nil }) {
+            coldHistory = ColdHistory()
+        }
+    }
+
     @discardableResult
-    func refreshSensors() throws -> Bool {
+    func refreshSensors(minimumInterval: Double = SchedulingPolicy.sampleInterval) throws -> Bool {
         let collector = try FileLatch(path: directory.appendingPathComponent("sensors.lock").path)
         do { try collector.acquire(shared: false, timeout: 0) } catch let error as LatchError where error.exitCode == 75
         { return true }
         return try withExtendedLifetime(collector) {
             let gate = try FileLatch(path: path)
             do { try gate.acquire(shared: true, timeout: 0) } catch let error as LatchError where error.exitCode == 75 {
+                coldHistory = ColdHistory()
                 return false
             }
             return try withExtendedLifetime(gate) {
                 let state = try snapshot()
                 let now = ProcessInfo.processInfo.systemUptime
-                if let last = state.lastSensorAttempt, now >= last, now - last < SchedulingPolicy.sampleInterval {
+                if let last = state.lastSensorAttempt, now >= last, now - last < minimumInterval {
                     return true
                 }
                 do {
                     let sample = try collect()
-                    try transaction { $0.record(sample) }
+                    try transaction {
+                        $0.record(sample)
+                        coldHistory.observe(sample, state: &$0)
+                    }
                 } catch {
+                    coldHistory = ColdHistory()
                     try transaction {
                         $0.sensorError = String(describing: error)
                         $0.lastSensorAttempt = ProcessInfo.processInfo.systemUptime

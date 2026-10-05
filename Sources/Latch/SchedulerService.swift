@@ -51,6 +51,7 @@ enum SchedulerService {
             let executable = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
                 .resolvingSymlinksInPath()
             let watcher = try QueueWatcher(directory: scheduler.directory.path)
+            var cadence = SensorCadence()
             try scheduler.transaction {
                 $0.resetCooldowns()
                 $0.sensors = nil
@@ -64,20 +65,34 @@ enum SchedulerService {
                 while waitpid(-1, nil, WNOHANG) > 0 {}
                 try jobs.recover(executable: executable)
                 let state = try scheduler.snapshot()
-                if state.tasks.isEmpty {
-                    try scheduler.refreshSensors()
-                } else if let next = state.tasks.first(where: { $0.state == .queued }),
-                    !state.tasks.contains(where: { $0.state == .running && $0.requirements.mode == .isolated }),
-                    !(next.requirements.mode == .isolated && state.tasks.contains(where: { $0.state == .running }))
-                {
-                    try scheduler.refreshSensors()
+                scheduler.observeActivity(state)
+                let running = state.tasks.filter { $0.state == .running }
+                let next = state.tasks.first { $0.state == .queued }
+                let exclusive = running.contains { $0.requirements.mode == .isolated }
+                let draining = next?.requirements.mode == .isolated && !running.isEmpty
+                let sampling = state.tasks.isEmpty || (!exclusive && !draining && next != nil)
+                let interval =
+                    state.tasks.isEmpty ? SchedulingPolicy.idleSampleInterval : SchedulingPolicy.sampleInterval
+                if sampling, cadence.delay(now: ProcessInfo.processInfo.systemUptime, interval: interval) == 0 {
+                    cadence.startedAt = ProcessInfo.processInfo.systemUptime
+                    try scheduler.refreshSensors(minimumInterval: 0)
                 }
                 watcher.wait(
-                    seconds: state.tasks.isEmpty
-                        ? SchedulingPolicy.idleSampleInterval : SchedulingPolicy.sampleInterval,
+                    seconds: sampling
+                        ? max(0.05, cadence.delay(now: ProcessInfo.processInfo.systemUptime, interval: interval))
+                        : interval,
                     pids: state.tasks.map(\.pid))
             }
         }
+    }
+}
+
+struct SensorCadence {
+    var startedAt: Double?
+
+    func delay(now: Double, interval: Double) -> Double {
+        guard let startedAt, now >= startedAt else { return 0 }
+        return max(0, startedAt + interval - now)
     }
 }
 

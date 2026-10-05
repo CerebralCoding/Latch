@@ -1,6 +1,14 @@
 import Foundation
 
 enum MCPTools {
+    static let classificationGuidance = """
+        Would concurrent unrelated work invalidate the result, or merely make it finish later? Explicitly choose ordinary with measurement=false when it would merely finish later: independent builds, CPU/GPU correctness tests, numerical parity, and model-quality evaluations can overlap. Using Metal, running inference, long duration, or serializing tests inside one process does not require machine-wide exclusivity. Choose sensitive only for a concrete conflict requiring exclusive execution, such as shared mutable fixtures or a fixed port; serialize your own conflicting operations without reserving the whole Mac when possible. Performance results invalidated by overlap require measurement=true. Latch owns capacity and thermal decisions; do not request sensitive just because work is expensive. Omitted classification defaults conservatively to sensitive. Measurements and checkpoints always force exclusive admission with cooling and a quiet window; sensitive non-measurement work has thermal guards without a measurement cooldown or quiet window.
+        """
+
+    static let pendingGuidance = """
+        Accepted. Keep waiting on this job ID or its existing MCP task. Normal queueing, cooling, and execution need no intervention. Do not resubmit, cancel, reclassify, or bypass scheduling solely because a wait is pending.
+        """
+
     static let workloadGuidance = """
         Submit work with a defined completion condition: builds, single-run tests, finite benchmarks/profiling, or inference/data processing that exits when done. Long but finite jobs are supported without a runtime limit.
         Do not submit persistent services or sessions: npm run dev, vite, next dev, preview/HTTP servers, watch modes, REPLs, daemons, or persistent model servers. Select a build or single-run mode instead. A persistent job blocks later FIFO work and service updates indefinitely.
@@ -12,12 +20,14 @@ enum MCPTools {
         Prefer latch_execute for authorized foreground tasks: one call waits until completion, with optional MCP task execution for capable hosts.
         \(workloadGuidance)
         Latch owns resource reservations, isolation, temperature guards, and scheduling. Reservations are advisory, not OS-enforced limits.
-        Agents must not calculate budgets, add worker flags just for Latch, or inspect the queue to plan admission. Set measurement=true for benchmarks, profiling, and performance comparisons.
-        Classify independent non-sensitive work with classification=ordinary to allow jobs to overlap. Latch scales admission with the machine's core count, available memory, pressure, temperatures, and fresh sensors after each start; there is no fixed parallel-job cap. Sensitive work (the default) is exclusive; measurement=true and checkpoints=true always require exclusive cooling and quiet-window admission. Latch chooses budgets, preserves command arguments, and never recognizes tools or injects worker limits.
+        Agents must not calculate budgets, add worker flags just for Latch, or inspect the queue to plan admission.
+        Set measurement=true only when evaluating machine performance: latency, throughput, resource consumption, or profiling. Correctness tests, accuracy scores, loss metrics, and model-quality comparisons use measurement=false, even when called benchmarks or evaluations. Recording incidental elapsed time does not make a correctness check a performance measurement.
+        \(classificationGuidance)
+        Latch scales ordinary concurrency with the machine's core count, available memory, pressure, temperatures, and fresh sensors after each start; there is no fixed parallel-job cap. Latch chooses budgets, preserves command arguments, and never recognizes tools or injects worker limits.
         Admission is FIFO: an older sensitive or measurement ticket blocks newer ordinary work while existing jobs drain. A human operator may explicitly reorder or clear queued work through CLI controls; agents must not use those overrides.
         Set checkpoints=true only for an executable implementing Latch's checkpoint protocol; Swift executables can use LatchSession. The executable, not the agent, exchanges iteration permits. Latch owns cooling and FIFO reentry; parked processes retain memory. No runtime limit or automatic replay.
         Keep the full workload in the submitted command. latch_view is optional diagnostics, not a required planning step.
-        For hosts with short request timeouts, use latch_submit then latch_wait on the returned jobID; repeat only when pending.
+        For hosts with short request timeouts, use latch_submit then latch_wait on the returned jobID; repeat only when pending. A pending response ends a wait request, not the job, and is not a failure or an invitation to replan. Use host-native waiting on an existing MCP task when available. Do not poll diagnostics or alter work to shorten a normal wait. Continue useful independent work when available. Report meaningful developments, actionable failures, or requested status; do not repeatedly narrate unchanged waits. Pending progressMessage explains the current admission blocker, including earlier work holding FIFO order. Queue age is total time in the current queue entry, not time attributed to that blocker. Changing sensor values or elapsed time alone does not trigger progress notifications.
         Each new submission or control needs a stable retry key. Use the Latch-issued prefix from tool discovery plus a distinct operation suffix; no UUID-generation command is needed. Hosts can instead inject com.cerebralcoding.latch/retryKey in tools/call _meta. Reuse the complete original key for identical retries, including after reconnecting; never replace an uncertain key or derive it solely from command text.
         Accepted jobs survive disconnects and wait timeouts. Cancel jobs explicitly with latch_cancel; cancelling an MCP request only stops waiting.
         After an update, ask the user or host to reconnect the configured Latch MCP server; do not keep calling a retired endpoint. Connection errors explain the reason and recovery action. If the host cannot reconnect automatically, stop dependent work and ask the user to reconnect. Never bypass Latch or install, update, or restart it without an explicit operator request. Recover accepted jobs and controls by their original IDs; uncertain retries must use identical arguments and the complete original requestKey, even when the new connection supplies a different prefix. A connection failure does not cancel work.
@@ -71,12 +81,11 @@ enum MCPTools {
                 "measurement": [
                     "type": "boolean", "default": false,
                     "description":
-                        "True when the task measures performance, benchmarks, or profiles. Latch selects stricter isolation and cooldowns.",
+                        "True only for machine-performance measurements: latency, throughput, resource consumption, or profiling. Correctness, accuracy, loss, and model-quality evaluations use false, even if called benchmarks. Incidental timing is not a performance measurement. True forces sensitive exclusive execution, cooling, and a quiet window regardless of classification.",
                 ],
                 "classification": [
                     "type": "string", "enum": ["ordinary", "sensitive"], "default": "sensitive",
-                    "description":
-                        "ordinary opts non-sensitive work into bounded parallel scheduling; sensitive is exclusive. Measurements and checkpoints are always exclusive regardless of classification. Latch owns all resource planning.",
+                    "description": .string(classificationGuidance),
                 ],
                 "checkpoints": [
                     "type": "boolean", "default": false,
@@ -94,7 +103,7 @@ enum MCPTools {
         tool(
             "latch_wait",
             description:
-                "Block for a job's completion by jobID, then return status and bounded stdout/stderr. A pending result means keep waiting on this jobID, not resubmitting. Cancelling this MCP request stops only the wait, not the job.",
+                "Block for a job's completion by jobID, then return status and bounded stdout/stderr. A pending response is not a job failure. Keep waiting on the same jobID; normal queueing, cooling, and execution require no intervention. Do not resubmit, cancel, reclassify, bypass scheduling, or poll diagnostics solely because the wait is pending. Report meaningful developments or requested status without repeatedly narrating unchanged waits. Cancelling this MCP request stops only the wait, not the job.",
             properties: [
                 "jobID": ["type": "string"],
                 "timeoutSeconds": ["type": "number", "minimum": 0, "maximum": 600, "default": 25],

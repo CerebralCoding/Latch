@@ -132,7 +132,7 @@ private func presentationView(_ state: SchedulerState, now: Double = 10, running
     request.temperatureGuard = TemperatureGuard(cooldown: 0)
     next.requirements = request
     let busy = presentationView(SchedulerState(tasks: [next], sensors: presentationSensors()))
-    #expect(busy.tasks.first?.blockerDetail?.contains("CPU activity 10.0%; requires ≤") == true)
+    #expect(busy.tasks.first?.blockerDetail?.contains("CPU activity 10.00%; requires ≤") == true)
     var running = next
     running.state = .running
     let paused = presentationView(

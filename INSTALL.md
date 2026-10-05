@@ -49,11 +49,11 @@ Follow MCP initialization instructions and the [usage reference](https://github.
 ### Workloads and submission
 
 - Route finite builds, tests, benchmarks, profiling and inference through Latch MCP. Never queue dev servers, watch modes, REPLs, daemons or persistent model servers. Long finite jobs are supported.
-- Submit the actual foreground executable, literal arguments and an absolute working directory. Mark independent work `ordinary` only when overlap is acceptable; otherwise use `sensitive`. Set `measurement: true` for performance measurements. Latch owns budgets, admission, thermal guards and cooling; agents do not plan them.
+- Submit the actual foreground executable, literal arguments and an absolute working directory. Would concurrent unrelated work invalidate the result, or merely make it finish later? Explicitly choose `ordinary`, `measurement: false` for the latter, including independent builds, CPU/GPU correctness checks, numerical parity, and model-quality evaluations. Using Metal, running inference, long duration, or serializing tests inside one process does not require machine-wide exclusivity. Use `sensitive` only for a concrete conflict requiring exclusive execution; serialize your own conflicting operations without reserving the whole Mac when possible. Set `measurement: true` for machine-performance measurements such as latency, throughput, resource consumption or profiling; it always forces sensitive admission. Names such as “benchmark” and incidental elapsed-time logging do not determine classification. Latch owns budgets, admission, thermal guards and cooling; agents do not plan them.
 
 ### Retry keys and waiting
 
-- Choose a retry key once using the Latch-issued prefix and a distinct operation suffix. Preserve that full key and identical arguments for uncertain retries, including after reconnecting. Do not generate UUIDs or resubmit work because a wait is pending.
+- Choose a retry key once using the Latch-issued prefix and a distinct operation suffix. Preserve that full key and identical arguments for uncertain retries, including after reconnecting. Do not generate UUIDs. A pending wait is not a job failure: keep waiting on the same job ID or existing MCP task. Normal queueing, cooling, and execution need no intervention. Do not resubmit, cancel, reclassify, bypass scheduling, or poll diagnostics merely to shorten a wait. Report meaningful developments, actionable failures, or requested status without repeatedly narrating unchanged waits.
 - With short host timeouts, use `latch_submit`, then `latch_wait` on the same `jobID` until complete.
 
 ### Cancellation and scopes

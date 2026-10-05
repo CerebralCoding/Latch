@@ -130,8 +130,16 @@ Example `latch_submit` arguments (replace the paths and retry-key placeholder):
 }
 ```
 
-- Use `classification: "ordinary"` only when overlapping execution is acceptable, including shared files and devices. Otherwise use `"sensitive"`, the default, for exclusive execution.
-- Set `measurement: true` for benchmarks, profiling and performance comparisons. Measurements always require exclusive admission, cooling and a quiet window, regardless of classification.
+Choose based on what the result depends on:
+
+| Work | Submission | Admission |
+| --- | --- | --- |
+| Correctness tests, accuracy/loss scores, model-quality evaluations, builds with independent files and devices | `classification: "ordinary"`, `measurement: false` | May overlap; ordinary thermal guards |
+| Work requiring exclusive use of shared mutable resources | `classification: "sensitive"`, `measurement: false` | Exclusive; no measurement cooldown or quiet window |
+| Machine-performance measurements: latency, throughput, resource consumption, or profiling | `measurement: true` | Always sensitive: exclusive, cooled, and quiet |
+
+Would concurrent unrelated work invalidate the result, or merely make it finish later? Explicitly choose `ordinary`, `measurement: false` when it would merely finish later. Independent builds, CPU/GPU correctness checks, numerical parity, and model-quality evaluations can overlap. Using Metal, running inference, long duration, and serializing tests inside one process do not require machine-wide exclusivity. Use `sensitive` for a concrete conflict requiring exclusive execution, such as shared mutable fixtures or a fixed port; serialize your own conflicting operations without reserving the whole Mac when possible. Use `measurement: true` when overlap would invalidate a performance result. Names such as “benchmark” and incidental elapsed-time logging do not determine classification. Omitted classification defaults conservatively to `sensitive`. Measurements and checkpoints force sensitive admission even if `ordinary` is supplied.
+
 - With a short host timeout, use `latch_submit`, then `latch_wait` on the returned `jobID`. Waits default to 25 seconds. When `complete` is false, wait on the same ID again; do not resubmit or poll diagnostics.
 - Prefer `latch_execute` when the host supports long requests or MCP tasks. It accepts the same submission arguments and waits for completion.
 
@@ -326,9 +334,13 @@ Ordinary and sensitive MCP jobs require nominal thermal state, normal memory pre
 
 Measurements require CPU/GPU <=50°C for ten seconds and a quiet window based on an adaptive idle baseline with bounded noise allowances. Waiting never relaxes those ceilings. Missing, inaccessible or stale required sensors block admission.
 
+The service can credit recent idle thermal history toward that cooldown when both temperatures remained at least 10°C below the requested limits. History is kept in memory for at most one minute, tolerates at most 17 seconds between idle observations, and is discarded after intervening jobs, heavy CPU/GPU activity, sensor failure, service restart or a sampling gap. It is consumed when work arrives. Fresh sensors and the full quiet window are still required. Active admission sampling targets one second between collection starts, including collection overhead in that interval.
+
 ### Admission diagnostics
 
 Use `latch view --verbose` or MCP `latch_view(verbose: true)` to inspect `idleBaseline`, `quietLimits`, observed sensors and resource-specific blockers. `drainingForTaskID` identifies exclusive work waiting for current jobs to finish. CPU headroom distinguishes ordinary admission from CLI batch admission; capacity alone does not imply eligibility. Cooldown remaining is conditional on continued suitable readings, not a start-time estimate.
+
+Pending MCP results confirm acceptance and direct the agent to keep waiting on the same job ID or existing MCP task. Normal queueing, cooling, and execution need no intervention: do not resubmit, cancel, reclassify, bypass scheduling, or poll diagnostics merely because a wait remains pending. Report meaningful developments, actionable failures, or requested status without repeatedly narrating unchanged waits. The `progressMessage` also explains the current admission blocker; later tickets identify the earlier job holding FIFO order and its blocker. Long-wait explanations show the age of the current queue entry, not time attributed to a single cause. CPU quiet blockers include baseline, limit, excess load, and aggregate busy-core equivalents; these are unweighted activity counts, not performance-core capacity or process attribution. Progress notifications follow blocker changes, not every sensor fluctuation or passing second. These are current observations, not a retained history of wait causes.
 
 ### Sensor sampling
 

@@ -518,10 +518,20 @@ final class MCPServer {
     private func syncJobs() throws {
         let store = try connection.get().store
         try requireCurrentEndpoint()
-        let records: [DurableJobRecord]
-        do { records = try store.records() } catch { throw MCPConnectionFailure.state(error) }
+        let state: SchedulerState
+        do { state = try store.scheduler.snapshot() } catch { throw MCPConnectionFailure.state(error) }
+        let records = state.jobs
+        let view: SchedulerView?
+        if state.tasks.contains(where: { $0.state == .queued }) {
+            view = try SchedulerView(
+                state: state, service: SchedulerService.status(in: store.scheduler.directory),
+                processLatch: SchedulerView.latchState(path: store.scheduler.path),
+                now: ProcessInfo.processInfo.systemUptime)
+        } else {
+            view = nil
+        }
         if records == syncedRecords {
-            for id in activeJobIDs { try jobs[id]?.update(now: ProcessInfo.processInfo.systemUptime) }
+            for id in activeJobIDs { try jobs[id]?.update(now: ProcessInfo.processInfo.systemUptime, view: view) }
             return
         }
         syncedRecords = records
@@ -530,7 +540,7 @@ final class MCPServer {
             guard !record.complete || jobs[record.id] != nil else { continue }
             let job = jobs[record.id] ?? MCPJob(record: record, store: store)
             job.record = record
-            try job.update(now: ProcessInfo.processInfo.systemUptime)
+            try job.update(now: ProcessInfo.processInfo.systemUptime, view: view)
             jobs[record.id] = job
             if record.protocolTask, tasks[record.id] == nil {
                 tasks[record.id] = MCPTask(jobID: record.id, progress: nil, createdAt: record.createdAt)
@@ -672,7 +682,7 @@ final class MCPServer {
     private func reportProgress(_ progress: MCPProgress?, job: MCPJob) throws {
         let result = try job.result(includeOutput: false)
         guard let progress, let state = result["progressMessage"]?.string ?? result["state"]?.string,
-            let params = progress.update(state: state)
+            let params = progress.update(state: state, identity: job.progressIdentity(for: result))
         else { return }
         try notify("notifications/progress", params: params)
     }
@@ -693,7 +703,9 @@ final class MCPServer {
                 let value = try job.result(includeOutput: true)
                 task.result = try resultValue(value: value, isError: value["succeeded"] == false, taskID: task.jobID)
             }
-            if let params = task.progress?.update(state: task.message, taskID: task.jobID) {
+            if let params = task.progress?.update(
+                state: task.message, taskID: task.jobID, identity: task.progressIdentity)
+            {
                 try notify("notifications/progress", params: params)
             }
             if changed {

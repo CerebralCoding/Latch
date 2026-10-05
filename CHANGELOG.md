@@ -2,6 +2,19 @@
 
 Versions before 0.17.0 describe development milestones. Changes made while a version remained unchanged are grouped under that version.
 
+## 0.19.0
+
+Latch 0.19.0 improves admission responsiveness and makes it clearer when agents should share the machine and when they should wait.
+
+- Clarified workload classification across MCP discovery and agent instructions. Independent builds, CPU/GPU correctness checks, numerical parity, and model-quality evaluations should explicitly use ordinary admission. Sensitive work requires a concrete exclusivity need; performance measurements remain exclusive.
+- Pending MCP results now confirm acceptance, explain the current blocker, and direct agents to keep waiting on the same job or MCP task instead of resubmitting, reclassifying, or repeatedly announcing unchanged waits.
+- Long-wait explanations identify running jobs and earlier FIFO tickets. Measurement blockers include CPU baseline, effective limits, excess activity, and quiet-window progress. Queue age is distinguished from time spent on the current blocker.
+- Progress and task-status notifications follow meaningful state or blocker changes rather than every sensor fluctuation or passing second, including after reconnecting.
+- Sensor collection now accounts for collection time when scheduling the next admission sample, reducing avoidable gaps between observations.
+- Measurements can credit recent, sufficiently cold idle history toward cooldowns. History is short-lived and kept in memory; fresh sensors and the full quiet window remain mandatory, and waiting never relaxes admission limits.
+
+Reconnect MCP clients after updating to load the revised guidance. Existing job IDs and retry keys remain valid.
+
 ## 0.18.0
 
 - Standardized human commands as `list`, `prioritize JOB_ID`, `clear`, and `stop`, replacing the previous action flags and duplicate job-listing command.

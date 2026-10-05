@@ -252,6 +252,7 @@ final class MCPJob {
     var record: DurableJobRecord
     private var value: MCPValue
     private var resultIdentity: FileIdentity?
+    private var admissionProgress: (message: String, identity: String)?
     private(set) var lastAccess = ProcessInfo.processInfo.systemUptime
     var complete: Bool {
         record.complete || value["complete"] == true
@@ -273,13 +274,14 @@ final class MCPJob {
         ]
     }
 
-    func update(now _: Double) throws {
+    func update(now _: Double, view: SchedulerView? = nil) throws {
         guard !complete else { return }
         let file = store.file(id, "result.json")
         if let identity = try FileIdentity.read(file.path), identity != resultIdentity {
             value = try JSONDecoder().decode(MCPValue.self, from: Data(contentsOf: file))
             resultIdentity = identity
         }
+        admissionProgress = view?.admissionProgress(for: id)
         if let pid = record.supervisorPID {
             _ = waitpid(pid, nil, WNOHANG)
         }
@@ -300,11 +302,27 @@ final class MCPJob {
             }
         }
         var result = value.object ?? [:]
+        if !complete, let admissionProgress, ["queued", "waiting"].contains(result["state"]?.string ?? "") {
+            let stage = result["progressMessage"]?.string ?? result["state"]?.string ?? "queued"
+            result["progressMessage"] = .string("\(stage): \(admissionProgress.message)")
+        }
+        if !complete {
+            let status = result["progressMessage"]?.string ?? result["state"]?.string ?? "queued"
+            result["progressMessage"] = .string("\(MCPTools.pendingGuidance) Current status: \(status)")
+        }
         if !includeOutput {
             for key in ["stdout", "stderr", "stdoutTruncated", "stderrTruncated"] {
                 result.removeValue(forKey: key)
             }
         }
         return .object(result)
+    }
+
+    func progressIdentity(for result: MCPValue) -> String {
+        let stage = value["progressMessage"]?.string ?? result["state"]?.string ?? "queued"
+        if !complete, let admissionProgress, ["queued", "waiting"].contains(result["state"]?.string ?? "") {
+            return stage + ":" + admissionProgress.identity
+        }
+        return result["progressMessage"]?.string ?? stage
     }
 }

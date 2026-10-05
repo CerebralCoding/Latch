@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 struct BuildIdentity: Codable, Equatable {
-    static let version = "0.18.0"
+    static let version = "0.19.0"
     static let serviceRevision = 1
     var release: String
     var serviceRevision: Int

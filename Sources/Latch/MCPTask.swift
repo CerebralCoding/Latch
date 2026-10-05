@@ -2,16 +2,17 @@ import Foundation
 
 final class MCPProgress {
     let token: MCPValue
-    private var state: String?
+    private var identity: String?
     private var sequence = 0
 
     init(token: MCPValue) {
         self.token = token
     }
 
-    func update(state: String, taskID: String? = nil) -> MCPValue? {
-        guard self.state != state else { return nil }
-        self.state = state
+    func update(state: String, taskID: String? = nil, identity: String? = nil) -> MCPValue? {
+        let identity = identity ?? state
+        guard self.identity != identity else { return nil }
+        self.identity = identity
         sequence += 1
         var params: [String: MCPValue] = [
             "progressToken": token, "progress": .number(Double(sequence)), "message": .string(state),
@@ -29,6 +30,7 @@ final class MCPTask {
     var updatedAt = Date()
     var status = "working"
     var message = "queued"
+    private(set) var progressIdentity = "queued"
     let progress: MCPProgress?
     var result: MCPValue?
     var terminal: Bool {
@@ -48,11 +50,13 @@ final class MCPTask {
             job.complete
             ? (job.cancelAt != nil ? "cancelled" : (result["succeeded"] == true ? "completed" : "failed")) : "working"
         let message = job.complete ? next : (result["progressMessage"]?.string ?? result["state"]?.string ?? next)
-        guard next != status || message != self.message else { return false }
+        let identity = job.complete ? next : job.progressIdentity(for: result)
+        let changed = next != status || identity != progressIdentity
         status = next
         self.message = message
-        updatedAt = job.record.updatedAt
-        return true
+        progressIdentity = identity
+        if changed { updatedAt = Date() }
+        return changed
     }
 
     func value() throws -> MCPValue {
