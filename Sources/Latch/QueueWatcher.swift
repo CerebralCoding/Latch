@@ -49,12 +49,16 @@ final class QueueWatcher {
                 ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD | EV_ONESHOT),
                 fflags: UInt32(NOTE_EXIT), data: 0, udata: nil)
             if kevent(queue, &process, 1, nil, 0, nil) != 0 {
+                watchedPIDs.remove(pid)
                 return nil
             }
         }
         var event = kevent()
         var timeout = timespec(tv_sec: Int(seconds), tv_nsec: Int((seconds - floor(seconds)) * 1_000_000_000))
         let count = kevent(queue, nil, 0, &event, 1, &timeout)
+        if count > 0, event.filter == Int16(EVFILT_PROC) {
+            watchedPIDs.remove(Int32(event.ident))
+        }
         return count > 0 && event.filter == Int16(EVFILT_SIGNAL) ? Int32(event.ident) : nil
     }
 }
