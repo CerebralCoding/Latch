@@ -7,12 +7,12 @@ import Testing
     let command = ["tool", "--name=child", "--help", "--", "", "a b"]
     let options = try Options(
         arguments: [
-            "schedule", "--file=/queue=a=b", "--name=work=a", "--mode=batch", "--cpu=4", "--memory-mib=4096",
+            "schedule", "--file=/queue=a=b", "--name=work=a", "--mode=batch", "--cpu=1", "--memory-mib=4096",
             "--max-cpu-temp=70", "--max-gpu-temp=75", "--cooldown=1", "--timeout=0.25", "--",
         ] + command)
     let separated = try Options(
         arguments: [
-            "schedule", "--file", "/queue=a=b", "--name", "work=a", "--mode", "batch", "--cpu", "4",
+            "schedule", "--file", "/queue=a=b", "--name", "work=a", "--mode", "batch", "--cpu", "1",
             "--memory-mib", "4096", "--max-cpu-temp", "70", "--max-gpu-temp", "75", "--cooldown", "1",
             "--timeout", "0.25", "--",
         ] + command)
