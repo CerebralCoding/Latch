@@ -142,6 +142,6 @@ jobs:
           gh release create "v$RELEASE_VERSION" \
             "$binary" "$binary.sha256" \
             release-artifacts/install.sh release-artifacts/LICENSE \
-            release-artifacts/macmon-LICENSE.txt release-artifacts/notarization.json \
+            release-artifacts/*-LICENSE.txt release-artifacts/notarization.json \
             --verify-tag --title "Latch $RELEASE_VERSION" \
             --notes-file release-artifacts/release-notes.md "${flags[@]}"

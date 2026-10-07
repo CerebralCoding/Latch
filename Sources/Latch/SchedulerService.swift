@@ -66,21 +66,12 @@ enum SchedulerService {
                 try jobs.recover(executable: executable)
                 let state = try scheduler.snapshot()
                 scheduler.observeActivity(state)
-                let running = state.tasks.filter { $0.state == .running }
-                let next = state.tasks.first { $0.state == .queued }
-                let exclusive = running.contains { $0.requirements.mode == .isolated }
-                let draining = next?.requirements.mode == .isolated && !running.isEmpty
-                let sampling = state.tasks.isEmpty || (!exclusive && !draining && next != nil)
-                let interval =
-                    state.tasks.isEmpty ? SchedulingPolicy.idleSampleInterval : SchedulingPolicy.sampleInterval
-                if sampling, cadence.delay(now: ProcessInfo.processInfo.systemUptime, interval: interval) == 0 {
+                if cadence.delay(now: ProcessInfo.processInfo.systemUptime) == 0 {
                     cadence.startedAt = ProcessInfo.processInfo.systemUptime
                     try scheduler.refreshSensors(minimumInterval: 0)
                 }
                 watcher.wait(
-                    seconds: sampling
-                        ? max(0.05, cadence.delay(now: ProcessInfo.processInfo.systemUptime, interval: interval))
-                        : interval,
+                    seconds: max(0.05, cadence.delay(now: ProcessInfo.processInfo.systemUptime)),
                     pids: state.tasks.map(\.pid))
             }
         }
@@ -90,9 +81,9 @@ enum SchedulerService {
 struct SensorCadence {
     var startedAt: Double?
 
-    func delay(now: Double, interval: Double) -> Double {
+    func delay(now: Double) -> Double {
         guard let startedAt, now >= startedAt else { return 0 }
-        return max(0, startedAt + interval - now)
+        return max(0, startedAt + SchedulingPolicy.sampleInterval - now)
     }
 }
 

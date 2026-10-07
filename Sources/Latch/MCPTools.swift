@@ -50,7 +50,7 @@ enum MCPTools {
         tool(
             "latch_view",
             description:
-                "Optional cached diagnostics. Defaults to a compact service/admission snapshot and at most ten outstanding job summaries in FIFO order; completed history is omitted. verbose=true includes full scheduler evidence and all outstanding summaries. Use latch_jobs for paginated outstanding work/history and latch_job for one durable job's details. sensorsFresh describes admission freshness, not sensor health: idle sampling occurs every 15 seconds, and samplingPaused explains intentional pauses. Never samples or reserves resources; not a planning prerequisite.",
+                "Optional cached diagnostics. Defaults to a compact service/admission snapshot and at most ten outstanding job summaries in FIFO order; completed history is omitted. verbose=true includes full scheduler evidence and all outstanding summaries. Use latch_jobs for paginated outstanding work/history and latch_job for one durable job's details. sensorsFresh describes admission freshness, not sensor health: the shared collector samples every second, whether idle or running jobs, including exclusive work. Diagnostics never collect extra samples or reserve resources; not a planning prerequisite.",
             properties: ["verbose": ["type": "boolean", "default": false]], required: [], readOnly: true),
         tool(
             "latch_submit",

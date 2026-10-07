@@ -3,7 +3,7 @@ import Foundation
 struct Options {
     enum Command: String {
         case run, wait, status, schedule, sensors, service, view, mcp, update, rollback, `guard`, help
-        case list, prioritize, clear, stop
+        case list, prioritize, clear, stop, tui
         case version = "--version"
         case about = "--about"
     }
@@ -23,6 +23,7 @@ struct Options {
     var jobID: String?
     var verbose = false
     var json = false
+    var refreshInterval: Double?
     var helpCommand: Command?
     var helpServiceAction: ServiceAction?
 
@@ -84,7 +85,7 @@ struct Options {
         }
         let valueOptions: Set<String> = [
             "--file", "--timeout", "--name", "--mode", "--cpu", "--memory-mib",
-            "--max-cpu-temp", "--max-gpu-temp", "--cooldown",
+            "--max-cpu-temp", "--max-gpu-temp", "--cooldown", "--interval",
         ]
         var seen: Set<String> = []
         var operandsOnly = false
@@ -129,6 +130,12 @@ struct Options {
                 return result
             }
             switch argument {
+            case "--interval":
+                let text = try optionValue()
+                guard command == .tui, let value = Double(text), value.isFinite, (0.5...60).contains(value) else {
+                    throw LatchError("--interval requires 0.5–60 seconds for tui")
+                }
+                refreshInterval = value
             case "--help", "-h":
                 helpCommand = command
                 helpServiceAction = serviceAction

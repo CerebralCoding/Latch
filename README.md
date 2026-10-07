@@ -344,7 +344,7 @@ Pending MCP results confirm acceptance and direct the agent to keep waiting on t
 
 ### Sensor sampling
 
-Sensor sampling pauses during exclusive work and while an exclusive queue head drains running work. An idle service samples every 15 seconds, so stale cached readings can be expected. The view labels sampling pauses, errors and last captured values. Inspection never samples or reserves admission.
+The shared sensor collector samples every second, whether idle or running jobs, including exclusive measurements and draining. Readings collected during running work update diagnostics and the TUI but do not contribute to idle calibration or measurement quiet windows and cooldown credit. Inspection reuses these readings without starting another sampler or reserving admission.
 
 Native GPU/ANE and temperature sensors use private Apple interfaces based on [macmon](https://github.com/vladkens/macmon), and availability can vary by machine or sandbox.
 

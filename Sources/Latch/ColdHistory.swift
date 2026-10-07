@@ -13,13 +13,15 @@ struct ColdHistory {
             !state.tasks.contains(where: { $0.state == .running || $0.startedAt != nil || $0.residentMemoryMiB != nil }
             ),
             sample.thermalState == "nominal", sample.memoryPressure == "normal",
-            (0...0.8).contains(sample.cpuActive), let gpu = sample.gpuActive, (0...0.5).contains(gpu)
+            (0...0.8).contains(sample.cpuActive), let gpu = sample.gpuActive, (0...0.5).contains(gpu),
+            sample.aneQuietBlocker(
+                limits: QuietLimits(baseline: state.idleBaseline, aneActivity: sample.aneActivity)) == nil
         else {
             readings.removeAll(keepingCapacity: true)
             return
         }
         if let previous = readings.last {
-            let maximumGap = SchedulingPolicy.idleSampleInterval + SchedulingPolicy.maximumSampleAge
+            let maximumGap = SchedulingPolicy.maximumSampleAge
             let elapsed = sample.uptime - previous.uptime
             let wallElapsed = sample.sampledAt.timeIntervalSince(previous.sampledAt)
             if elapsed <= 0 || elapsed > maximumGap || wallElapsed < 0 || wallElapsed > maximumGap {

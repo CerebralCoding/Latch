@@ -178,34 +178,31 @@ final class Scheduler {
         do { try collector.acquire(shared: false, timeout: 0) } catch let error as LatchError where error.exitCode == 75
         { return true }
         return try withExtendedLifetime(collector) {
-            let gate = try FileLatch(path: path)
-            do { try gate.acquire(shared: true, timeout: 0) } catch let error as LatchError where error.exitCode == 75 {
-                coldHistory = ColdHistory()
-                return false
-            }
-            return try withExtendedLifetime(gate) {
-                let state = try snapshot()
-                let now = ProcessInfo.processInfo.systemUptime
-                if let last = state.lastSensorAttempt, now >= last, now - last < minimumInterval {
-                    return true
-                }
-                do {
-                    let sample = try collect()
-                    try transaction {
-                        $0.record(sample)
-                        coldHistory.observe(sample, state: &$0)
-                    }
-                } catch {
-                    coldHistory = ColdHistory()
-                    try transaction {
-                        $0.sensorError = String(describing: error)
-                        $0.lastSensorAttempt = ProcessInfo.processInfo.systemUptime
-                        $0.quietSince = nil
-                        $0.resetCooldowns()
-                    }
-                }
+            let state = try snapshot()
+            let now = ProcessInfo.processInfo.systemUptime
+            if let last = state.lastSensorAttempt, now >= last, now - last < minimumInterval {
                 return true
             }
+            do {
+                let sample = try collect()
+                try transaction {
+                    $0.record(sample, workloadActive: state.hasActiveWork)
+                    if state.hasActiveWork {
+                        coldHistory = ColdHistory()
+                    } else {
+                        coldHistory.observe(sample, state: &$0)
+                    }
+                }
+            } catch {
+                coldHistory = ColdHistory()
+                try transaction {
+                    $0.sensorError = String(describing: error)
+                    $0.lastSensorAttempt = ProcessInfo.processInfo.systemUptime
+                    $0.quietSince = nil
+                    $0.resetCooldowns()
+                }
+            }
+            return true
         }
     }
 

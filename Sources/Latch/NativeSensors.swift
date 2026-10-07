@@ -45,6 +45,12 @@ final class NativeSensors {
             throw LatchError("CPU sampling failed", exitCode: 74)
         }
         let accelerator = report?.activity(from: firstReport, to: secondReport, seconds: elapsed)
+        if accelerator?.cpuWatts == nil {
+            unavailable.append("CPU power")
+        }
+        if accelerator?.gpuWatts == nil {
+            unavailable.append("GPU power")
+        }
         if accelerator?.gpu == nil {
             unavailable.append("GPU residency")
         }
@@ -93,6 +99,8 @@ final class NativeSensors {
             memoryPressure: pressureName, thermalState: thermal,
             diskBytesPerSecond: disk, unavailable: unavailable,
             cpuTemperature: temperature?.cpu, gpuTemperature: temperature?.gpu,
+            aneActivity: accelerator?.aneActivity,
+            cpuWatts: accelerator?.cpuWatts, gpuWatts: accelerator?.gpuWatts,
         )
     }
 

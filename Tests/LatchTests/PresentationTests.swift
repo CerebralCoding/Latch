@@ -104,12 +104,13 @@ private func presentationView(_ state: SchedulerState, now: Double = 10, running
     #expect(stale.tasks.last?.blockedBy == "waiting for fresh sensors")
 }
 
-@Test func `idle cached sensors are normal without relaxing admission freshness`() {
+@Test func `idle sensors follow the same freshness rules as active sensors`() {
     let sensors = presentationSensors()
-    let idle = presentationView(SchedulerState(sensors: sensors), now: 20)
-    #expect(!idle.sensorsFresh)
-    #expect(HumanOutput.view(idle, verbose: false, width: 200).contains("Idle cached readings 10.0s old"))
-    let overdue = presentationView(SchedulerState(sensors: sensors), now: 28)
+    let idle = presentationView(SchedulerState(sensors: sensors), now: 11)
+    #expect(idle.sensorsFresh)
+    #expect(HumanOutput.view(idle, verbose: false, width: 200).contains("Cached readings 1.0s old"))
+    let overdue = presentationView(SchedulerState(sensors: sensors), now: 13)
+    #expect(!overdue.sensorsFresh)
     #expect(HumanOutput.view(overdue, verbose: false, width: 200).contains("Sampling overdue"))
     let stopped = presentationView(SchedulerState(sensors: sensors), now: 20, running: false)
     #expect(HumanOutput.view(stopped, verbose: false, width: 200).contains("Sampling stopped"))
@@ -121,7 +122,7 @@ private func presentationView(_ state: SchedulerState, now: Double = 10, running
         HumanOutput.view(presentationView(queued, now: 20), verbose: false, width: 200).contains("Sampling overdue"))
 }
 
-@Test func `view exposes measured blockers cooldown conditions and expected sensor pauses`() {
+@Test func `view exposes measured blockers cooldown conditions and sampling during exclusive work`() {
     var request = TaskRequirements(measurement: true, temperatureGuard: TemperatureGuard(cooldown: 5))
     var next = ScheduledTask(
         id: UUID().uuidString, name: "benchmark", pid: 0, arguments: [], requirements: request, coolSince: 8)
@@ -135,12 +136,16 @@ private func presentationView(_ state: SchedulerState, now: Double = 10, running
     #expect(busy.tasks.first?.blockerDetail?.contains("CPU activity 10.00%; requires ≤") == true)
     var running = next
     running.state = .running
-    let paused = presentationView(
+    let stale = presentationView(
         SchedulerState(tasks: [running], sensors: presentationSensors()), now: 100, latch: "exclusive")
-    let pausedText = HumanOutput.view(paused, verbose: false, width: 200)
-    #expect(paused.samplingPaused)
-    #expect(pausedText.contains("Sampling paused during exclusive work"))
-    #expect(pausedText.contains("Last read"))
+    let staleText = HumanOutput.view(stale, verbose: false, width: 200)
+    #expect(!stale.samplingPaused)
+    #expect(stale.samplingPausedReason == nil)
+    #expect(staleText.contains("Sampling overdue"))
+    #expect(staleText.contains("Last read"))
+    let live = presentationView(SchedulerState(tasks: [running], sensors: presentationSensors()), latch: "exclusive")
+    #expect(live.sensorsFresh)
+    #expect(!live.samplingPaused)
     var failed = state
     failed.sensorError = "temperature access failed"
     #expect(HumanOutput.view(presentationView(failed), verbose: false).contains("Sensors    Failed"))

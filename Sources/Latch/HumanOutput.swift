@@ -43,9 +43,35 @@ enum HumanOutput {
         return String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 
+    static func count(_ value: Int) -> String {
+        value < 10_000 ? String(value) : value.formatted(.number.locale(Locale(identifier: "da_DK")))
+    }
+
     static func percent(_ value: Double?) -> String {
         guard let value, value.isFinite else { return "unavailable" }
         return number(value * 100) + "%"
+    }
+
+    static func power(_ value: Double?) -> String {
+        guard let value, value.isFinite, value >= 0 else { return "unavailable" }
+        return String(format: "%.3f W", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+
+    static func aneQuiet(_ sensors: SensorSnapshot, limits: QuietLimits) -> String {
+        let powerReading = "ANE power \(power(sensors.aneWatts)); requires ≤\(power(limits.aneWatts))"
+        guard let activity = sensors.aneActivity else {
+            return powerReading + ". Activity counters unavailable; using power alone"
+        }
+        guard (0...1).contains(activity.fraction) else {
+            return powerReading + ". Invalid ANE activity; waiting for a valid reading"
+        }
+        if activity.source == .powerFloor {
+            return powerReading
+                + ". Floor estimate \(percent(activity.fraction)); above \(percent(QuietLimits.aneActivity)) "
+                + "halves the power allowance above idle. The estimate alone does not block admission"
+        }
+        return powerReading + ". ANE \(activity.source.label) \(percent(activity.fraction)); "
+            + "requires ≤\(percent(QuietLimits.aneActivity))"
     }
 
     static func temperature(_ value: Double?) -> String {
@@ -75,7 +101,8 @@ enum HumanOutput {
             lines += [
                 "Cores \(value.cpuCores) · busiest core \(percent(value.busiestCore))",
                 "Memory total \(memory(Double(value.memoryTotalMiB)))",
-                "ANE \(number(value.aneWatts)) W",
+                "Power CPU \(power(value.cpuWatts)) · GPU \(power(value.gpuWatts)) · ANE \(power(value.aneWatts))",
+                "ANE activity \(percent(value.aneActivity?.fraction)) (\(value.aneActivity?.source.label ?? "unavailable"))",
                 "Disk \(value.diskBytesPerSecond.map { memory($0 / 1_048_576) + "/s" } ?? "unavailable")",
                 "Sampled \(value.sampledAt.formatted(.iso8601))",
             ]
@@ -138,13 +165,6 @@ enum HumanOutput {
             lines.append(
                 "Sensors    Sampling paused during \(value.samplingPausedReason ?? "exclusive work")\(value.sensorAgeSeconds.map { "; last readings " + duration($0) + " ago" } ?? "")"
             )
-        } else if value.service.running, value.jobs.isEmpty, value.sensors != nil,
-            let age = value.sensorAgeSeconds,
-            (0...(SchedulingPolicy.idleSampleInterval + SchedulingPolicy.maximumSampleAge)).contains(age)
-        {
-            lines.append(
-                "Sensors    Idle cached readings \(duration(age)) old; sampling every \(duration(SchedulingPolicy.idleSampleInterval))"
-            )
         } else if value.sensorsFresh {
             lines.append("Sensors    Cached readings \(duration(value.sensorAgeSeconds)) old")
         } else {
@@ -190,11 +210,14 @@ enum HumanOutput {
             lines += [
                 "", "Measurement quiet limits",
                 "CPU \(percent(value.quietLimits.cpuActive)) · busiest core \(percent(value.quietLimits.busiestCore)) · GPU \(percent(value.quietLimits.gpuActive))",
-                "ANE \(number(value.quietLimits.aneWatts)) W · disk \(memory(value.quietLimits.diskBytesPerSecond / 1_048_576))/s",
+                "ANE ≤\(power(value.quietLimits.aneWatts)) · disk \(memory(value.quietLimits.diskBytesPerSecond / 1_048_576))/s",
                 value.idleBaseline.map {
                     "Idle baseline: CPU \(percent($0.cpuActive)) · GPU \(percent($0.gpuActive)) · \($0.calibrationSamples) calibration samples"
                 } ?? "Idle baseline: not calibrated",
             ]
+            if let sensors = value.sensors {
+                lines.append(aneQuiet(sensors, limits: value.quietLimits))
+            }
             for task in value.tasks {
                 lines += [
                     "",

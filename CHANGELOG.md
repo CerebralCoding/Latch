@@ -2,6 +2,26 @@
 
 Versions before 0.17.0 describe development milestones. Changes made while a version remained unchanged are grouped under that version.
 
+## 0.20.0
+
+Latch 0.20.0 introduces a native Swift terminal dashboard for monitoring workloads and managing the operator queue.
+
+- Added `latch tui [--file PATH] [--interval SECONDS]`, with wide and compact layouts, incremental rendering, and `NO_COLOR` support. The dashboard reads cached scheduler observations without collecting extra sensor samples.
+- Added an overview showing queue and checkpoint counts, pressure warnings, and a navigable jobs list with running work first. Reservations, CPU/GPU/ANE watts, and available memory/disk readings appear in that order above the list; the selected job exposes its admission blocker.
+- Fixed shared sensor collection at once per second, whether idle or running jobs, including exclusive measurements and draining, so the TUI and MCP diagnostics show current activity. Running-job observations do not count toward idle calibration or measurement readiness. The TUI does not start a separate sampler.
+- Added CPU and GPU power readings before ANE power on the overview, using the existing native sensor subscription. The shared sensor snapshot and detailed diagnostics include all three power readings; unavailable readings remain explicit.
+- Added session charts for CPU, GPU, and ANE activity, memory use, and CPU/GPU temperatures. Filled history bars use fixed scales, preserve captured colors, and leave gaps for paused or unavailable readings. Paused or stale readings are explicitly labeled as historical instead of showing a cached idle value as current utilization.
+- Added native ANE activity readings from compute histograms and cluster residency, with a labeled power/bandwidth-state estimate when direct counters are unavailable. Sensor diagnostics retain the source of each reading; empty or invalid counters are not reported as zero utilization.
+- Integrated ANE activity into measurement admission, idle calibration, and idle cooldown credit. Direct counters catch activity that watts alone can miss; power-floor estimates tighten the allowance above idle and require corroborating power before blocking admission. Fluctuating floor estimates alone do not restart the quiet window. MCP wait explanations, admission snapshots, CLI diagnostics, and the dashboard expose the same evidence and effective limits. Ordinary jobs retain shared admission.
+- Integrated job navigation, filtering, sorting, retained history, and confirmed job actions into the overview. Enter or Tab opens a near-full-screen detail overlay with commands, reservations, admission conditions, and retained output; Tab or Esc closes it while preserving selection. Open details stay pinned when a job finishes, retaining the command, requirements, and scroll position while final status and output update. Sensors and help open as separate modals with `i` and `?`.
+- Added confirmed operator actions to prioritize or cancel a selected job, clear never-started work, or stop outstanding jobs. Confirmation captures specific job IDs so new arrivals are excluded; admission guards remain in force.
+- Persisted the last refresh interval, including changes through `+`/`-` and explicit `--interval` overrides. Refresh defaults to one second and supports 0.5–60 seconds. Preferences use `$XDG_CONFIG_HOME/latch/tui.json`, defaulting to `~/.config/latch/tui.json`.
+- Added a Total jobs count covering current work and retained history, with dot-separated thousands from `10.000` onward. History counts and pagination use the same formatting.
+- Added display freezing, scrolling dialogs, terminal resize and suspend/resume handling, and restoration of terminal settings on exit. Pasted input cannot trigger queue controls, and displayed job names and output escape terminal control sequences.
+- Included MIT notices for the graph and sensor references from mlxtop, macmon, SiliconScope, and mactop.
+
+Reconnect MCP clients after updating. Existing job IDs and retry keys remain valid.
+
 ## 0.19.0
 
 Latch 0.19.0 improves admission responsiveness and makes it clearer when agents should share the machine and when they should wait.

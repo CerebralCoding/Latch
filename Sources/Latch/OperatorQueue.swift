@@ -61,6 +61,34 @@ struct OperatorQueue {
         }
     }
 
+    // Confirmations capture IDs so jobs arriving while a dialog is open are never affected.
+    func cancel(_ ids: Set<String>, onlyNeverStarted: Bool = false) throws -> [String] {
+        try requireMatchingService()
+        let store = try DurableJobs(scheduler: scheduler)
+        return try scheduler.transaction { state in
+            var cancelled: [String] = []
+            for id in ids.sorted() {
+                let taskIndex = state.tasks.firstIndex { $0.id == id }
+                let task = taskIndex.map { state.tasks[$0] }
+                let record = state.jobs.first { $0.id == id && !$0.complete }
+                guard task != nil || record != nil else { continue }
+                if onlyNeverStarted {
+                    guard let task, task.state == .queued, task.startedAt == nil, task.residentMemoryMiB == nil else {
+                        continue
+                    }
+                }
+                try store.cancel(id)
+                if let task, record == nil { ScheduledCommand.resumeCancelledSupervisor(task) }
+                if let taskIndex, state.tasks[taskIndex].state == .queued {
+                    state.tasks[taskIndex].state = .cancelling
+                    state.tasks[taskIndex].waitingFor = "queued task cancelled by operator"
+                }
+                cancelled.append(id)
+            }
+            return cancelled
+        }
+    }
+
     private func requireMatchingService() throws {
         let status = try SchedulerService.status(in: scheduler.directory)
         guard status.running && status.serviceRevision == BuildIdentity.serviceRevision else {

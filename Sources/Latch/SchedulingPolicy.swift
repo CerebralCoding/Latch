@@ -40,10 +40,24 @@ struct SensorSnapshot: Codable, Equatable {
     var unavailable: [String]
     var cpuTemperature: Double?
     var gpuTemperature: Double?
+    var aneActivity: ANEActivity?
+    var cpuWatts: Double?
+    var gpuWatts: Double?
+
+    func aneQuietBlocker(limits: QuietLimits) -> String? {
+        guard let aneWatts, aneWatts.isFinite, aneWatts >= 0 else { return "ANE power unavailable or invalid" }
+        if let activity = aneActivity {
+            guard (0...1).contains(activity.fraction) else { return "invalid ANE activity" }
+            if activity.source != .powerFloor, activity.fraction > QuietLimits.aneActivity {
+                return "background ANE activity"
+            }
+        }
+        return aneWatts > limits.aneWatts ? "background ANE load" : nil
+    }
 
     func quietBlocker(baseline: IdleBaseline?) -> String? {
-        guard let gpuActive, let aneWatts, let diskBytesPerSecond else { return "required sensors unavailable" }
-        let limits = QuietLimits(baseline: baseline)
+        guard let gpuActive, aneWatts != nil, let diskBytesPerSecond else { return "required sensors unavailable" }
+        let limits = QuietLimits(baseline: baseline, aneActivity: aneActivity)
         guard cpuActive >= 0, cpuActive <= limits.cpuActive else {
             return "background CPU load"
         }
@@ -53,7 +67,7 @@ struct SensorSnapshot: Codable, Equatable {
         guard gpuActive >= 0, gpuActive <= limits.gpuActive else {
             return "background GPU load"
         }
-        guard aneWatts >= 0, aneWatts <= limits.aneWatts else { return "background ANE load" }
+        if let blocker = aneQuietBlocker(limits: limits) { return blocker }
         guard diskBytesPerSecond >= 0, diskBytesPerSecond <= limits.diskBytesPerSecond else {
             return "background disk I/O"
         }
@@ -102,7 +116,10 @@ struct SchedulerState: Codable, Equatable {
         }
     }
 
-    mutating func record(_ snapshot: SensorSnapshot) {
+    var hasActiveWork: Bool { tasks.contains { $0.state == .running || $0.state == .cancelling } }
+
+    mutating func record(_ snapshot: SensorSnapshot, workloadActive: Bool = false) {
+        let active = workloadActive || hasActiveWork
         let previous = sensors
         sensors = snapshot
         sensorError = nil
@@ -110,13 +127,13 @@ struct SchedulerState: Codable, Equatable {
         if let baseline = idleBaseline, snapshot.uptime < baseline.uptime {
             idleBaseline = nil
         }
-        if !tasks.contains(where: { $0.state == .running }), let sample = IdleReading(snapshot) {
+        if !active, let sample = IdleReading(snapshot) {
             if idleBaseline == nil { idleBaseline = IdleBaseline() }
             idleBaseline?.observe(sample, allowIncrease: tasks.isEmpty)
         }
         for index in tasks.indices where tasks[index].state == .queued {
             guard let guardrail = tasks[index].requirements.temperatureGuard else { continue }
-            if !guardrail.satisfied(by: snapshot) {
+            if (active && tasks[index].requirements.measurement) || !guardrail.satisfied(by: snapshot) {
                 tasks[index].coolSince = nil
             } else if tasks[index].coolSince == nil || previous == nil
                 || snapshot.uptime < previous!.uptime
@@ -125,11 +142,12 @@ struct SchedulerState: Codable, Equatable {
                 tasks[index].coolSince = snapshot.uptime
             }
         }
-        if tasks.contains(where: { $0.state == .running }) || snapshot.quietBlocker(baseline: idleBaseline) != nil {
+        if active || snapshot.quietBlocker(baseline: idleBaseline) != nil {
             quietSince = nil
             quietPeak = nil
         } else if quietSince == nil || previous == nil
             || snapshot.uptime - previous!.uptime > 2 || snapshot.uptime < previous!.uptime
+            || snapshot.aneActivity?.source != previous!.aneActivity?.source
         {
             quietSince = snapshot.uptime
             quietPeak = snapshot
@@ -139,7 +157,13 @@ struct SchedulerState: Codable, Equatable {
             peak.cpuActive = max(prior.cpuActive, snapshot.cpuActive)
             peak.busiestCore = max(prior.busiestCore, snapshot.busiestCore)
             peak.gpuActive = max(prior.gpuActive ?? 0, snapshot.gpuActive ?? 0)
-            peak.aneWatts = max(prior.aneWatts ?? 0, snapshot.aneWatts ?? 0)
+            // Keep power and floor evidence paired, retaining the observation with the least idle margin.
+            if (prior.aneWatts ?? 0) - QuietLimits.anePowerAllowance(for: prior.aneActivity)
+                > (snapshot.aneWatts ?? 0) - QuietLimits.anePowerAllowance(for: snapshot.aneActivity)
+            {
+                peak.aneWatts = prior.aneWatts
+                peak.aneActivity = prior.aneActivity
+            }
             peak.diskBytesPerSecond = max(prior.diskBytesPerSecond ?? 0, snapshot.diskBytesPerSecond ?? 0)
             if peak.quietBlocker(baseline: idleBaseline) != nil {
                 quietSince = snapshot.uptime
@@ -153,7 +177,6 @@ struct SchedulerState: Codable, Equatable {
 
 enum SchedulingPolicy {
     static let sampleInterval = 1.0
-    static let idleSampleInterval = 15.0
     static let maximumSampleAge = 2.0
     static let quietPeriod = 2.0
 

@@ -96,9 +96,11 @@ enum ReleasePreparation {
         try FileManager.default.copyItem(
             at: installer.deletingLastPathComponent().appendingPathComponent("LICENSE"),
             to: output.appendingPathComponent("LICENSE"))
-        try FileManager.default.copyItem(
-            at: installer.deletingLastPathComponent().appendingPathComponent("LICENSES/macmon.txt"),
-            to: output.appendingPathComponent("macmon-LICENSE.txt"))
+        for project in ["macmon", "mlxtop", "SiliconScope", "mactop"] {
+            try FileManager.default.copyItem(
+                at: installer.deletingLastPathComponent().appendingPathComponent("LICENSES/\(project).txt"),
+                to: output.appendingPathComponent("\(project)-LICENSE.txt"))
+        }
         completed = true
         print("Prepared \(version) in \(output.path). Publication requires separate operator approval.")
     }

@@ -172,7 +172,9 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
     }
 }
 
-@Test func `service loss fails parked clients closed without sampling behind measurement`() throws {
+@Test func `service keeps sampling while idle and behind exclusive work and fails parked clients closed on loss`()
+    throws
+{
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let holder = try FileLatch(path: fixture.lockPath)
@@ -188,15 +190,62 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
         #expect(try SchedulerService.requireRunning(in: scheduler.directory) == service.process.processIdentifier)
         let duplicate = try fixture.launch(["service", "run"])
         #expect(try fixture.finish(duplicate) == 75)
+        let sampleDeadline = ProcessInfo.processInfo.systemUptime + 5
+        while try scheduler.snapshot().lastSensorAttempt == nil,
+            ProcessInfo.processInfo.systemUptime < sampleDeadline
+        {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        let first = try #require(scheduler.snapshot().lastSensorAttempt)
+        while (try scheduler.snapshot().lastSensorAttempt ?? 0) <= first,
+            ProcessInfo.processInfo.systemUptime < sampleDeadline
+        {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        #expect(try #require(scheduler.snapshot().lastSensorAttempt) > first)
+        #expect(try scheduler.snapshot().tasks.isEmpty)
         let child = try fixture.launch(["guard"])
         try waitForTask(scheduler)
-        #expect(try scheduler.snapshot().lastSensorAttempt == nil)
+        let idleSample = try #require(scheduler.snapshot().lastSensorAttempt)
+        let activeDeadline = ProcessInfo.processInfo.systemUptime + 5
+        while (try scheduler.snapshot().lastSensorAttempt ?? 0) <= idleSample,
+            ProcessInfo.processInfo.systemUptime < activeDeadline
+        {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        #expect(try #require(scheduler.snapshot().lastSensorAttempt) > idleSample)
         #expect(kill(service.process.processIdentifier, SIGTERM) == 0)
         #expect(try fixture.finish(service) == SIGTERM)
         #expect(try fixture.finish(child) == 69)
         #expect(try scheduler.snapshot().tasks.isEmpty)
         #expect(try !SchedulerService.status(in: scheduler.directory).running)
     }
+}
+
+@Test func `running telemetry and samples overlapping completion cannot earn measurement readiness`() {
+    var running = ScheduledTask(
+        id: UUID().uuidString, name: "work", pid: getpid(), arguments: [],
+        requirements: TaskRequirements(), state: .running)
+    running.startedAt = Date()
+    let next = ScheduledTask(
+        id: UUID().uuidString, name: "measurement", pid: getpid(), arguments: [],
+        requirements: TaskRequirements(measurement: true, temperatureGuard: TemperatureGuard(cooldown: 2)))
+    var state = SchedulerState(tasks: [running, next])
+    for time in 10...12 { state.record(coolSensors(at: Double(time))) }
+    #expect(state.sensors?.uptime == 12)
+    #expect(state.idleBaseline == nil)
+    #expect(state.quietSince == nil)
+    #expect(state.tasks[1].coolSince == nil)
+    state.tasks.removeFirst()
+    state.record(coolSensors(at: 13), workloadActive: true)
+    #expect(state.idleBaseline == nil)
+    #expect(state.quietSince == nil)
+    #expect(state.tasks[0].coolSince == nil)
+    state.record(coolSensors(at: 14))
+    state.record(coolSensors(at: 15))
+    #expect(SchedulingPolicy.reason(for: state.tasks[0], in: state, now: 15) != nil)
+    state.record(coolSensors(at: 16))
+    #expect(SchedulingPolicy.reason(for: state.tasks[0], in: state, now: 16) == nil)
 }
 
 @Test func `running commands retain leases after the service stops`() throws {

@@ -5,6 +5,7 @@ enum CLIHelp {
         Latch — local workload scheduler for autonomous agents sharing an Apple Silicon Mac.
 
         Inspect
+          tui                  Live operator dashboard, charts, and queue controls
           view                 Service, running work, queue, and admission blockers
           list                 Outstanding jobs with copyable IDs
           sensors              Collect native sensor readings
@@ -42,6 +43,22 @@ enum CLIHelp {
         let file = "File: --file PATH, then LATCH_FILE, then ~/.local/state/latch/default.lock."
         let output = "Short text by default. --verbose expands diagnostics; --json emits the full snapshot. Choose one."
         switch command {
+        case .tui:
+            return """
+                Usage: latch tui [--file PATH] [--interval SECONDS]
+                Open the native terminal dashboard. Requires an interactive Unicode terminal.
+                Jobs are on the overview. Arrows or j/k: select. Enter/Tab: details. Tab/Esc: close details.
+                /: filter jobs. s: sort. h: retained history. Space: freeze display. +/-: refresh interval.
+                P: prioritize selected job. x: cancel selected job. C: clear never-started work. S: stop all.
+                Queue changes require confirmation and a matching running service; guards still apply.
+                i: sensors modal. ?: help modal. Same key or Esc closes. q or Ctrl-C: quit.
+                Refresh restores your last setting, initially 1 second (range 0.5–60).
+                --interval overrides the saved value. Both --interval and +/- save your selection.
+                Settings: $XDG_CONFIG_HOME/latch/tui.json, default ~/.config/latch/tui.json.
+                Uses cached scheduler sensors; never actively samples. Charts cover this session.
+                NO_COLOR disables color. Narrow terminals use a compact layout.
+                \(file)
+                """
         case .view, .list:
             let purpose =
                 command == .view
@@ -52,7 +69,7 @@ enum CLIHelp {
                 \(purpose)
                 \(output)
                 Uses cached readings; never samples or reserves resources.
-                Idle readings are cached for 15 seconds; sampling pauses during exclusive work.
+                Shared samples arrive every second, whether idle or running jobs.
                 No start-time estimate is made.
                 \(file)
                 """

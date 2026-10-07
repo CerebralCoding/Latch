@@ -29,6 +29,9 @@ final class NativeIOReport {
     private let stateName: StateName
     private let residency: Value
     private let integerValue: Value
+    private let group: Label
+    private let subgroup: Label
+    private let format: Count
 
     init() throws {
         guard let library = dlopen("/usr/lib/libIOReport.dylib", RTLD_NOW | RTLD_LOCAL) else {
@@ -49,7 +52,9 @@ final class NativeIOReport {
             stateName = try symbol("IOReportStateGetNameForIndex", StateName.self)
             residency = try symbol("IOReportStateGetResidency", Value.self)
             integerValue = try symbol("IOReportSimpleGetIntegerValue", Value.self)
-            let group = try symbol("IOReportChannelGetGroup", Label.self)
+            group = try symbol("IOReportChannelGetGroup", Label.self)
+            subgroup = try symbol("IOReportChannelGetSubGroup", Label.self)
+            format = try symbol("IOReportChannelGetFormat", Count.self)
             guard let all = copy(0, 0)?.takeRetainedValue(),
                 let items = (all as NSDictionary)["IOReportChannels"] as? [NSDictionary],
                 let selected = CFDictionaryCreateMutableCopy(nil, 0, all)
@@ -57,11 +62,18 @@ final class NativeIOReport {
                 throw LatchError("IOReport channels unavailable", exitCode: 69)
             }
             let nameOfChannel = channelName
+            let groupOfChannel = group
+            let subgroupOfChannel = subgroup
+            let formatOfChannel = format
             let selectedItems = items.filter { item in
-                let category = group(item as CFDictionary)?.takeUnretainedValue() as String?
+                let category = groupOfChannel(item as CFDictionary)?.takeUnretainedValue() as String? ?? ""
+                let subcategory = subgroupOfChannel(item as CFDictionary)?.takeUnretainedValue() as String? ?? ""
                 let name = nameOfChannel(item as CFDictionary)?.takeUnretainedValue() as String?
                 return (category == "GPU Stats" && name == "GPUPH")
-                    || (category == "Energy Model" && name?.hasPrefix("ANE") == true)
+                    || NativePower.component(
+                        group: category, name: name ?? "", format: formatOfChannel(item as CFDictionary)) != nil
+                    || (formatOfChannel(item as CFDictionary) == 2
+                        && NativeANE.source(group: category, subgroup: subcategory, name: name ?? "") != nil)
             }
             let key = "IOReportChannels" as CFString
             let array = selectedItems as CFArray
@@ -93,18 +105,36 @@ final class NativeIOReport {
         return createSample(subscription, channels, nil)?.takeRetainedValue()
     }
 
-    func activity(from first: CFDictionary?, to second: CFDictionary?, seconds: Double) -> (gpu: Double?, ane: Double?)
-    {
+    func activity(from first: CFDictionary?, to second: CFDictionary?, seconds: Double) -> (
+        gpu: Double?, ane: Double?, aneActivity: ANEActivity?, cpuWatts: Double?, gpuWatts: Double?
+    ) {
         guard let first, let second, seconds > 0,
             let delta = createDelta(first, second, nil)?.takeRetainedValue(),
             let items = (delta as NSDictionary)["IOReportChannels"] as? [NSDictionary]
-        else { return (nil, nil) }
+        else { return (nil, nil, nil, nil, nil) }
         var gpu: Double?
-        var ane: Double?
+        var power = NativePower()
+        var aneReadings: [ANEActivity] = []
         for item in items {
             let channel = item as CFDictionary
             let name = channelName(channel)?.takeUnretainedValue() as String? ?? ""
-            if name == "GPUPH" {
+            let category = group(channel)?.takeUnretainedValue() as String? ?? ""
+            let subcategory = subgroup(channel)?.takeUnretainedValue() as String? ?? ""
+            if format(channel) == 2,
+                let source = NativeANE.source(group: category, subgroup: subcategory, name: name)
+            {
+                let count = stateCount(channel)
+                guard count > 0, count < 1000 else { continue }
+                let states = (0..<count).map { index in
+                    (
+                        name: stateName(channel, index)?.takeUnretainedValue() as String? ?? "",
+                        residency: residency(channel, index)
+                    )
+                }
+                if let fraction = NativeANE.fraction(states: states, source: source) {
+                    aneReadings.append(ANEActivity(fraction: fraction, source: source))
+                }
+            } else if category == "GPU Stats", name == "GPUPH" {
                 let count = stateCount(channel)
                 guard count > 0, count < 1000 else { continue }
                 var active = 0.0
@@ -124,15 +154,12 @@ final class NativeIOReport {
                 if valid, total > 0 {
                     gpu = max(gpu ?? 0, active / total)
                 }
-            } else if name.hasPrefix("ANE") {
-                let value = integerValue(channel, 0)
-                let label = (unit(channel)?.takeUnretainedValue() as String?)?.trimmingCharacters(in: .whitespaces)
-                let scale = ["mJ": 1e3, "uJ": 1e6, "nJ": 1e9][label ?? ""]
-                if value >= 0, let scale {
-                    ane = (ane ?? 0) + Double(value) / scale / seconds
-                }
+            } else if let component = NativePower.component(group: category, name: name, format: format(channel)) {
+                power.record(
+                    component, energy: integerValue(channel, 0),
+                    unit: unit(channel)?.takeUnretainedValue() as String?, seconds: seconds)
             }
         }
-        return (gpu, ane)
+        return (gpu, power[.ane], NativeANE.preferred(aneReadings), power[.cpu], power[.gpu])
     }
 }

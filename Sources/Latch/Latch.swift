@@ -74,6 +74,10 @@ struct Latch {
                 exit(try MCPServer(path: options.resolvedPath()).run())
             }
             let path = try options.resolvedPath()
+            if options.command == .tui {
+                try OperatorDashboard.run(path: path, interval: options.refreshInterval)
+                return
+            }
             if [.list, .prioritize, .clear, .stop].contains(options.command) {
                 let queue = try OperatorQueue(scheduler: Scheduler(path: path))
                 switch options.command {
@@ -143,7 +147,7 @@ struct Latch {
                     exit(75)
                 }
             case .run, .help, .schedule, .sensors, .guard, .service, .view, .mcp, .update, .rollback, .version,
-                .list, .prioritize, .clear, .stop, .about:
+                .list, .prioritize, .clear, .stop, .about, .tui:
                 break
             }
         } catch let error as LatchError {

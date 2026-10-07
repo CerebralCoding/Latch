@@ -56,7 +56,7 @@ struct SchedulerView: Encodable {
         sensors = state.sensors
         idleBaseline = state.idleBaseline
         idleBaseline?.readings = nil
-        quietLimits = QuietLimits(baseline: state.idleBaseline)
+        quietLimits = QuietLimits(baseline: state.idleBaseline, aneActivity: sensors?.aneActivity)
         sensorError = state.sensorError
         sensorAgeSeconds = state.sensors.map { now - $0.uptime }
         sensorsFresh =
@@ -69,13 +69,8 @@ struct SchedulerView: Encodable {
         {
             drainingForTaskID = next.id
         }
-        samplingPausedReason =
-            if !service.running { nil } else if processLatch == "exclusive" || isolatedTaskRunning {
-                "exclusive work"
-            } else if drainingForTaskID != nil {
-                "draining running work"
-            } else if !state.tasks.isEmpty && nextTaskID == nil { "no ready admission" } else { nil }
-        samplingPaused = samplingPausedReason != nil
+        samplingPausedReason = nil
+        samplingPaused = false
         let cpu = running.reduce(0) { $0 + $1.requirements.cpuCores }
         let memory = running.reduce(0) { $0 + $1.requirements.memoryMiB }
         capacity = Capacity(
@@ -168,7 +163,7 @@ struct SchedulerView: Encodable {
                 "Waiting for running work: \(names)\(extra). Running jobs finish without preemption or a runtime limit"
         }
         guard let sensors = state.sensors else { return reason }
-        let limits = QuietLimits(baseline: state.idleBaseline)
+        let limits = QuietLimits(baseline: state.idleBaseline, aneActivity: sensors.aneActivity)
         switch reason {
         case "waiting for a quiet window: background CPU load":
             func precise(_ value: Double) -> String {
@@ -191,8 +186,10 @@ struct SchedulerView: Encodable {
         case "waiting for a quiet window: background GPU load":
             return
                 "GPU activity \(HumanOutput.percent(sensors.gpuActive)); requires ≤\(HumanOutput.percent(limits.gpuActive))"
-        case "waiting for a quiet window: background ANE load":
-            return "ANE \(HumanOutput.number(sensors.aneWatts)) W; requires ≤\(HumanOutput.number(limits.aneWatts)) W"
+        case "waiting for a quiet window: background ANE load", "waiting for a quiet window: background ANE activity",
+            "waiting for a quiet window: invalid ANE activity",
+            "waiting for a quiet window: ANE power unavailable or invalid":
+            return HumanOutput.aneQuiet(sensors, limits: limits)
         case "waiting for a quiet window: background disk I/O":
             return
                 "Disk \(HumanOutput.memory((sensors.diskBytesPerSecond ?? 0) / 1_048_576))/s; requires ≤\(HumanOutput.memory(limits.diskBytesPerSecond / 1_048_576))/s"

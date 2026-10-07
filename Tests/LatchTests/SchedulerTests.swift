@@ -283,7 +283,7 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     }
 }
 
-@Test func `scheduler does not sample behind an exclusive latch`() throws {
+@Test func `scheduler collects telemetry behind an exclusive latch without admitting another job`() throws {
     let fixture = try Fixture()
     var collections = 0
     let scheduler = try Scheduler(path: fixture.lockPath) {
@@ -294,13 +294,44 @@ func `rejects invalid scheduler options`(arguments: [String]) {
     try holder.acquire(shared: false, timeout: 0)
     try withExtendedLifetime(holder) {
         let sampled = try scheduler.refreshSensors()
-        #expect(!sampled)
+        #expect(sampled)
         #expect(throws: LatchError.self) {
             try scheduler.reserve(name: "waiting", arguments: ["true"], requirements: TaskRequirements(), timeout: 0.05)
         }
-        #expect(collections == 0)
+        #expect(collections >= 1)
         let remaining = try scheduler.snapshot()
         #expect(remaining.tasks.isEmpty)
+    }
+}
+
+@Test func `one sensor collector publishes running GPU activity without changing admission evidence`() throws {
+    let fixture = try Fixture()
+    var gpu = 0.0
+    var collections = 0
+    let scheduler = try Scheduler(path: fixture.lockPath) {
+        collections += 1
+        var sample = idleSensors()
+        sample.gpuActive = gpu
+        return sample
+    }
+    let running = try scheduler.reserve(name: "exclusive", arguments: [], requirements: TaskRequirements(), timeout: 0)
+    try withExtendedLifetime(running) {
+        let admission = try #require(scheduler.snapshot().tasks.first?.admission)
+        let baseline = try scheduler.snapshot().idleBaseline
+        gpu = 0.7
+        let collector = try FileLatch(path: scheduler.directory.appendingPathComponent("sensors.lock").path)
+        try collector.acquire(shared: false, timeout: 0)
+        _ = try scheduler.refreshSensors(minimumInterval: 0)
+        #expect(collections == 1)
+        collector.release()
+        _ = try scheduler.refreshSensors(minimumInterval: 0)
+        #expect(collections == 2)
+        let state = try scheduler.snapshot()
+        #expect(state.sensors?.gpuActive == 0.7)
+        #expect(state.tasks.first?.admission == admission)
+        #expect(state.idleBaseline == baseline)
+        #expect(state.quietSince == nil)
+        #expect(state.quietPeak == nil)
     }
 }
 

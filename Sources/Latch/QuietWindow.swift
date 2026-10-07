@@ -1,18 +1,26 @@
 import Foundation
 
 struct QuietLimits: Codable, Equatable {
+    static let aneActivity = 0.02
+
+    static func anePowerAllowance(for activity: ANEActivity?) -> Double {
+        // A raised floor is demand, not compute occupancy. Require power to corroborate it,
+        // but allow less noise above idle than when power is our only evidence.
+        activity?.source == .powerFloor && (activity?.fraction ?? 0) > aneActivity ? 0.05 : 0.1
+    }
+
     var cpuActive: Double
     var busiestCore: Double
     var gpuActive: Double
     var aneWatts: Double
     var diskBytesPerSecond: Double
 
-    init(baseline: IdleBaseline?) {
+    init(baseline: IdleBaseline?, aneActivity: ANEActivity? = nil) {
         let idle = baseline ?? IdleBaseline()
         cpuActive = min(0.12, idle.cpuActive + max(0.05, idle.cpuActive * 0.5))
         busiestCore = min(0.60, idle.busiestCore + max(0.25, idle.busiestCore * 0.5))
         gpuActive = min(0.08, idle.gpuActive + max(0.02, idle.gpuActive * 0.5))
-        aneWatts = min(0.2, idle.aneWatts + 0.1)
+        aneWatts = min(0.2, idle.aneWatts + Self.anePowerAllowance(for: aneActivity))
         diskBytesPerSecond = min(2_097_152, idle.diskBytesPerSecond + 1_048_576)
     }
 }
@@ -29,7 +37,8 @@ struct IdleReading: Codable, Equatable {
         guard let gpu = sensors.gpuActive, let ane = sensors.aneWatts, let disk = sensors.diskBytesPerSecond,
             (0...0.1).contains(sensors.cpuActive), (0...0.5).contains(sensors.busiestCore),
             (0...0.06).contains(gpu), (0...0.1).contains(ane), (0...1_048_576).contains(disk),
-            sensors.memoryPressure == "normal", sensors.thermalState == "nominal"
+            sensors.memoryPressure == "normal", sensors.thermalState == "nominal",
+            sensors.aneQuietBlocker(limits: QuietLimits(baseline: nil, aneActivity: sensors.aneActivity)) == nil
         else { return nil }
         cpuActive = sensors.cpuActive
         busiestCore = sensors.busiestCore
@@ -86,6 +95,6 @@ struct AdmissionSnapshot: Codable, Equatable {
         self.sensors = sensors
         idleBaseline = measurement ? state.idleBaseline : nil
         idleBaseline?.readings = nil
-        quietLimits = measurement ? QuietLimits(baseline: state.idleBaseline) : nil
+        quietLimits = measurement ? QuietLimits(baseline: state.idleBaseline, aneActivity: sensors.aneActivity) : nil
     }
 }

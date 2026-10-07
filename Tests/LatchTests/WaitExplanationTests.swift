@@ -135,10 +135,47 @@ private func waitView(_ state: SchedulerState, now: Double = 1000, running: Bool
     )
     #expect(try task.update(job: job))
 
+    state.sensors?.gpuActive = 0
+    state.sensors?.aneActivity = ANEActivity(fraction: 0.3, source: .compute)
+    try job.update(now: 1001, view: waitView(state, now: 1001))
+    let ane = try job.result(includeOutput: false)
+    #expect(ane["progressMessage"]?.string?.contains("ANE compute 30.0%; requires ≤2.0%") == true)
+    #expect(progress.update(state: ane["progressMessage"]!.string!, identity: job.progressIdentity(for: ane)) != nil)
+    #expect(try task.update(job: job))
+    state.sensors?.aneActivity?.fraction = 0.4
+    try job.update(now: 1001, view: waitView(state, now: 1001))
+    let aneChanged = try job.result(includeOutput: false)
+    #expect(aneChanged["progressMessage"]?.string?.contains("ANE compute 40.0%") == true)
+    #expect(
+        progress.update(state: aneChanged["progressMessage"]!.string!, identity: job.progressIdentity(for: aneChanged))
+            == nil)
+    #expect(try !task.update(job: job))
+
     state.tasks[0].state = .running
     try job.update(now: 1001, view: waitView(state, now: 1001))
     #expect(
         try job.result(includeOutput: false)["progressMessage"]?.string?.hasPrefix(MCPTools.pendingGuidance) == true)
+}
+
+@Test func `ANE wait evidence shares effective limits with diagnostics and FIFO followers`() throws {
+    let first = waitTask("ANE measurement")
+    let second = waitTask("correctness", measurement: false)
+    var sensors = waitSensors()
+    sensors.cpuActive = 0.01
+    sensors.aneWatts = 0.075
+    sensors.aneActivity = ANEActivity(fraction: 0.5, source: .powerFloor)
+    let state = SchedulerState(tasks: [first, second], sensors: sensors)
+    let view = waitView(state)
+    #expect(view.quietLimits.aneWatts == 0.05)
+    let detail = try #require(view.tasks.first?.blockerDetail)
+    #expect(detail.contains("ANE power 0.075 W; requires ≤0.050 W"))
+    #expect(detail.contains("Floor estimate 50.0%"))
+    #expect(detail.contains("estimate alone does not block"))
+    #expect(view.tasks.last?.blockerDetail?.contains(detail) == true)
+    #expect(HumanOutput.view(view, verbose: true, width: 240).contains("requires ≤0.050 W"))
+    let encoded = try JSONDecoder().decode(MCPValue.self, from: JSONEncoder().encode(view))
+    #expect(encoded["quietLimits"]?["aneWatts"] == .number(0.05))
+    #expect(encoded["sensors"]?["aneActivity"]?["source"] == "powerFloor")
 }
 
 @Test func `pending guidance preserves lifecycle status and disappears on completion`() throws {
