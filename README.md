@@ -70,7 +70,7 @@ Run as your normal macOS login user. The installer downloads the pinned release,
 | `~/.local/state/latch/` | Queue state, retained results, logs and rollback data |
 | `~/.cache/latch/` | Temporary installer downloads, removed afterward |
 
-The service starts immediately and at login. macOS restarts it after an unexpected exit. The installer refuses conflicting files, symlinks and incomplete installations rather than overwriting them.
+The service starts immediately and at login. macOS restarts it after an unexpected exit. With nobody logged in at the console (over ssh after a reboot), `install` and `start` load it into the per-user background domain (`user/<uid>`) instead of `gui/<uid>`; a later console login starts a second copy that waits for the first to stop. The installer refuses conflicting files, symlinks and incomplete installations rather than overwriting them.
 
 Source builds without an embedded application identifier or certificate-backed signing identifier use `<account>.latch.scheduler` and the matching `.plist` filename. Explicit application identifiers have `.scheduler` appended. `latch service status --verbose` reports the resolved label. Updates and rollbacks must retain the installed binary's service identifier.
 
@@ -316,7 +316,7 @@ latch rollback
 latch service uninstall
 ```
 
-`stop` unloads the login service until `start` or the next login. It does not terminate admitted work; queued jobs wait for recovery.
+`stop` unloads the login service from every domain that holds it, until `start` or the next login. It does not terminate admitted work; queued jobs wait for recovery.
 
 `uninstall` removes the installed executable, service configuration and rollback data, retaining queue data and logs.
 
