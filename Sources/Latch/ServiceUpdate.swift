@@ -32,6 +32,17 @@ struct UpdateServiceControl {
     var start: () throws -> Void
 }
 
+/// The launch-agent file an update keeps in step with the installed binary.
+struct ServicePlist {
+    var url: URL
+    var contents: Data
+
+    func differs(from existing: Data) throws -> Bool {
+        let parse = { try PropertyListSerialization.propertyList(from: $0, format: nil) as? NSDictionary }
+        return try parse(existing) != parse(contents)
+    }
+}
+
 enum ServiceUpdate {
     static func previous(in updates: URL) -> URL {
         updates.appendingPathComponent("latch.previous")
@@ -44,7 +55,7 @@ enum ServiceUpdate {
     static func apply(
         source: URL, target: URL, updates: URL, scheduler: Scheduler, rollback: Bool = false,
         timeout: Double = 600, restartService: Bool = false, expectedIdentifier: String? = nil,
-        service: UpdateServiceControl
+        plist: ServicePlist? = nil, service: UpdateServiceControl
     ) throws -> Bool {
         let manager = FileManager.default
         try InstallationPaths.privateDirectory(updates)
@@ -102,35 +113,55 @@ enum ServiceUpdate {
                     next = BuildIdentity(
                         release: BuildIdentity.version, serviceRevision: BuildIdentity.serviceRevision, sha256: hash)
                 }
+                var originalPlist: Data?
+                var plistChanged = false
+                if let plist {
+                    let existing = try Data(contentsOf: plist.url)
+                    originalPlist = existing
+                    plistChanged = try plist.differs(from: existing)
+                }
+                let replacesExecutable = rollback || hash != currentHash
                 let wasLoaded = try service.loaded()
                 let runningRevision = try service.revision()
                 let restart =
                     wasLoaded
-                    && (hash != currentHash || restartService || runningRevision != next.serviceRevision)
-                if !rollback, hash == currentHash {
+                    && (replacesExecutable || restartService || runningRevision != next.serviceRevision
+                        || plistChanged)
+                if !replacesExecutable, !plistChanged {
                     if restart {
                         try service.stop()
                         try service.start()
                     }
                     return restart
                 }
-                try manager.copyItem(at: target, to: original)
-                // Backup and executable may live on different volumes; commit each rename locally.
-                try manager.copyItem(at: original, to: backup)
+                if replacesExecutable {
+                    try manager.copyItem(at: target, to: original)
+                    // Backup and executable may live on different volumes; commit each rename locally.
+                    try manager.copyItem(at: original, to: backup)
+                }
                 var replaced = false
+                var wrotePlist = false
                 do {
                     if restart {
                         try service.stop()
                     }
-                    try replace(staged, target)
-                    replaced = true
+                    if replacesExecutable {
+                        try replace(staged, target)
+                        replaced = true
+                    }
+                    if plistChanged, let plist {
+                        try plist.contents.write(to: plist.url, options: .atomic)
+                        wrotePlist = true
+                    }
                     if restart {
                         try service.start()
                     }
-                    try UpdateDrain.advance(in: scheduler.directory)
-                    try JSONEncoder().encode(UpdateReceipt(current: next, previous: current)).write(
-                        to: receiptURL, options: .atomic)
-                    try replace(backup, previous(in: updates))
+                    if replacesExecutable {
+                        try UpdateDrain.advance(in: scheduler.directory)
+                        try JSONEncoder().encode(UpdateReceipt(current: next, previous: current)).write(
+                            to: receiptURL, options: .atomic)
+                        try replace(backup, previous(in: updates))
+                    }
                 } catch {
                     let failure = error
                     do {
@@ -139,6 +170,9 @@ enum ServiceUpdate {
                         }
                         if replaced {
                             try replace(original, target)
+                        }
+                        if wrotePlist, let plist, let originalPlist {
+                            try originalPlist.write(to: plist.url, options: .atomic)
                         }
                         try previousReceipt.write(to: receiptURL, options: .atomic)
                         if restart {

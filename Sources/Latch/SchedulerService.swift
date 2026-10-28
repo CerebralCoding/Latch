@@ -131,6 +131,18 @@ enum ServiceInstallation {
         ]
     }
 
+    static func configurationData(paths: InstallationPaths, queue: String) throws -> Data {
+        try PropertyListSerialization.data(
+            fromPropertyList: configuration(
+                executable: paths.executable.path, path: URL(fileURLWithPath: queue).standardizedFileURL.path,
+                logs: paths.logs.path, label: paths.label), format: .xml, options: 0)
+    }
+
+    /// The current launch-agent configuration for the queue the installed agent already serves.
+    static func refreshedConfiguration(paths: InstallationPaths = InstallationPaths()) throws -> Data {
+        try configurationData(paths: paths, queue: installedPath(paths: paths))
+    }
+
     static func perform(_ action: Options.ServiceAction, path: String, verbose: Bool = false, json: Bool = false) throws
     {
         switch action {
@@ -214,6 +226,7 @@ enum ServiceInstallation {
         let restarted = try ServiceUpdate.apply(
             source: source, target: executable, updates: paths.updates, scheduler: scheduler, rollback: rollback,
             timeout: timeout, restartService: restartService, expectedIdentifier: InstallationPaths.identifier,
+            plist: ServicePlist(url: plist, contents: try refreshedConfiguration(paths: paths)),
             service: UpdateServiceControl(
                 loaded: isLoaded,
                 revision: { try SchedulerService.status(in: scheduler.directory).serviceRevision },

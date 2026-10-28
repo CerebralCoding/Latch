@@ -85,10 +85,7 @@ enum ServiceInstall {
         let identity = BuildIdentity(
             release: BuildIdentity.version, serviceRevision: BuildIdentity.serviceRevision,
             sha256: try BuildIdentity.digest(staged))
-        let data = try PropertyListSerialization.data(
-            fromPropertyList: ServiceInstallation.configuration(
-                executable: paths.executable.path, path: URL(fileURLWithPath: queue).standardizedFileURL.path,
-                logs: paths.logs.path, label: paths.label), format: .xml, options: 0)
+        let data = try ServiceInstallation.configurationData(paths: paths, queue: queue)
         guard renamex_np(staged.path, paths.executable.path, UInt32(RENAME_EXCL)) == 0 else {
             throw LatchError.system("install executable without replacing an existing file")
         }

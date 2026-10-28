@@ -14,7 +14,12 @@ private final class UpdateFixture {
     var revision: Int? = BuildIdentity.serviceRevision
     var events: [String] = []
     var startedBinaries: [String] = []
+    var startedPlists: [Data] = []
     var failStart = false
+    let agents: URL
+    let plist: URL
+    let desiredPlist: Data
+    let stalePlist: Data
 
     init() throws {
         fixture = try Fixture()
@@ -22,6 +27,15 @@ private final class UpdateFixture {
         target = fixture.directory.appendingPathComponent("installed")
         source = fixture.directory.appendingPathComponent("candidate")
         updates = fixture.directory.appendingPathComponent("state/updates")
+        agents = fixture.directory.appendingPathComponent("agents")
+        plist = agents.appendingPathComponent("service.plist")
+        var configuration = ServiceInstallation.configuration(
+            executable: target.path, path: fixture.lockPath, logs: fixture.directory.path)
+        desiredPlist = try PropertyListSerialization.data(fromPropertyList: configuration, format: .xml, options: 0)
+        configuration["LimitLoadToSessionType"] = nil
+        stalePlist = try PropertyListSerialization.data(fromPropertyList: configuration, format: .xml, options: 0)
+        try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
+        try desiredPlist.write(to: plist)
         try Data("old".utf8).write(to: target)
         try Data("new".utf8).write(to: source)
         try InstallationPaths.privateDirectory(updates)
@@ -45,6 +59,7 @@ private final class UpdateFixture {
             start: {
                 self.events.append("start")
                 self.startedBinaries.append(try self.contents(self.target))
+                self.startedPlists.append(try Data(contentsOf: self.plist))
                 if self.failStart {
                     self.failStart = false
                     throw LatchError("injected health check failure")
@@ -57,7 +72,7 @@ private final class UpdateFixture {
         try ServiceUpdate.apply(
             source: source, target: target, updates: updates, scheduler: scheduler, rollback: rollback,
             timeout: timeout,
-            restartService: restart, service: service)
+            restartService: restart, plist: ServicePlist(url: plist, contents: desiredPlist), service: service)
     }
 
     func contents(_ url: URL) throws -> String {
@@ -224,4 +239,89 @@ private final class UpdateFixture {
     #expect(try f.contents(f.target) == "new")
     #expect(try f.contents(ServiceUpdate.previous(in: f.updates)) == "old")
     #expect(try Data(contentsOf: ServiceUpdate.receipt(in: f.updates)) == receipt)
+}
+
+@Test func `update refreshes a launch agent missing the session limit before restarting the service`() throws {
+    let f = try UpdateFixture()
+    try f.stalePlist.write(to: f.plist)
+    #expect(try f.apply())
+    #expect(f.events == ["stop", "start"])
+    #expect(f.startedPlists == [f.desiredPlist])
+    let refreshed = try PropertyListSerialization.propertyList(from: Data(contentsOf: f.plist), format: nil)
+    let queue = (refreshed as? [String: Any])?["ProgramArguments"] as? [String]
+    #expect(queue?.last == f.fixture.lockPath)
+    #expect((refreshed as? [String: Any])?["LimitLoadToSessionType"] as? [String] == ["Aqua", "Background"])
+}
+
+@Test func `an unchanged binary with a stale launch agent refreshes it and restarts without touching the receipt`()
+    throws
+{
+    let f = try UpdateFixture()
+    try Data("old".utf8).write(to: f.source)
+    try f.stalePlist.write(to: f.plist)
+    let receipt = try Data(contentsOf: ServiceUpdate.receipt(in: f.updates))
+    #expect(try f.apply())
+    #expect(f.events == ["stop", "start"])
+    #expect(f.startedPlists == [f.desiredPlist])
+    #expect(try Data(contentsOf: ServiceUpdate.receipt(in: f.updates)) == receipt)
+    #expect(!InstallationPaths.exists(ServiceUpdate.previous(in: f.updates)))
+    #expect(try f.contents(f.target) == "old")
+}
+
+@Test func `a stale launch agent is refreshed without starting a stopped service`() throws {
+    let f = try UpdateFixture()
+    f.loaded = false
+    f.revision = nil
+    try f.stalePlist.write(to: f.plist)
+    #expect(try !f.apply())
+    #expect(f.events.isEmpty)
+    #expect(try Data(contentsOf: f.plist) == f.desiredPlist)
+}
+
+@Test func `an identical launch agent leaves the file and a running service alone`() throws {
+    let f = try UpdateFixture()
+    try Data("old".utf8).write(to: f.source)
+    let before = try FileManager.default.attributesOfItem(atPath: f.plist.path)[.modificationDate] as? Date
+    #expect(try !f.apply())
+    #expect(f.events.isEmpty)
+    #expect(try FileManager.default.attributesOfItem(atPath: f.plist.path)[.modificationDate] as? Date == before)
+}
+
+@Test func `failed startup restores the original launch agent along with the executable`() throws {
+    let f = try UpdateFixture()
+    try f.stalePlist.write(to: f.plist)
+    f.failStart = true
+    #expect(throws: LatchError.self) { try f.apply() }
+    #expect(f.events == ["stop", "start", "stop", "start"])
+    #expect(f.startedBinaries == ["new", "old"])
+    #expect(f.startedPlists == [f.desiredPlist, f.stalePlist])
+    #expect(try Data(contentsOf: f.plist) == f.stalePlist)
+    #expect(try f.contents(f.target) == "old")
+    #expect(f.loaded)
+}
+
+@Test func `failed startup with an unchanged binary restores the original launch agent`() throws {
+    let f = try UpdateFixture()
+    try Data("old".utf8).write(to: f.source)
+    try f.stalePlist.write(to: f.plist)
+    f.failStart = true
+    #expect(throws: LatchError.self) { try f.apply() }
+    #expect(f.startedPlists == [f.desiredPlist, f.stalePlist])
+    #expect(try Data(contentsOf: f.plist) == f.stalePlist)
+    #expect(try f.contents(f.target) == "old")
+    #expect(f.loaded)
+}
+
+@Test func `an unwritable launch agent directory restores the executable and the service`() throws {
+    let f = try UpdateFixture()
+    try f.stalePlist.write(to: f.plist)
+    let receipt = try Data(contentsOf: ServiceUpdate.receipt(in: f.updates))
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: f.agents.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: f.agents.path) }
+    #expect(throws: LatchError.self) { try f.apply() }
+    #expect(try f.contents(f.target) == "old")
+    #expect(try Data(contentsOf: f.plist) == f.stalePlist)
+    #expect(try Data(contentsOf: ServiceUpdate.receipt(in: f.updates)) == receipt)
+    #expect(f.loaded)
+    #expect(f.startedBinaries == ["old"])
 }
