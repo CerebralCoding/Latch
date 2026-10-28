@@ -2,6 +2,14 @@
 
 Versions before 0.17.0 describe development milestones. Changes made while a version remained unchanged are grouped under that version.
 
+## 0.21.0
+
+Latch now supports starting its scheduler over SSH when nobody is logged into the Mac’s desktop session—useful for headless Macs and remote access after a reboot.
+
+Updates also refresh the launch-agent configuration automatically, preserve the selected queue, and restore the previous executable and configuration if restarting fails.
+
+Special thanks to [@STRML](https://github.com/STRML) for the implementation, regression tests, and detailed testing—and for contributing Latch’s first pull request! [#1](https://github.com/CerebralCoding/Latch/pull/1)
+
 ## 0.20.0
 
 Latch 0.20.0 introduces a native Swift terminal dashboard for monitoring workloads and managing the operator queue.
