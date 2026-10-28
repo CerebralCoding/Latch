@@ -70,7 +70,7 @@ Run as your normal macOS login user. The installer downloads the pinned release,
 | `~/.local/state/latch/` | Queue state, retained results, logs and rollback data |
 | `~/.cache/latch/` | Temporary installer downloads, removed afterward |
 
-The service starts immediately and at login. macOS restarts it after an unexpected exit. The installer refuses conflicting files, symlinks and incomplete installations rather than overwriting them.
+The service starts immediately and at login. macOS restarts it after an unexpected exit. With nobody logged in at the console (over ssh after a reboot), `install` and `start` load it into the per-user background domain (`user/<uid>`) instead of `gui/<uid>`; a later console login starts a second copy that waits for the first to stop. The installer refuses conflicting files, symlinks and incomplete installations rather than overwriting them.
 
 Source builds without an embedded application identifier or certificate-backed signing identifier use `<account>.latch.scheduler` and the matching `.plist` filename. Explicit application identifiers have `.scheduler` appended. `latch service status --verbose` reports the resolved label. Updates and rollbacks must retain the installed binary's service identifier.
 
@@ -302,7 +302,7 @@ Service actions precede their options: `latch service status --verbose`. Service
 
 ### Updates and rollbacks
 
-To update, run the installer attached to the desired release using the installation steps above. It verifies the new binary, stops accepting submissions while existing work drains, then atomically replaces the installed executable. Drain timeout is ten minutes; on timeout the installed version remains unchanged. Running and parked jobs are not cancelled to force an update. Never run an installer or update inside Latch's own queue.
+To update, run the installer attached to the desired release using the installation steps above. It verifies the new binary, stops accepting submissions while existing work drains, then atomically replaces the installed executable. It also rewrites the launch-agent configuration for the queue the service already uses, and restarts a running service if either changed. A failed restart restores both the executable and the configuration. Drain timeout is ten minutes; on timeout the installed version remains unchanged. Running and parked jobs are not cancelled to force an update. Never run an installer or update inside Latch's own queue.
 
 The previous binary is retained for `latch rollback`. Replacing the binary restarts a loaded service after draining, including when the service revision is unchanged; a stopped service remains stopped. Reapplying the same binary avoids a restart unless explicitly requested or the running revision differs. Reconnect MCP hosts after updating or rolling back to negotiate current capabilities, then retrieve retained results by `jobID`.
 
@@ -316,7 +316,7 @@ latch rollback
 latch service uninstall
 ```
 
-`stop` unloads the login service until `start` or the next login. It does not terminate admitted work; queued jobs wait for recovery.
+`stop` unloads the login service from every domain that holds it, until `start` or the next login. It does not terminate admitted work; queued jobs wait for recovery.
 
 `uninstall` removes the installed executable, service configuration and rollback data, retaining queue data and logs.
 

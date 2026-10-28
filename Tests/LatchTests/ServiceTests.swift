@@ -293,6 +293,19 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
     #expect(decoded["Label"] as? String == InstallationPaths.serviceIdentifier)
     #expect(decoded["RunAtLoad"] as? Bool == true)
     #expect(decoded["UserName"] == nil)
+    #expect(decoded["LimitLoadToSessionType"] as? [String] == ["Aqua", "Background"])
+}
+
+@Test func `service loads into the background domain when nobody is logged in at the console`() {
+    #expect(ServiceInstallation.domain(uid: 501, guiSession: true) == "gui/501")
+    #expect(ServiceInstallation.domain(uid: 501, guiSession: false) == "user/501")
+    #expect(ServiceInstallation.domains(uid: 501) == ["gui/501", "user/501"])
+}
+
+@Test func `only a launchd-started scheduler waits for the latch`() {
+    #expect(ServiceInstallation.launchedByService(["XPC_SERVICE_NAME": ServiceInstallation.label]))
+    #expect(!ServiceInstallation.launchedByService(["XPC_SERVICE_NAME": "com.example.other"]))
+    #expect(!ServiceInstallation.launchedByService([:]))
 }
 
 @Test func `planning view explains queue order headroom and stale sensors without sampling`() throws {

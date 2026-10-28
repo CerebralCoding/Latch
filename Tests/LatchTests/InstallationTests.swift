@@ -177,3 +177,20 @@ private final class InstallationFixture {
     #expect(f.events == ["start"])
     #expect(try String(contentsOf: f.paths.executable, encoding: .utf8) == "unrelated executable")
 }
+
+@Test func `refreshed launch agent configuration keeps the installed queue and adds the session limit`() throws {
+    let f = try InstallationFixture()
+    let queue = f.fixture.directory.appendingPathComponent("queue dir/scheduler.lock").path
+    var stale = ServiceInstallation.configuration(
+        executable: f.paths.executable.path, path: queue, logs: f.paths.logs.path, label: f.paths.label)
+    stale["LimitLoadToSessionType"] = nil
+    try FileManager.default.createDirectory(
+        at: f.paths.plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try PropertyListSerialization.data(fromPropertyList: stale, format: .xml, options: 0).write(to: f.paths.plist)
+    let refreshed =
+        try PropertyListSerialization.propertyList(
+            from: ServiceInstallation.refreshedConfiguration(paths: f.paths), format: nil) as? [String: Any]
+    #expect((refreshed?["ProgramArguments"] as? [String])?.last == queue)
+    #expect(refreshed?["Label"] as? String == f.paths.label)
+    #expect(refreshed?["LimitLoadToSessionType"] as? [String] == ["Aqua", "Background"])
+}

@@ -44,7 +44,13 @@ enum SchedulerService {
         }
         let lock = try FileLatch(path: scheduler.directory.appendingPathComponent("service.lock").path)
         do { try lock.acquire(shared: false, timeout: 0) } catch let error as LatchError where error.exitCode == 75 {
-            throw LatchError("scheduler service is already running for this latch", exitCode: 75)
+            // A GUI login loads the agent into gui/<uid> while a copy started headless still runs in
+            // user/<uid>. Under launchd, wait for that copy instead of exiting into a KeepAlive respawn loop.
+            guard ServiceInstallation.launchedByService(ProcessInfo.processInfo.environment) else {
+                throw LatchError("scheduler service is already running for this latch", exitCode: 75)
+            }
+            FileHandle.standardError.write(Data("latch: another scheduler holds this latch; waiting\n".utf8))
+            try lock.acquire(shared: false, timeout: nil)
         }
         try withExtendedLifetime(lock) {
             let jobs = try DurableJobs(scheduler: scheduler)
@@ -94,7 +100,21 @@ enum ServiceInstallation {
     static var plist: URL { paths.plist }
 
     static var domain: String {
-        "gui/\(getuid())"
+        domain(uid: getuid(), guiSession: hasGUISession())
+    }
+
+    /// gui/<uid> exists only while the user is logged in at the console. Over ssh with nobody at the
+    /// console (after a reboot, say), the agent loads into the per-user background domain instead.
+    static func domain(uid: uid_t, guiSession: Bool) -> String {
+        guiSession ? "gui/\(uid)" : "user/\(uid)"
+    }
+
+    static func domains(uid: uid_t) -> [String] {
+        ["gui/\(uid)", "user/\(uid)"]
+    }
+
+    static func launchedByService(_ environment: [String: String]) -> Bool {
+        environment["XPC_SERVICE_NAME"] == label
     }
 
     static func configuration(executable: String, path: String, logs: String, label: String = Self.label) -> [String:
@@ -105,9 +125,22 @@ enum ServiceInstallation {
             "ProgramArguments": [executable, "service", "run", "--file", path],
             "RunAtLoad": true, "KeepAlive": true, "ThrottleInterval": 10,
             "ProcessType": "Background",
+            "LimitLoadToSessionType": ["Aqua", "Background"],
             "StandardOutPath": logs + "/service.log",
             "StandardErrorPath": logs + "/service-error.log",
         ]
+    }
+
+    static func configurationData(paths: InstallationPaths, queue: String) throws -> Data {
+        try PropertyListSerialization.data(
+            fromPropertyList: configuration(
+                executable: paths.executable.path, path: URL(fileURLWithPath: queue).standardizedFileURL.path,
+                logs: paths.logs.path, label: paths.label), format: .xml, options: 0)
+    }
+
+    /// The current launch-agent configuration for the queue the installed agent already serves.
+    static func refreshedConfiguration(paths: InstallationPaths = InstallationPaths()) throws -> Data {
+        try configurationData(paths: paths, queue: installedPath(paths: paths))
     }
 
     static func perform(_ action: Options.ServiceAction, path: String, verbose: Bool = false, json: Bool = false) throws
@@ -152,8 +185,8 @@ enum ServiceInstallation {
             }
         case .start:
             let installedQueue = try installedPath()
-            if try isLoaded() {
-                try launchctl(["kickstart", "\(domain)/\(label)"])
+            if let loaded = try loadedDomains().first {
+                try launchctl(["kickstart", "\(loaded)/\(label)"])
             } else {
                 try launchctl(["bootstrap", domain, plist.path])
             }
@@ -193,6 +226,7 @@ enum ServiceInstallation {
         let restarted = try ServiceUpdate.apply(
             source: source, target: executable, updates: paths.updates, scheduler: scheduler, rollback: rollback,
             timeout: timeout, restartService: restartService, expectedIdentifier: InstallationPaths.identifier,
+            plist: ServicePlist(url: plist, contents: try refreshedConfiguration(paths: paths)),
             service: UpdateServiceControl(
                 loaded: isLoaded,
                 revision: { try SchedulerService.status(in: scheduler.directory).serviceRevision },
@@ -218,13 +252,23 @@ enum ServiceInstallation {
         throw LatchError("service did not start; inspect \(paths.logs.path)/service-error.log", exitCode: 69)
     }
 
-    private static func isLoaded() throws -> Bool {
-        try invoke(["print", "\(domain)/\(label)"], quiet: true) == 0
+    private static func hasGUISession() -> Bool {
+        (try? invoke(["print", "gui/\(getuid())"], quiet: true)) == 0
     }
 
+    private static func loadedDomains() throws -> [String] {
+        try domains(uid: getuid()).filter { try invoke(["print", "\($0)/\(label)"], quiet: true) == 0 }
+    }
+
+    private static func isLoaded() throws -> Bool {
+        try !loadedDomains().isEmpty
+    }
+
+    // Both domains can hold the agent at once (see SchedulerService.run); stop every copy so a waiting
+    // one does not take over.
     private static func stopIfLoaded() throws {
-        if try isLoaded() {
-            try launchctl(["bootout", "\(domain)/\(label)"])
+        for loaded in try loadedDomains() {
+            try launchctl(["bootout", "\(loaded)/\(label)"])
         }
     }
 
