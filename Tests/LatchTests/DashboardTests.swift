@@ -390,7 +390,12 @@ import Testing
     @Test func openDetailsFollowCompletionWithoutLosingContextOrScrollPosition() throws {
         let f = try OperatorFixture()
         try f.publishSensors()
-        let finished = try f.submit("job being read", measurement: true)
+        let finished = try f.store.submit(
+            MCPSubmission([
+                "requestKey": "retained-labels", "name": "job being read", "executable": "/usr/bin/true",
+                "workingDirectory": .string(f.fixture.directory.path), "measurement": true,
+                "owner": "agent-a", "sessionID": "retained-session",
+            ]))
         let next = try f.submit("next job")
         try f.scheduler.transaction { state in
             let index = state.tasks.firstIndex { $0.id == finished.id }!
@@ -404,6 +409,8 @@ import Testing
         model.detailOffset = 3
         #expect(model.selectedID == finished.id)
         let before = DashboardRenderer.detailLines(model, width: 100)
+        #expect(before.contains("Owner: agent-a"))
+        #expect(before.contains("Session: retained-session"))
         try f.store.publish(
             finished.id,
             result: [
@@ -424,6 +431,7 @@ import Testing
         for line in before
         where line.contains("Reservations:") || line.contains("Temperature limits:")
             || line.contains("/usr/bin/true") || line.contains("Directory:")
+            || line.contains("Owner:") || line.contains("Session:")
         {
             #expect(after.contains(line))
         }
@@ -444,6 +452,8 @@ import Testing
         _ = OperatorDashboard.handle(.enter, model: &model, pending: &pending)
         #expect(model.retainedDetail?.job.jobID == next.id)
         #expect(!DashboardRenderer.detailLines(model, width: 100).contains("Final job output"))
+        #expect(!DashboardRenderer.detailLines(model, width: 100).contains("Owner: agent-a"))
+        #expect(!DashboardRenderer.detailLines(model, width: 100).contains("Session: retained-session"))
     }
 
     @Test func terminalKeepsDetailsOpenWhenTheJobFinishes() throws {
@@ -495,7 +505,7 @@ import Testing
                 }
             }
         }
-        var model = Self.populatedModel()
+        var model = Self.populatedModel(owner: "claude-code", sessionID: "4f2a-operator-preview")
         let screen = DashboardRenderer.render(&model, width: 119, height: 40)
         #expect(screen.plain.contains("JOBS ·"))
         #expect(screen.plain.contains("CPU temperature"))
@@ -675,17 +685,19 @@ import Testing
         #expect(try f.fixture.finish(terminal.child, onWait: terminal.drain) == 0)
     }
 
-    private static func snapshot() -> DashboardSnapshot {
+    private static func snapshot(owner: String? = nil, sessionID: String? = nil) -> DashboardSnapshot {
         let sensors = SensorSnapshot(
             sampledAt: Date(), uptime: 100, cpuCores: 18, cpuActive: 0.12, busiestCore: 0.46,
             gpuActive: 0.28, aneWatts: 0.1, memoryAvailableMiB: 90000, memoryTotalMiB: 131072,
             memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 2_000_000, unavailable: [],
             cpuTemperature: 46, gpuTemperature: 41, aneActivity: .init(fraction: 0.25, source: .powerFloor),
             cpuWatts: 12.3, gpuWatts: 4.5)
-        let first = ScheduledTask(
+        var first = ScheduledTask(
             id: "11111111-1111-4111-8111-111111111111", name: "Swift build", pid: 100,
             arguments: ["/usr/bin/swift", "build"], requirements: TaskRequirements(mode: .batch), state: .running,
             queuedUptime: 50, startedAt: Date().addingTimeInterval(-30))
+        first.owner = owner
+        first.sessionID = sessionID
         let second = ScheduledTask(
             id: "22222222-2222-4222-8222-222222222222", name: "Release benchmark", pid: 0,
             arguments: ["/work/benchmark"],
@@ -700,9 +712,9 @@ import Testing
         return DashboardSnapshot(view: view)
     }
 
-    private static func populatedModel() -> DashboardModel {
+    private static func populatedModel(owner: String? = nil, sessionID: String? = nil) -> DashboardModel {
         var model = DashboardModel(interval: 1)
-        var snapshot = snapshot()
+        var snapshot = snapshot(owner: owner, sessionID: sessionID)
         for index in 0..<80 {
             snapshot.view.sensors?.uptime = 100 + Double(index)
             snapshot.view.sensors?.cpuActive = 0.2 + 0.16 * sin(Double(index) / 8)

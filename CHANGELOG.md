@@ -2,6 +2,16 @@
 
 Versions before 0.17.0 describe development milestones. Changes made while a version remained unchanged are grouped under that version.
 
+## 0.22.0
+
+Latch now records optional owner and session labels, making it easier to tell whose work is running on a shared queue.
+
+- Label CLI jobs with `--owner` and `--session`, or set `LATCH_OWNER` and `LATCH_SESSION_ID` in the submitting environment. MCP submissions accept `owner` and `sessionID` too.
+- See labels in `latch list`, JSON output, and MCP job results. The TUI overview and plain `latch view` show owners; job details and `view --verbose` show full owner/session values, including while reading a job that finishes.
+- Labels remain informational: private scope tokens still control scoped bulk cancellation, and retries keep the original job and its labels.
+
+Special thanks to [@STRML](https://github.com/STRML) for contributing owner/session labels and the accompanying tests in [#2](https://github.com/CerebralCoding/Latch/pull/2). This release also adds the operator-view integration described above.
+
 ## 0.21.0
 
 Latch now supports starting its scheduler over SSH when nobody is logged into the Mac’s desktop session—useful for headless Macs and remote access after a reboot.

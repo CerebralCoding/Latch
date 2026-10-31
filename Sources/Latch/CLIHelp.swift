@@ -163,7 +163,8 @@ enum CLIHelp {
                        [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
                 run queues the command through the running scheduler with FIFO admission and thermal guards.
                 --shared permits shared work while excluding exclusive work.
-                --owner and --session label the job (1–128 bytes each) in latch list and in list/view --json;
+                --owner and --session label the job (1–128 bytes each) in list, view, and tui;
+                full labels appear in view --verbose, TUI job details, and list/view --json.
                 LATCH_OWNER and LATCH_SESSION_ID supply them when the flags are absent (a malformed variable is
                 ignored with a warning). Labels are not authentication.
                 Defaults: 1 CPU core, 512 MiB, CPU <=85°C, GPU <=80°C; no measurement quiet window.
@@ -200,7 +201,8 @@ enum CLIHelp {
                 Batch work may overlap within capacity. Isolated work also requires a quiet window.
                 FIFO prevents newer jobs overtaking an older blocked ticket. Runtime is never limited.
                 Missing/stale sensors block admission. Temperature limits: 1–125°C; cooldown: 0–3600s.
-                --owner and --session label the job (1–128 bytes each) in latch list and in list/view --json;
+                --owner and --session label the job (1–128 bytes each) in list, view, and tui;
+                full labels appear in view --verbose, TUI job details, and list/view --json.
                 LATCH_OWNER and LATCH_SESSION_ID supply them when the flags are absent (a malformed variable is
                 ignored with a warning). Labels are not authentication.
                 Timeout bounds admission only; --no-wait fails immediately. Requires the service unless --standalone.

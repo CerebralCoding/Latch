@@ -183,13 +183,22 @@ enum DashboardRenderer {
         let rows = model.jobs
         let wide = content.width >= 100
         let narrow = content.width < 70
+        let prefix =
+            wide
+            ? "  POS  STATE       CLASS        ELAPSED   ID        "
+            : narrow ? "  STATE      ELAPSED  " : "  POS  STATE       ELAPSED   "
+        let owners = rows.compactMap(\.owner)
+        let ownerWidth =
+            narrow || owners.isEmpty
+            ? 0
+            : min(
+                24, content.width - prefix.count - 18,
+                max(5, owners.map { TerminalText.safe($0).reduce(0) { $0 + TerminalText.width($1) } }.max() ?? 0))
+        let nameWidth = content.width - prefix.count - ownerWidth - 2
         let header = content.height >= 4 ? 1 : 0
         if header > 0 {
-            let prefix =
-                wide
-                ? "  POS  STATE       CLASS        ELAPSED   ID        NAME"
-                : narrow ? "  STATE      ELAPSED  NAME" : "  POS  STATE       ELAPSED   NAME"
-            content.put(prefix, x: 0, y: 0, style: .init(tone: .muted))
+            let labels = ownerWidth > 0 ? TerminalText.fit("NAME", width: nameWidth) + "  OWNER" : "NAME"
+            content.put(prefix + labels, x: 0, y: 0, style: .init(tone: .muted))
         }
         let count = content.height - header * 2
         let index = rows.firstIndex { $0.jobID == model.selectedID } ?? 0
@@ -212,7 +221,12 @@ enum DashboardRenderer {
             if wide { text += TerminalText.fit(job.classification, width: 13) }
             text += TerminalText.fit(HumanOutput.duration(job.elapsedSeconds), width: narrow ? 9 : 10)
             if wide { text += TerminalText.fit(String(job.jobID.prefix(8)), width: 10) }
-            text += job.name
+            if ownerWidth > 0 {
+                text += TerminalText.fit(job.name, width: nameWidth) + "  "
+                text += TerminalText.fit(job.owner ?? "—", width: ownerWidth)
+            } else {
+                text += job.name + (job.owner.map { " · \($0)" } ?? "")
+            }
             content.put(text, x: 0, y: row, style: style)
         }
         if header > 0, let job = model.selected {
@@ -256,6 +270,8 @@ enum DashboardRenderer {
             job.name, job.jobID,
             "\(status) · \(job.classification) · elapsed \(HumanOutput.duration(job.elapsedSeconds))",
         ]
+        if let owner = job.owner { lines.append("Owner: \(TerminalText.safe(owner))") }
+        if let session = job.sessionID { lines.append("Session: \(TerminalText.safe(session))") }
         if let pid = job.pid { lines.append("PID \(pid)") }
         lines.append("Submitted \(job.createdAt.formatted(date: .numeric, time: .standard))")
         if let finished = job.finishedAt {

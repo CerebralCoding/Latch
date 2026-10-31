@@ -142,7 +142,9 @@ enum HumanOutput {
         if !value.service.running {
             lines.append("Admission  Service stopped; queued work awaits recovery")
         } else if let next = value.jobs.first(where: { $0.jobID == value.nextTaskID }) {
-            lines.append("Next       \(safe(next.name)) (\(next.classification))")
+            lines.append(
+                "Next       \(safe(next.name)) (\(next.classification))"
+                    + (next.owner.map { " · owner \(safe($0))" } ?? ""))
             lines.append(
                 "Admission  \(safe(next.blockerDetail ?? next.blockedBy ?? "Eligible at this snapshot; admission is not reserved"))"
             )
@@ -181,13 +183,16 @@ enum HumanOutput {
             }
         }
         if verbose {
-            lines += ["", list(value.jobs, verbose: true, width: width)]
+            lines += ["", list(value.jobs, verbose: true, width: width, fullLabels: true)]
         } else if value.jobs.isEmpty {
             lines += ["", "No outstanding jobs."]
         } else {
             let ordered = running + value.jobs.filter { $0.state != "running" }
             lines += ["", "Work"]
-            lines += ordered.prefix(6).map { "  \($0.state) · \(safe($0.name)) (\($0.classification))" }
+            lines += ordered.prefix(6).map {
+                "  \($0.state) · \(safe($0.name)) (\($0.classification))"
+                    + ($0.owner.map { " · owner \(safe($0))" } ?? "")
+            }
             if ordered.count > 6 { lines.append("\(ordered.count - 6) more jobs · use --verbose for all") }
             lines.append("Use latch list for copyable job IDs.")
         }
@@ -238,7 +243,9 @@ enum HumanOutput {
         return wrap(lines.joined(separator: "\n"), width: width)
     }
 
-    static func list(_ jobs: [JobSummary], verbose: Bool, width: Int = terminalWidth) -> String {
+    static func list(_ jobs: [JobSummary], verbose: Bool, width: Int = terminalWidth, fullLabels: Bool = false)
+        -> String
+    {
         guard !jobs.isEmpty else { return "No outstanding jobs." }
         let ordered = jobs.filter { $0.state == "running" } + jobs.filter { $0.state != "running" }
         let shown = verbose ? ordered : Array(ordered.prefix(10))
@@ -255,8 +262,9 @@ enum HumanOutput {
                 [
                     $0.jobID, $0.state, $0.classification, $0.queuePosition.map(String.init) ?? "-",
                     duration($0.elapsedSeconds),
-                ] + (showOwner ? [$0.owner.map { clip(safe($0), to: 24) } ?? "-"] : [])
-                    + (showSession ? [$0.sessionID.map { clip(safe($0), to: 16) } ?? "-"] : []) + [safe($0.name)]
+                ] + (showOwner ? [$0.owner.map { fullLabels ? safe($0) : clip(safe($0), to: 24) } ?? "-"] : [])
+                    + (showSession ? [$0.sessionID.map { fullLabels ? safe($0) : clip(safe($0), to: 16) } ?? "-"] : [])
+                    + [safe($0.name)]
             }
         let last = rows[0].count - 1
         let sizes = (0..<last).map { index in rows.map { displayWidth($0[index]) }.max() ?? 0 }

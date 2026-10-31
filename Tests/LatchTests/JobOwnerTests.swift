@@ -35,12 +35,12 @@ private func ownerSubmission(_ fixture: Fixture, key: String, extra: [String: MC
     return .object(value)
 }
 
-/// The column of `header` in a table row, found by the header's own offset (the tables are ASCII in these tests).
+/// The column of `header` by its offset; these test rows use single-cell characters.
 private func cell(_ row: String, under header: String, in headerRow: String) -> Substring? {
     guard let range = headerRow.range(of: header) else { return nil }
     let start = headerRow.distance(from: headerRow.startIndex, to: range.lowerBound)
     guard row.count > start else { return nil }
-    return row.dropFirst(start).prefix(while: { $0 != " " })
+    return row.dropFirst(start).prefix(while: { $0 != " " && $0 != "│" })
 }
 
 // MARK: command line
@@ -236,6 +236,88 @@ private func cell(_ row: String, under header: String, in headerRow: String) -> 
 }
 
 // MARK: presentation
+
+@Test func `view shows owners beside running and next jobs and reserves session ids for verbose output`() throws {
+    var running = ownerTask(name: "running-build", owner: "agent-a", sessionID: "running-session")
+    running.state = .running
+    let queued = ownerTask(name: "queued-build", owner: "agent-b", sessionID: "queued-session")
+    let view = ownerView(SchedulerState(tasks: [running, queued]))
+    let text = HumanOutput.view(view, verbose: false, width: 160)
+    #expect(text.contains("Next       queued-build (sensitive) · owner agent-b"))
+    #expect(text.contains("running · running-build (sensitive) · owner agent-a"))
+    #expect(text.contains("queued · queued-build (sensitive) · owner agent-b"))
+    #expect(!text.contains("running-session") && !text.contains("queued-session"))
+    let bare = HumanOutput.view(ownerView(SchedulerState(tasks: [ownerTask()])), verbose: false)
+    #expect(!bare.contains("owner"))
+}
+
+@Test func `verbose view keeps full labels for task-backed and record-only jobs at every width`() throws {
+    let fixture = try Fixture()
+    let owner = String(repeating: "漢", count: 40)
+    let session = String(repeating: "s", count: 128)
+    let record = DurableJobRecord(
+        id: UUID().uuidString,
+        submission: try MCPSubmission(
+            ownerSubmission(fixture, key: "verbose", extra: ["sessionID": .string(session)])))
+    let view = ownerView(SchedulerState(jobs: [record], tasks: [ownerTask(owner: owner)]))
+    for width in [60, 160, 240] {
+        let text = HumanOutput.view(view, verbose: true, width: width)
+        let joined = text.replacingOccurrences(of: "\n", with: "")
+        #expect(joined.contains(owner))
+        #expect(joined.contains(session))
+        for line in text.split(separator: "\n") {
+            #expect(line.reduce(0) { $0 + TerminalText.width($1) } <= width)
+        }
+    }
+}
+
+@Test func `dashboard shows owners without crowding unlabeled queues or exposing session ids in the overview`() throws {
+    let owned = ownerTask(owner: "agent-a", sessionID: "private-session-label")
+    let bare = ownerTask(name: "unowned")
+    var model = DashboardModel(interval: 1)
+    model.ingest(DashboardSnapshot(view: ownerView(SchedulerState(tasks: [owned, bare]))))
+    for width in [59, 79, 119, 159] {
+        let screen = DashboardRenderer.render(&model, width: width, height: 40)
+        #expect(screen.plain.contains("agent-a"))
+        #expect(!screen.plain.contains("private-session-label"))
+        #expect(screen.plain.contains("OWNER") == (width >= 74))
+        if width >= 74 {
+            let lines = screen.plain.split(separator: "\n").map(String.init)
+            let header = try #require(lines.first { $0.contains("OWNER") })
+            let ownedRow = try #require(lines.first { $0.contains("build") })
+            let bareRow = try #require(lines.first { $0.contains("unowned") })
+            #expect(cell(ownedRow, under: "OWNER", in: header) == "agent-a")
+            #expect(cell(bareRow, under: "OWNER", in: header) == "—")
+        }
+    }
+    model.ingest(DashboardSnapshot(view: ownerView(SchedulerState(tasks: [bare]))))
+    #expect(!DashboardRenderer.render(&model, width: 119, height: 40).plain.contains("OWNER"))
+}
+
+@Test func `operator views escape and wrap full labels without overflowing the terminal`() throws {
+    let owner = "a\u{1B}[31m\u{202e}\n" + String(repeating: "漢", count: 30)
+    let session = "s\u{1B}[0m\u{202e}\n" + String(repeating: "x", count: 100)
+    let view = ownerView(SchedulerState(tasks: [ownerTask(owner: owner, sessionID: session)]))
+    var model = DashboardModel(interval: 1)
+    model.ingest(DashboardSnapshot(view: view))
+    for width in [45, 59, 73, 74, 79, 103, 104, 119, 159] {
+        let screen = DashboardRenderer.render(&model, width: width, height: 40)
+        for row in screen.cells {
+            #expect(row.map(\.text).joined().reduce(0) { $0 + TerminalText.width($1) } == width)
+        }
+        #expect(!screen.plain.contains("\u{1B}") && !screen.plain.contains("\u{202e}"))
+        model.details = true
+        let details = DashboardRenderer.detailLines(model, width: width).joined()
+        #expect(details.contains("Owner: " + TerminalText.safe(owner)))
+        #expect(details.contains("Session: " + TerminalText.safe(session)))
+        model.details = false
+        for verbose in [false, true] {
+            let text = HumanOutput.view(view, verbose: verbose, width: width)
+            #expect(!text.contains("\u{1B}") && !text.contains("\u{202e}"))
+            #expect(text.replacingOccurrences(of: "\n", with: "").contains("\\u{1b}[31m"))
+        }
+    }
+}
 
 @Test func `list adds OWNER and SESSION columns in order, aligned, only when some job has the label`() throws {
     let owned = ownerTask(name: "named-job", owner: "claude-code", sessionID: "abc-123")
