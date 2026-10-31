@@ -40,6 +40,7 @@ struct Latch {
         }
         do {
             let options = try Options(arguments: Array(CommandLine.arguments.dropFirst()))
+            for warning in options.warnings { FileHandle.standardError.write(Data("latch: \(warning)\n".utf8)) }
             if options.command == .version {
                 print(BuildIdentity.version)
                 return
@@ -122,6 +123,7 @@ struct Latch {
                     name: options.taskName ?? options.childArguments.first ?? "temperature guard",
                     arguments: options.childArguments,
                     requirements: options.requirements, timeout: options.timeout, useService: !options.standalone,
+                    owner: options.owner, sessionID: options.sessionID
                 )
                 defer { try? scheduler.withdraw(reservation.id) }
                 try withExtendedLifetime(reservation) {

@@ -94,6 +94,9 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
     var residentMemoryMiB: Int?
     var plan: TaskPlan?
     var admission: AdmissionSnapshot?
+    /// Who queued the job and from which session. Both are self-declared labels for operators, never an authorization.
+    var owner: String?
+    var sessionID: String?
 }
 
 struct SchedulerState: Codable, Equatable {

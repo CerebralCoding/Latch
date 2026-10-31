@@ -337,6 +337,8 @@ final class MCPExecution {
                     ? (cancelAt == nil ? "completed" : "cancelled")
                     : (cancelAt == nil ? (status?.admitted == true ? "running" : "queued") : "cancelling")),
         ]
+        value["owner"] = submission.owner.map(MCPValue.string)
+        value["sessionID"] = submission.sessionID.map(MCPValue.string)
         if let taskID = status?.taskID {
             value["taskID"] = .string(taskID)
         }

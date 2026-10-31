@@ -1084,7 +1084,7 @@ private func jobID(_ response: MCPValue) throws -> String {
     #expect(
         Set(properties.keys) == [
             "requestKey", "name", "executable", "arguments", "workingDirectory", "measurement", "input", "columns",
-            "rows", "checkpoints", "classification", "scopeToken",
+            "rows", "checkpoints", "classification", "scopeToken", "owner", "sessionID",
         ])
     #expect(try client.request("unknown")["error"]?["code"] == -32601)
     #expect(try client.tool("service_install")["error"]?["code"] == -32602)
@@ -1932,4 +1932,46 @@ func `terminal attaches streams and forwards signals and control characters`(mod
     #expect(
         try store.enqueueControl(MCPControl(operation: "latch_signal", arguments: interrupt), id: job.id).state
             == "queued")
+}
+
+@Test func `MCP submit then job reads carry the owner and session id and a retry with other labels re-attaches`() throws
+{
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        var labelled = try #require(submission(fixture, key: "labelled").object)
+        labelled["owner"] = "claude-code"
+        labelled["sessionID"] = "abc-123"
+        let submitted = try #require(
+            client.tool("latch_submit", arguments: .object(labelled))["result"]?["structuredContent"])
+        let id = try #require(submitted["jobID"]?.string)
+        #expect(submitted["owner"] == "claude-code")
+        #expect(submitted["sessionID"] == "abc-123")
+        let job = try #require(
+            client.tool("latch_job", arguments: ["jobID": .string(id)])["result"]?["structuredContent"])
+        #expect(job["submission"]?["owner"] == "claude-code")
+        #expect(job["submission"]?["sessionID"] == "abc-123")
+        #expect(job["result"]?["owner"] == "claude-code")
+        #expect(job["result"]?["sessionID"] == "abc-123")
+        let page = try #require(client.tool("latch_jobs", arguments: ["limit": 50])["result"]?["structuredContent"])
+        guard case .array(let jobs) = page["jobs"] else {
+            Issue.record("missing job summaries")
+            return
+        }
+        let listed = try #require(jobs.first { $0["jobID"]?.string == id })
+        #expect(listed["owner"] == "claude-code")
+        #expect(listed["sessionID"] == "abc-123")
+        // The same requestKey with other labels is the same job, and the first labels stand.
+        labelled["sessionID"] = "def-456"
+        let retried = try #require(
+            client.tool("latch_submit", arguments: .object(labelled))["result"]?["structuredContent"])
+        #expect(retried["jobID"]?.string == id)
+        #expect(retried["sessionID"] == "abc-123")
+        // An unlabelled submission reports no label keys at all.
+        let plain = try #require(
+            client.tool("latch_submit", arguments: submission(fixture, key: "plain"))["result"]?["structuredContent"])
+        #expect(plain["owner"] == nil && plain["sessionID"] == nil)
+    }
 }

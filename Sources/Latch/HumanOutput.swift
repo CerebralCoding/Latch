@@ -243,20 +243,29 @@ enum HumanOutput {
         let ordered = jobs.filter { $0.state == "running" } + jobs.filter { $0.state != "running" }
         let shown = verbose ? ordered : Array(ordered.prefix(10))
         var lines: [String] = []
-        if width >= 100 {
-            let rows =
-                [["JOB ID", "STATE", "CLASS", "QUEUE", "AGE", "NAME"]]
-                + shown.map {
-                    [
-                        $0.jobID, $0.state, $0.classification, $0.queuePosition.map(String.init) ?? "-",
-                        duration($0.elapsedSeconds), safe($0.name),
-                    ]
-                }
-            let sizes = (0..<5).map { index in rows.map { displayWidth($0[index]) }.max() ?? 0 }
+        // OWNER and SESSION appear only when some listed job has one, so output for unlabelled queues is unchanged.
+        let showOwner = shown.contains { $0.owner != nil }
+        let showSession = shown.contains { $0.sessionID != nil }
+        let rows =
+            [
+                ["JOB ID", "STATE", "CLASS", "QUEUE", "AGE"] + (showOwner ? ["OWNER"] : [])
+                    + (showSession ? ["SESSION"] : []) + ["NAME"]
+            ]
+            + shown.map {
+                [
+                    $0.jobID, $0.state, $0.classification, $0.queuePosition.map(String.init) ?? "-",
+                    duration($0.elapsedSeconds),
+                ] + (showOwner ? [$0.owner.map { clip(safe($0), to: 24) } ?? "-"] : [])
+                    + (showSession ? [$0.sessionID.map { clip(safe($0), to: 16) } ?? "-"] : []) + [safe($0.name)]
+            }
+        let last = rows[0].count - 1
+        let sizes = (0..<last).map { index in rows.map { displayWidth($0[index]) }.max() ?? 0 }
+        // The table needs room for a readable name after the fixed columns; otherwise use the stacked layout.
+        if width >= 100, sizes.reduce(0, +) + 2 * last + 16 <= width {
             lines = rows.map { row in
-                (0..<5).map { index in
+                (0..<last).map { index in
                     row[index] + String(repeating: " ", count: sizes[index] - displayWidth(row[index]) + 2)
-                }.joined() + row[5]
+                }.joined() + row[last]
             }
         } else {
             for job in shown {
@@ -265,12 +274,27 @@ enum HumanOutput {
                     "  \(job.state) · \(job.classification) · \(job.queuePosition.map { "queue \($0) · " } ?? "")\(duration(job.elapsedSeconds))",
                     "  \(safe(job.name))",
                 ]
+                let labels = [
+                    job.owner.map { "owner \(safe($0))" }, job.sessionID.map { "session \(safe($0))" },
+                ].compactMap { $0 }
+                if !labels.isEmpty { lines.append("  " + labels.joined(separator: " · ")) }
             }
         }
         if jobs.count > shown.count {
             lines.append("\(jobs.count - shown.count) more outstanding jobs · use --verbose for all")
         }
         return wrap(lines.joined(separator: "\n"), width: width)
+    }
+
+    /// `text` cut to `cells` display columns, ending in an ellipsis when something was removed.
+    private static func clip(_ text: String, to cells: Int) -> String {
+        guard displayWidth(text) > cells else { return text }
+        var clipped = ""
+        for character in text {
+            if displayWidth(clipped + String(character)) > cells - 1 { break }
+            clipped.append(character)
+        }
+        return clipped + "…"
     }
 
     private static func displayWidth(_ text: String) -> Int {

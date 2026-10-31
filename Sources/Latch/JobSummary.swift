@@ -15,11 +15,15 @@ struct JobSummary: Encodable {
     var cooldownRemainingSeconds: Double?
     var complete = false
     var finishedAt: Date?
+    var owner: String?
+    var sessionID: String?
 
     init(task: SchedulerView.Task, record: DurableJobRecord?, observedAt: Date) {
         let value = task.task
         jobID = value.id
         name = value.name
+        owner = value.owner
+        sessionID = value.sessionID
         state = value.state == .queued && value.residentMemoryMiB != nil ? "waiting" : value.state.rawValue
         if record?.state == "cancelling" { state = "cancelling" }
         classification = Self.classification(value.requirements)
@@ -37,6 +41,8 @@ struct JobSummary: Encodable {
     init(record: DurableJobRecord, observedAt: Date) {
         jobID = record.id
         name = record.submission.name
+        owner = record.submission.owner
+        sessionID = record.submission.sessionID
         state = record.state
         classification =
             record.submission.measurement ? "measurement" : record.submission.classification.rawValue

@@ -43,7 +43,7 @@ enum MCPTools {
 
     static let submissionKeys: Set<String> = [
         "requestKey", "name", "executable", "arguments", "workingDirectory", "measurement", "input", "columns", "rows",
-        "checkpoints", "classification",
+        "checkpoints", "classification", "owner", "sessionID",
     ]
 
     static let list: [MCPValue] = [
@@ -69,6 +69,16 @@ enum MCPTools {
                         "Private bearer token from your own latch_create_scope call. Retain and reuse it across reconnects and submission retries to permit safe bulk cancellation. Never use another agent's token. Omit for an unscoped job, which cannot later join a scope.",
                 ],
                 "name": ["type": "string", "minLength": 1, "maxLength": 128],
+                "owner": [
+                    "type": "string", "minLength": 1, "maxLength": 128,
+                    "description":
+                        "Optional label for who queued this job, such as the agent or project name. Shown in latch_jobs, latch_job, and the CLI list. A self-declared label for operators; it grants no authority and is not a scope.",
+                ],
+                "sessionID": [
+                    "type": "string", "minLength": 1, "maxLength": 128,
+                    "description":
+                        "Optional identifier of the agent session that queued this job, so an operator can find its jobs. Self-declared; not a credential. A retry with the same requestKey returns the existing job whatever labels it carries; the first submission's labels stand.",
+                ],
                 "executable": [
                     "type": "string", "minLength": 1,
                     "description":
@@ -213,11 +223,15 @@ struct MCPSubmission: Codable, Equatable {
     var rows: Int
     var checkpoints: Bool
     var classification: Classification
+    var owner: String?
+    var sessionID: String?
 
     init(_ value: MCPValue?) throws {
         let input = try MCPArguments(value, allowed: MCPTools.submissionKeys)
         requestKey = try input.text("requestKey", maximum: 128)
         name = try input.text("name", maximum: 128)
+        owner = try input.values["owner"] == nil ? nil : input.text("owner", maximum: 128)
+        sessionID = try input.values["sessionID"] == nil ? nil : input.text("sessionID", maximum: 128)
         executable = try input.text("executable")
         workingDirectory = try input.text("workingDirectory")
         guard executable.hasPrefix("/"), workingDirectory.hasPrefix("/") else {
@@ -254,5 +268,21 @@ struct MCPSubmission: Codable, Equatable {
         }
         columns = try Int(input.number("columns", default: 80, range: 1...1000, integer: true))
         rows = try Int(input.number("rows", default: 24, range: 1...1000, integer: true))
+    }
+
+    /// The submission with its labels cleared: what a retry of the same requestKey must repeat.
+    var withoutLabels: MCPSubmission {
+        var copy = self
+        copy.owner = nil
+        copy.sessionID = nil
+        return copy
+    }
+
+    /// `fields` plus the owner and sessionID, when the submission set them.
+    func labelled(_ fields: [String: MCPValue]) -> MCPValue {
+        var fields = fields
+        fields["owner"] = owner.map(MCPValue.string)
+        fields["sessionID"] = sessionID.map(MCPValue.string)
+        return .object(fields)
     }
 }

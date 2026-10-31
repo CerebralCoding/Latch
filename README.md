@@ -268,6 +268,17 @@ Cancellation is asynchronous; completed results remain available. The scheduler 
 
 `latch run -- COMMAND` also uses the running scheduler and shared FIFO queue. It defaults to exclusive non-measurement admission, 1 CPU core, 512 MiB, CPU <=85°C and GPU <=80°C; `--shared` allows overlap. Use `schedule` for measurements or explicit resource and thermal requirements.
 
+### Owner and session labels
+
+On a shared queue, `latch list` cannot say whose job is whose unless the submitter says so. `run`, `schedule` and `guard` accept `--owner NAME` and `--session ID`, each 1–128 bytes of UTF-8; MCP `latch_submit` and `latch_execute` take `owner` and `sessionID` with the same limit. Set `LATCH_OWNER` and `LATCH_SESSION_ID` in a shell or agent environment to label every job it queues from the CLI. A flag overrides the variable, an empty variable counts as unset, and a malformed variable is ignored with a warning on stderr.
+
+```sh
+latch schedule --owner claude-code --session 4f2a --name build --mode batch -- make -j4
+latch list
+```
+
+`latch list` adds an `OWNER` column once any listed job has an owner, and a `SESSION` column once any has a session id; long values are clipped with an ellipsis, and a terminal too narrow for the columns gets the stacked layout. `list --json`, `view --json` and the MCP job results carry `owner` and `sessionID` in full; plain `latch view` and the dashboard do not show them. They are plain labels that anyone submitting can set to any value: they are not authentication, and they do not select jobs for `latch_clear_own` or `latch_stop_own`, which still use the private scope token. They are not part of a job's identity either: an MCP retry with the same `requestKey` returns the existing job, with its original labels, even if the retry carries different ones.
+
 ### Measurements and resource requirements
 
 For human-submitted measurements, `schedule` protects the complete command:
