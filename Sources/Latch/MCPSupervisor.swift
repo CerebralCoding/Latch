@@ -26,13 +26,13 @@ enum MCPSupervisor {
                 if FileManager.default.fileExists(atPath: store.file(id, "cancel").path) {
                     try store.publish(
                         id,
-                        result: [
+                        result: record.submission.labelled([
                             "jobID": .string(id), "requestKey": .string(record.submission.requestKey),
                             "name": .string(record.submission.name),
                             "complete": true, "state": "cancelled", "succeeded": false, "phase": "admission",
                             "exitCode": 15, "terminationReason": "signal",
                             "stdout": "", "stderr": "", "stdoutTruncated": false, "stderrTruncated": false,
-                        ])
+                        ]))
                     return 0
                 }
                 guard (try? SchedulerService.requireRunning(in: scheduler.directory)) != nil else {
@@ -50,12 +50,12 @@ enum MCPSupervisor {
                 if result["phase"] == "admission", result["exitCode"] == 69, execution.cancelAt == nil {
                     try store.publish(
                         id,
-                        result: [
+                        result: record.submission.labelled([
                             "jobID": .string(id), "requestKey": .string(record.submission.requestKey),
                             "name": .string(record.submission.name),
                             "complete": false, "state": "queued",
                             "waitingFor": "scheduler service unavailable; ticket retained",
-                        ])
+                        ]))
                     watcher.wait(seconds: 1, pids: [])
                     continue
                 }

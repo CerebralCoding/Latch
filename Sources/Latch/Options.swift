@@ -16,6 +16,8 @@ struct Options {
     var timeout: Double?
     var childArguments: [String] = []
     var taskName: String?
+    var owner: String?
+    var sessionID: String?
     var requirements = TaskRequirements()
     var standalone = false
     var serviceAction: ServiceAction?
@@ -27,7 +29,16 @@ struct Options {
     var helpCommand: Command?
     var helpServiceAction: ServiceAction?
 
-    init(arguments: [String]) throws {
+    /// Notices the caller prints to stderr: a label taken from the environment that was ignored.
+    var warnings: [String] = []
+
+    /// An owner or session label: 1–128 bytes of UTF-8, the unit MCP counts, so both entry points accept the same text.
+    private static func label(_ value: String, for what: String) throws -> String {
+        guard !value.isEmpty, value.utf8.count <= 128 else { throw LatchError("\(what) must contain 1–128 bytes") }
+        return value
+    }
+
+    init(arguments: [String], environment: [String: String] = ProcessInfo.processInfo.environment) throws {
         guard let first = arguments.first else {
             command = .help
             return
@@ -85,7 +96,7 @@ struct Options {
         }
         let valueOptions: Set<String> = [
             "--file", "--timeout", "--name", "--mode", "--cpu", "--memory-mib",
-            "--max-cpu-temp", "--max-gpu-temp", "--cooldown", "--interval",
+            "--max-cpu-temp", "--max-gpu-temp", "--cooldown", "--interval", "--owner", "--session",
         ]
         var seen: Set<String> = []
         var operandsOnly = false
@@ -204,6 +215,15 @@ struct Options {
                     guard let count = Int(value) else { throw LatchError("--memory-mib requires an integer MiB count") }
                     requirements.memoryMiB = count
                 }
+            case "--owner", "--session":
+                guard [.run, .schedule, .guard].contains(command) else {
+                    throw LatchError("\(argument) is only valid for run, schedule, or guard")
+                }
+                if argument == "--owner" {
+                    owner = try Self.label(try optionValue(), for: "owner")
+                } else {
+                    sessionID = try Self.label(try optionValue(), for: "session id")
+                }
             case "--gpu", "--io", "--bandwidth":
                 guard command == .schedule else { throw LatchError("\(argument) is only valid for schedule") }
                 if argument == "--gpu" {
@@ -254,6 +274,17 @@ struct Options {
             requirements.temperatureGuard = TemperatureGuard(maxCPU: 85, maxGPU: 80, cooldown: 0)
         }
         if [.run, .schedule, .guard].contains(command) {
+            // An empty variable counts as unset, so `LATCH_OWNER= latch ...` clears an exported value. A label is
+            // advisory, so a malformed variable is reported and ignored instead of blocking every submission.
+            for (name, value) in [("LATCH_OWNER", owner), ("LATCH_SESSION_ID", sessionID)] where value == nil {
+                guard let text = environment[name], !text.isEmpty else { continue }
+                do {
+                    let label = try Self.label(text, for: name)
+                    if name == "LATCH_OWNER" { owner = label } else { sessionID = label }
+                } catch {
+                    warnings.append("ignoring \(name): it must contain 1–128 bytes")
+                }
+            }
             requirements.measurement = requirements.mode == .isolated
             if command == .run { requirements.measurement = false }
             try requirements.validate()

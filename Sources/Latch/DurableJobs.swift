@@ -45,7 +45,10 @@ final class DurableJobs {
         try scheduler.transaction { state in
             var records = state.jobs
             if let existing = records.first(where: { $0.submission.requestKey == submission.requestKey }) {
-                guard existing.submission == submission, existing.submissionScope == scope else {
+                // Labels are not part of what a retry must repeat: a retry after a lost response has to find its job
+                // even when the session id changed. The first submission's labels stand.
+                guard existing.submission.withoutLabels == submission.withoutLabels, existing.submissionScope == scope
+                else {
                     throw MCPFailure.invalid("requestKey already belongs to a different submission")
                 }
                 return existing
@@ -64,7 +67,8 @@ final class DurableJobs {
             state.tasks.append(
                 ScheduledTask(
                     id: record.id, name: submission.name, pid: 0, arguments: [submission.executable] + plan.arguments,
-                    requirements: plan.requirements, plan: plan))
+                    requirements: plan.requirements, plan: plan, owner: submission.owner,
+                    sessionID: submission.sessionID))
             return record
         }
     }
@@ -192,6 +196,8 @@ final class DurableJobs {
                 "error": "Supervisor was lost; execution may have occurred. This job will not be replayed.",
                 "stdout": "", "stderr": "", "stdoutTruncated": true, "stderrTruncated": true,
             ]) { _, terminal in terminal }
+            result["owner"] = record.submission.owner.map(MCPValue.string)
+            result["sessionID"] = record.submission.sessionID.map(MCPValue.string)
             try publish(id, result: .object(result))
             return
         }
@@ -267,11 +273,11 @@ final class MCPJob {
         id = record.id
         submission = record.submission
         self.store = store
-        value = [
+        value = record.submission.labelled([
             "jobID": .string(record.id), "requestKey": .string(record.submission.requestKey),
             "name": .string(record.submission.name),
             "state": "queued", "complete": false,
-        ]
+        ])
     }
 
     func update(now _: Double, view: SchedulerView? = nil) throws {

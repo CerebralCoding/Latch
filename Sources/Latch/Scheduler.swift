@@ -42,7 +42,8 @@ final class Scheduler {
 
     func reserve(
         name: String, arguments: [String], requirements: TaskRequirements, timeout: Double?, useService: Bool = false,
-        supervisorPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil
+        supervisorPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil,
+        owner: String? = nil, sessionID: String? = nil
     ) throws -> TaskReservation {
         try requirements.validate()
         let updatePermit = inheritedUpdatePermit ? nil : try UpdateDrain.admit(in: directory)
@@ -73,7 +74,9 @@ final class Scheduler {
                     throw LatchError("shared queue limit reached", exitCode: 75)
                 }
                 state.tasks.append(
-                    ScheduledTask(id: id, name: name, pid: getpid(), arguments: arguments, requirements: requirements))
+                    ScheduledTask(
+                        id: id, name: name, pid: getpid(), arguments: arguments, requirements: requirements,
+                        owner: owner, sessionID: sessionID))
             }
         }
         while true {

@@ -159,9 +159,13 @@ enum CLIHelp {
                 """
         case .run:
             return """
-                Usage: latch run [--file PATH] [--shared] [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
+                Usage: latch run [--file PATH] [--shared] [--owner NAME] [--session ID]
+                       [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
                 run queues the command through the running scheduler with FIFO admission and thermal guards.
                 --shared permits shared work while excluding exclusive work.
+                --owner and --session label the job (1–128 bytes each) in latch list and in list/view --json;
+                LATCH_OWNER and LATCH_SESSION_ID supply them when the flags are absent (a malformed variable is
+                ignored with a warning). Labels are not authentication.
                 Defaults: 1 CPU core, 512 MiB, CPU <=85°C, GPU <=80°C; no measurement quiet window.
                 Operator clear and stop apply to run jobs, including their workload process groups.
                 Use schedule for measurements or explicit resource and temperature requirements.
@@ -185,7 +189,8 @@ enum CLIHelp {
                 """
         case .schedule, .guard:
             return """
-                Usage: latch \(command.rawValue) [--file PATH] [--name NAME] [--mode isolated|batch]
+                Usage: latch \(command.rawValue) [--file PATH] [--name NAME] [--owner NAME] [--session ID]
+                       [--mode isolated|batch]
                        [--cpu CORES] [--memory-mib MIB]\(command == .schedule ? " [--gpu] [--io] [--bandwidth]" : "")
                        [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
                        [--standalone] [--timeout SECONDS | --no-wait]\(command == .schedule ? " -- COMMAND [ARG...]" : "")
@@ -195,6 +200,9 @@ enum CLIHelp {
                 Batch work may overlap within capacity. Isolated work also requires a quiet window.
                 FIFO prevents newer jobs overtaking an older blocked ticket. Runtime is never limited.
                 Missing/stale sensors block admission. Temperature limits: 1–125°C; cooldown: 0–3600s.
+                --owner and --session label the job (1–128 bytes each) in latch list and in list/view --json;
+                LATCH_OWNER and LATCH_SESSION_ID supply them when the flags are absent (a malformed variable is
+                ignored with a warning). Labels are not authentication.
                 Timeout bounds admission only; --no-wait fails immediately. Requires the service unless --standalone.
                 \(command == .schedule ? "Latch options precede --; command arguments, streams, signals, and exit status are preserved." : "Use schedule to protect subsequent work.")
                 Do not nest scheduling.

@@ -465,13 +465,15 @@ final class MCPServer {
         let scheduler = backend.scheduler
         let store = backend.store
         if let existing = jobs.values.first(where: { $0.submission.requestKey == submission.requestKey }) {
-            guard existing.submission == submission, existing.record.submissionScope == scope else {
+            guard existing.submission.withoutLabels == submission.withoutLabels,
+                existing.record.submissionScope == scope
+            else {
                 throw MCPFailure.invalid("requestKey already belongs to a different submission")
             }
             return existing
         }
         if let record = try store.records().first(where: { $0.submission.requestKey == submission.requestKey }) {
-            guard record.submission == submission, record.submissionScope == scope else {
+            guard record.submission.withoutLabels == submission.withoutLabels, record.submissionScope == scope else {
                 throw MCPFailure.invalid("requestKey already belongs to a different submission")
             }
             let recovered = MCPJob(record: record, store: store)
