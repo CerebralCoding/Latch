@@ -21,6 +21,7 @@ struct SchedulerView: Encodable {
         var blockedBy: String?
         var blockerDetail: String?
         var cooldownRemainingSeconds: Double?
+        var stalled: JobStall?
     }
 
     static let schemaVersion = 1
@@ -87,7 +88,7 @@ struct SchedulerView: Encodable {
         if sensorsFresh, let sensors {
             capacity.batchCPUHeadroom = SchedulingPolicy.cpuHeadroom(in: state, sensors: sensors, ordinary: false)
             capacity.ordinaryCPUHeadroom = SchedulingPolicy.cpuHeadroom(in: state, sensors: sensors, ordinary: true)
-            capacity.memoryHeadroomMiB = max(0, sensors.memoryAvailableMiB - sensors.memoryTotalMiB / 10 - memory)
+            capacity.memoryHeadroomMiB = max(0, SchedulingPolicy.memoryHeadroomMiB(sensors: sensors) - memory)
         }
         var position = 0
         let records = Dictionary(uniqueKeysWithValues: state.jobs.filter { !$0.complete }.map { ($0.id, $0) })
@@ -114,10 +115,13 @@ struct SchedulerView: Encodable {
                 } else {
                     nil
                 }
+            let stalled = Self.stall(of: task, in: state, now: now, observedAt: observedAt)
+            let detail = Self.detail(blocked, task: task, state: state, now: now)
             return Task(
                 task: task, queuePosition: position, blockedBy: blocked,
-                blockerDetail: Self.detail(blocked, task: task, state: state, now: now),
-                cooldownRemainingSeconds: remaining)
+                blockerDetail: stalled.map { [detail, $0.sentence].compactMap { $0 }.joined(separator: ". ") }
+                    ?? detail,
+                cooldownRemainingSeconds: remaining, stalled: stalled)
         }
         if let head = tasks.first(where: { $0.task.state == .queued }) {
             for index in tasks.indices where tasks[index].blockedBy == "waiting for earlier queued tasks" {
@@ -151,6 +155,20 @@ struct SchedulerView: Encodable {
             entry.blockerDetail ?? "Eligible at this snapshot; admission is not reserved",
             identity.joined(separator: "|")
         )
+    }
+
+    private static func stall(of task: ScheduledTask, in state: SchedulerState, now: Double, observedAt: Date)
+        -> JobStall?
+    {
+        guard let since = task.stalledSince, let stall = SchedulingPolicy.stall(for: task, in: state, now: now) else {
+            return nil
+        }
+        let elapsed = max(0, now - since)
+        let limit = task.requirements.stallTimeout ?? SchedulingPolicy.defaultStallTimeout
+        return JobStall(
+            kind: stall.kind.rawValue, neededMiB: stall.neededMiB, headroomMiB: stall.headroomMiB,
+            since: observedAt.addingTimeInterval(-elapsed), elapsedSeconds: elapsed,
+            remainingSeconds: limit > 0 ? max(0, limit - elapsed) : nil)
     }
 
     private static func detail(_ reason: String?, task: ScheduledTask, state: SchedulerState, now: Double) -> String? {
@@ -202,7 +220,7 @@ struct SchedulerView: Encodable {
                 "Needs \(task.requirements.cpuCores) CPU cores; CPU activity \(HumanOutput.percent(sensors.cpuActive)), headroom \(SchedulingPolicy.cpuHeadroom(in: state, sensors: sensors, ordinary: task.plan != nil)) cores"
         case "insufficient memory headroom":
             let reserved = state.tasks.filter { $0.state == .running }.reduce(0) { $0 + $1.requirements.memoryMiB }
-            let available = max(0, sensors.memoryAvailableMiB - sensors.memoryTotalMiB / 10 - reserved)
+            let available = max(0, SchedulingPolicy.memoryHeadroomMiB(sensors: sensors) - reserved)
             let additional = max(0, task.requirements.memoryMiB - (task.residentMemoryMiB ?? 0))
             return
                 "Needs \(HumanOutput.memory(Double(additional))) additional memory; headroom \(HumanOutput.memory(Double(available))) after reservations and the 10% reserve"

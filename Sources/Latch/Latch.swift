@@ -13,6 +13,20 @@ struct LatchError: Error, CustomStringConvertible {
     static func system(_ operation: String) -> LatchError {
         LatchError("\(operation): \(String(cString: strerror(errno)))", exitCode: 74)
     }
+
+    /// The request asks for more than this machine could ever grant, whatever else is running.
+    static let capacityExitCode: Int32 = 78
+    /// Admission cannot succeed by waiting: the missing resource is held by nothing Latch runs.
+    static let unsatisfiableExitCode: Int32 = 73
+
+    /// The `terminationReason` an MCP result reports for an admission that ended this way.
+    var admissionReason: String? {
+        switch exitCode {
+        case Self.capacityExitCode: "capacity"
+        case Self.unsatisfiableExitCode: "unsatisfiable"
+        default: nil
+        }
+    }
 }
 
 @main

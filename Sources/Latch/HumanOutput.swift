@@ -190,7 +190,7 @@ enum HumanOutput {
             let ordered = running + value.jobs.filter { $0.state != "running" }
             lines += ["", "Work"]
             lines += ordered.prefix(6).map {
-                "  \($0.state) · \(safe($0.name)) (\($0.classification))"
+                "  \($0.stateLabel) · \(safe($0.name)) (\($0.classification))"
                     + ($0.owner.map { " · owner \(safe($0))" } ?? "")
             }
             if ordered.count > 6 { lines.append("\(ordered.count - 6) more jobs · use --verbose for all") }
@@ -260,7 +260,7 @@ enum HumanOutput {
             ]
             + shown.map {
                 [
-                    $0.jobID, $0.state, $0.classification, $0.queuePosition.map(String.init) ?? "-",
+                    $0.jobID, $0.stateLabel, $0.classification, $0.queuePosition.map(String.init) ?? "-",
                     duration($0.elapsedSeconds),
                 ] + (showOwner ? [$0.owner.map { fullLabels ? safe($0) : clip(safe($0), to: 24) } ?? "-"] : [])
                     + (showSession ? [$0.sessionID.map { fullLabels ? safe($0) : clip(safe($0), to: 16) } ?? "-"] : [])
@@ -279,7 +279,7 @@ enum HumanOutput {
             for job in shown {
                 lines += [
                     job.jobID,
-                    "  \(job.state) · \(job.classification) · \(job.queuePosition.map { "queue \($0) · " } ?? "")\(duration(job.elapsedSeconds))",
+                    "  \(job.stateLabel) · \(job.classification) · \(job.queuePosition.map { "queue \($0) · " } ?? "")\(duration(job.elapsedSeconds))",
                     "  \(safe(job.name))",
                 ]
                 let labels = [

@@ -1338,6 +1338,54 @@ func `MCP retirement respects log levels while retaining stderr recovery guidanc
     }
 }
 
+@Test func `MCP ends a stalled job as unsatisfiable and admits the next one`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    let total = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
+    // Sensitive work plans a quarter of memory and ordinary work a tenth; 15% is headroom for only the second.
+    let feeder = SensorFeeder(path: fixture.lockPath, available: total * 25 / 100, total: total)
+    defer { feeder.stop() }
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        let stalled = try jobID(client.tool("latch_submit", arguments: submission(fixture)))
+        var ordinary = try #require(submission(fixture).object)
+        ordinary["classification"] = "ordinary"
+        let next = try jobID(client.tool("latch_submit", arguments: .object(ordinary)))
+        var reported: MCPValue?
+        let deadline = ProcessInfo.processInfo.systemUptime + 8
+        while reported == nil, ProcessInfo.processInfo.systemUptime < deadline {
+            let jobs = try client.tool("latch_jobs")["result"]?["structuredContent"]?["jobs"]
+            if case .array(let list) = jobs, let first = list.first(where: { $0["jobID"] == .string(stalled) }) {
+                reported = first["stalled"]
+            }
+            if reported == nil { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        #expect(reported?["kind"] == "memory")
+        let pending = try client.tool(
+            "latch_wait", arguments: ["jobID": .string(stalled), "timeoutSeconds": .number(0.05)])
+        let status = pending["result"]?["structuredContent"]
+        #expect(status?["complete"] == false)
+        #expect(status?["progressMessage"]?.string?.contains("unsatisfiable") == true)
+        try scheduler.transaction { state in
+            for index in state.tasks.indices where state.tasks[index].id == stalled {
+                state.tasks[index].requirements.stallTimeout = 0.5
+            }
+        }
+        let response = try client.tool("latch_wait", arguments: ["jobID": .string(stalled), "timeoutSeconds": 10])
+        let result = try #require(response["result"]?["structuredContent"])
+        #expect(result["complete"] == true)
+        #expect(result["succeeded"] == false)
+        #expect(result["phase"] == "admission")
+        #expect(result["terminationReason"] == "unsatisfiable")
+        #expect(result["exitCode"] == .number(Double(LatchError.unsatisfiableExitCode)))
+        #expect(result["error"]?.string?.hasPrefix("unsatisfiable: ") == true)
+        #expect(response["result"]?["isError"] == true)
+        let admitted = try client.tool("latch_wait", arguments: ["jobID": .string(next), "timeoutSeconds": 10])
+        #expect(admitted["result"]?["structuredContent"]?["succeeded"] == true)
+    }
+}
+
 @Test func `another connection can cancel wait and forget a queued job`() throws {
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)

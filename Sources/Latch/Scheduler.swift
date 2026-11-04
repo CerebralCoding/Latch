@@ -95,6 +95,7 @@ final class Scheduler {
                 }
             }
             var reason = "waiting for admission"
+            var stallExpiry: Double?
             try transaction { state in
                 let now = ProcessInfo.processInfo.systemUptime
                 guard let index = state.tasks.firstIndex(where: { $0.id == id }) else {
@@ -127,6 +128,7 @@ final class Scheduler {
                 }
                 if !admitted {
                     state.tasks[index].waitingFor = reason
+                    stallExpiry = try trackStall(&state, at: index, now: now)
                 }
                 view = state
             }
@@ -142,14 +144,37 @@ final class Scheduler {
             }
             if useService {
                 watcher.wait(
-                    seconds: remaining ?? 3600,
+                    seconds: min(remaining ?? 3600, stallExpiry ?? 3600),
                     pids: view.tasks.map(\.pid) + [servicePID!] + (supervisorPID.map { [$0] } ?? []))
             } else {
                 // Queue notifications wake cancelled standalone waiters even while the process latch is held.
                 watcher.wait(
-                    seconds: min(remaining ?? 1, 1), pids: view.tasks.filter { $0.state == .running }.map(\.pid))
+                    seconds: min(remaining ?? 1, 1, stallExpiry ?? 1),
+                    pids: view.tasks.filter { $0.state == .running }.map(\.pid))
             }
         }
+    }
+
+    /// Runs the stall clock for the queued task at `index`: starts it at the first shortfall no Latch job can
+    /// release, ends it when that shortfall goes away, and throws once it has run for the task's stall timeout.
+    /// Returns the seconds until it would expire, nil when it is not running or never expires.
+    private func trackStall(_ state: inout SchedulerState, at index: Int, now: Double) throws -> Double? {
+        let task = state.tasks[index]
+        guard let stall = SchedulingPolicy.stall(for: task, in: state, now: now) else {
+            // Stale readings say nothing about the shortfall, so they leave the clock alone.
+            if task.stalledSince != nil, state.currentSensors(now: now) != nil {
+                state.tasks[index].stalledSince = nil
+            }
+            return nil
+        }
+        let since = task.stalledSince ?? now
+        state.tasks[index].stalledSince = since
+        let limit = task.requirements.stallTimeout ?? SchedulingPolicy.defaultStallTimeout
+        guard limit > 0 else { return nil }
+        guard now - since < limit else {
+            throw LatchError(stall.message(elapsed: now - since), exitCode: LatchError.unsatisfiableExitCode)
+        }
+        return since + limit - now
     }
 
     func snapshot() throws -> SchedulerState {
