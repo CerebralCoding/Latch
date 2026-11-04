@@ -172,7 +172,9 @@ final class Scheduler {
         let limit = task.requirements.stallTimeout ?? SchedulingPolicy.defaultStallTimeout
         guard limit > 0 else { return nil }
         guard now - since < limit else {
-            throw LatchError(stall.message(elapsed: now - since), exitCode: LatchError.unsatisfiableExitCode)
+            throw LatchError(
+                stall.message(elapsed: now - since), exitCode: LatchError.unsatisfiableExitCode,
+                admissionReason: "unsatisfiable")
         }
         return since + limit - now
     }

@@ -209,7 +209,7 @@ enum CLIHelp {
                 ignored with a warning). Labels are not authentication.
                 Timeout bounds admission only; --no-wait fails immediately. Requires the service unless --standalone.
                 A request above what the machine could ever grant (all cores, memory minus the 10% reserve) is
-                refused before queueing with exit 78. --stall-timeout ends the job as unsatisfiable (exit 73) when
+                refused before queueing with exit 64. --stall-timeout ends the job as unsatisfiable (exit 73) when
                 memory that no Latch job holds stays short for that long at the head of the queue; default 300
                 seconds, 0 waits indefinitely. Thermal and quiet-window waits never count.
                 \(command == .schedule ? "Latch options precede --; command arguments, streams, signals, and exit status are preserved." : "Use schedule to protect subsequent work.")

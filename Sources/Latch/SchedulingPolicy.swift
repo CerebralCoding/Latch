@@ -29,7 +29,7 @@ struct TaskRequirements: Codable, Equatable {
         guard cpuCores <= cpuCount else {
             throw LatchError(
                 "capacity: --cpu \(cpuCores) exceeds the \(cpuCount) cores this machine has; this request can never be admitted",
-                exitCode: LatchError.capacityExitCode)
+                admissionReason: "capacity")
         }
         let grantable = SchedulingPolicy.grantableMemoryMiB(total: total)
         guard memoryMiB <= grantable else {
@@ -37,7 +37,7 @@ struct TaskRequirements: Codable, Equatable {
                 "capacity: --memory-mib \(memoryMiB) exceeds the \(grantable) MiB this machine can grant "
                     + "(\(total) MiB total minus the \(SchedulingPolicy.memoryReserveMiB(total: total)) MiB 10% reserve); "
                     + "this request can never be admitted",
-                exitCode: LatchError.capacityExitCode)
+                admissionReason: "capacity")
         }
     }
 }

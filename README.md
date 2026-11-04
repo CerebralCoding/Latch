@@ -301,7 +301,7 @@ Latch tells the submitter when waiting cannot help, instead of leaving the job q
 
 | Case | When | Result |
 | --- | --- | --- |
-| `capacity` | The request asks for more than the machine could ever grant: more cores than it has, or more memory than its total minus the 10% reserve. Current load is irrelevant. | Refused before queueing. Exit 78, `latch: capacity: ...`. |
+| `capacity` | The request asks for more than the machine could ever grant: more cores than it has, or more memory than its total minus the 10% reserve. Current load is irrelevant. | Refused before queueing. Exit 64, `latch: capacity: ...`. |
 | `unsatisfiable` | The job heads the queue and is short of memory that no Latch job holds: nothing Latch runs, parks or cancels could release it, and sensors are current. | Ends once the shortfall has stood for the stall timeout, and leaves the queue so the next job can be admitted. Exit 73, `latch: unsatisfiable: ...` with the memory needed and available. |
 
 `--stall-timeout SECONDS` sets the grace period for `run`, `schedule` and `guard`. It defaults to 300 seconds, which rides out transient pressure and a process that is still exiting; `0` waits indefinitely, as before. Heat, memory pressure, temperature guards and measurement quiet windows are not stalls: they clear on their own and keep waiting. So does a shortfall while any Latch job runs or holds memory, because that job will finish. A model server or other process outside Latch that holds the memory is the typical cause.
@@ -431,13 +431,12 @@ CLI `run` and `schedule` preserve command arguments, streams, signals and exit s
 | Exit code before command execution | Meaning |
 | --- | --- |
 | 0 | Success |
-| 64 | Invalid usage or requirements |
+| 64 | Invalid usage or requirements, including a request over what the machine could ever grant (more cores than it has, or more memory than its total minus the 10% reserve) |
 | 69 | Service unavailable or management failure |
 | 71 | Allocation failure |
 | 73 | Unsatisfiable: memory that no Latch job holds stayed short for the stall timeout |
 | 74 | Filesystem, state or I/O error |
 | 75 | Busy or admission timeout |
-| 78 | Over capacity: the request exceeds what the machine could ever grant |
 | 126 | Command cannot execute |
 | 127 | Command not found |
 

@@ -78,7 +78,7 @@ private func serviceStatus() -> SchedulerService.Status {
         try TaskRequirements(memoryMiB: ceiling + 1).validate(cpuCount: 32, memoryMiB: total)
     } throws: { error in
         guard let error = error as? LatchError else { return false }
-        return error.exitCode == LatchError.capacityExitCode && error.admissionReason == "capacity"
+        return error.exitCode == 64 && error.admissionReason == "capacity"
             && error.description.hasPrefix("capacity: ")
             && error.description.contains("--memory-mib \(ceiling + 1)")
             && error.description.contains("\(ceiling) MiB") && error.description.contains("\(total) MiB")
@@ -92,7 +92,7 @@ private func serviceStatus() -> SchedulerService.Status {
         try TaskRequirements(cpuCores: 33).validate(cpuCount: 32, memoryMiB: 262_144)
     } throws: { error in
         guard let error = error as? LatchError else { return false }
-        return error.exitCode == LatchError.capacityExitCode && error.admissionReason == "capacity"
+        return error.exitCode == 64 && error.admissionReason == "capacity"
             && error.description.contains("--cpu 33") && error.description.contains("32")
     }
 }
@@ -110,20 +110,17 @@ private func serviceStatus() -> SchedulerService.Status {
     #expect {
         try Options(arguments: ["schedule", "--memory-mib", String(physical), "--", "true"])
     } throws: { error in
-        (error as? LatchError)?.exitCode == LatchError.capacityExitCode
+        (error as? LatchError)?.exitCode == 64
     }
     let fixture = try Fixture()
     let child = try fixture.launch(["schedule", "--standalone", "--memory-mib", String(physical), "--", "true"])
-    #expect(try fixture.finish(child) == LatchError.capacityExitCode)
+    #expect(try fixture.finish(child) == 64)
     #expect(child.errors.contains("capacity:"))
     #expect(try Scheduler(path: fixture.lockPath).snapshot().tasks.isEmpty)
 }
 
-@Test func `capacity and unsatisfiable exits are distinct from usage and busy`() {
-    let codes = [LatchError.capacityExitCode, LatchError.unsatisfiableExitCode]
-    #expect(Set(codes).count == 2)
-    #expect(Set(codes).isDisjoint(with: [0, 64, 69, 71, 74, 75, 126, 127]))
-    #expect(LatchError("x", exitCode: LatchError.unsatisfiableExitCode).admissionReason == "unsatisfiable")
+@Test func `the unsatisfiable exit is distinct from usage and busy`() {
+    #expect(![0, 64, 69, 71, 74, 75, 126, 127].contains(LatchError.unsatisfiableExitCode))
     #expect(LatchError("x", exitCode: 75).admissionReason == nil)
 }
 
@@ -213,6 +210,8 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
     let fixture = try Fixture()
     let path = fixture.lockPath
     let outcome = Outcome()
+    // Create the queue directory before the second scheduler opens it; two first openings can race.
+    let observer = try Scheduler(path: path, collect: { stallSensors() })
     let thread = Thread {
         do {
             let scheduler = try Scheduler(path: path, collect: { stallSensors() })
@@ -227,18 +226,18 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
         }
     }
     thread.start()
-    let observer = try Scheduler(path: path, collect: { stallSensors() })
     let deadline = ProcessInfo.processInfo.systemUptime + 5
     while try observer.snapshot().tasks.isEmpty, ProcessInfo.processInfo.systemUptime < deadline {
         Thread.sleep(forTimeInterval: 0.01)
     }
+    #expect(try !observer.snapshot().tasks.isEmpty, "the stalled job never reached the queue")
     let next = try observer.reserve(
         name: "next", arguments: ["true"], requirements: TaskRequirements(mode: .batch, memoryMiB: 512), timeout: 10)
     // FIFO: the next job cannot start until the stalled head is out of the queue.
     let queued = try observer.snapshot().tasks.map(\.name)
     #expect(outcome.finished.wait(timeout: .now() + 5) == .success)
     withExtendedLifetime(next) {
-        #expect(outcome.exitCode == LatchError.unsatisfiableExitCode)
+        #expect(outcome.exitCode == LatchError.unsatisfiableExitCode, "\(outcome.message ?? "no outcome")")
         let message = outcome.message ?? ""
         #expect(message.hasPrefix("unsatisfiable: "))
         #expect(message.contains("20.5 GiB") && message.contains("20.3 GiB"))
@@ -355,4 +354,9 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
     let stalled = try #require(view.jobs.first?.stalled)
     #expect(stalled.remainingSeconds == nil)
     #expect(view.jobs.first?.blockerDetail?.contains("unsatisfiable") == false)
+}
+
+@Test func `MCP instructions tell agents an unsatisfiable end is final`() {
+    #expect(MCPTools.instructions.contains("terminationReason unsatisfiable"))
+    #expect(MCPTools.instructions.contains("instead of resubmitting unchanged"))
 }
