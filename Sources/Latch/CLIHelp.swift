@@ -160,7 +160,7 @@ enum CLIHelp {
         case .run:
             return """
                 Usage: latch run [--file PATH] [--shared] [--owner NAME] [--session ID]
-                       [--timeout SECONDS | --no-wait] -- COMMAND [ARG...]
+                       [--timeout SECONDS | --no-wait] [--stall-timeout SECONDS] -- COMMAND [ARG...]
                 run queues the command through the running scheduler with FIFO admission and thermal guards.
                 --shared permits shared work while excluding exclusive work.
                 --owner and --session label the job (1–128 bytes each) in list, view, and tui;
@@ -168,6 +168,8 @@ enum CLIHelp {
                 LATCH_OWNER and LATCH_SESSION_ID supply them when the flags are absent (a malformed variable is
                 ignored with a warning). Labels are not authentication.
                 Defaults: 1 CPU core, 512 MiB, CPU <=85°C, GPU <=80°C; no measurement quiet window.
+                --stall-timeout ends the job as unsatisfiable (exit 73) when memory that no Latch job holds stays
+                short for that long (default 300 seconds, 0 waits indefinitely).
                 Operator clear and stop apply to run jobs, including their workload process groups.
                 Use schedule for measurements or explicit resource and temperature requirements.
                 Latch options precede --. All following arguments belong to COMMAND, including its flags.
@@ -194,7 +196,7 @@ enum CLIHelp {
                        [--mode isolated|batch]
                        [--cpu CORES] [--memory-mib MIB]\(command == .schedule ? " [--gpu] [--io] [--bandwidth]" : "")
                        [--max-cpu-temp C] [--max-gpu-temp C] [--cooldown SECONDS]
-                       [--standalone] [--timeout SECONDS | --no-wait]\(command == .schedule ? " -- COMMAND [ARG...]" : "")
+                       [--standalone] [--timeout SECONDS | --no-wait] [--stall-timeout SECONDS]\(command == .schedule ? " -- COMMAND [ARG...]" : "")
                 \(command == .schedule ? "Queue and protect the full foreground command. Finite work only." : "Wait, print an admitted JSON snapshot, and release; protects no subsequent work.")
                 Defaults: isolated, 1 CPU core, 512 MiB, CPU/GPU <=55°C for 5 seconds.
                 Operators declare peak resources and match command worker limits. Reservations are advisory.
@@ -206,6 +208,10 @@ enum CLIHelp {
                 LATCH_OWNER and LATCH_SESSION_ID supply them when the flags are absent (a malformed variable is
                 ignored with a warning). Labels are not authentication.
                 Timeout bounds admission only; --no-wait fails immediately. Requires the service unless --standalone.
+                A request above what the machine could ever grant (all cores, memory minus the 10% reserve) is
+                refused before queueing with exit 64. --stall-timeout ends the job as unsatisfiable (exit 73) when
+                memory that no Latch job holds stays short for that long at the head of the queue; default 300
+                seconds, 0 waits indefinitely. Thermal and quiet-window waits never count.
                 \(command == .schedule ? "Latch options precede --; command arguments, streams, signals, and exit status are preserved." : "Use schedule to protect subsequent work.")
                 Do not nest scheduling.
                 \(file)

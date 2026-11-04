@@ -2,6 +2,12 @@
 
 Versions before 0.17.0 describe development milestones. Changes made while a version remained unchanged are grouped under that version.
 
+## Unreleased
+
+- Refuse a request that could never be admitted. A `--cpu` above the machine's cores, or a `--memory-mib` above its total memory minus the 10% admission reserve, now fails before queueing with exit 64 and a `capacity:` message. A `--memory-mib` between the 10% reserve and total memory used to queue indefinitely.
+- End a job that cannot be admitted by waiting. When the job at the head of the queue is short of memory that no Latch job holds, and sensors are current, it ends as `unsatisfiable` (exit 73, `terminationReason: "unsatisfiable"` in MCP results) after a stall timeout and leaves the queue so FIFO moves on. `--stall-timeout SECONDS` sets it for `run`, `schedule` and `guard`; the default is 300 seconds and 0 waits indefinitely. Thermal, memory-pressure, temperature-guard and quiet-window waits, and any shortfall while a Latch job runs or holds memory, are not stalls. Whichever of the admission timeout and the stall timeout passes first decides the outcome, and a job recovered after a restart or reboot starts its stall clock again.
+- Show a stall while it happens: `latch list` and `latch view` read `queued (stalled)`, and `--json` output and the MCP job views carry a `stalled` object with the memory needed and available, when it began and how long remains.
+
 ## 0.22.0
 
 Latch now records optional owner and session labels, making it easier to tell whose work is running on a shared queue.

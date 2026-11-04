@@ -16,6 +16,8 @@ struct MCPWorkerStatus: Codable {
     var taskID: String?
     var error: String?
     var code: Int32?
+    /// Why admission ended without running the command, when it ended for a named reason.
+    var reason: String?
     var plan: TaskPlan?
     var admittedAt: Double?
     var admissionSensors: SensorSnapshot?
@@ -96,6 +98,7 @@ enum MCPWorker {
         } catch {
             status.error = String(describing: error)
             status.code = (error as? LatchError)?.exitCode ?? 74
+            status.reason = (error as? LatchError)?.admissionReason
             if let request {
                 try? JSONEncoder().encode(status).write(to: URL(fileURLWithPath: request.statusPath), options: .atomic)
             }
@@ -366,7 +369,7 @@ final class MCPExecution {
             let signal = terminationStatus & 0x7F
             let code = signal == 0 ? (terminationStatus >> 8) & 0xFF : signal
             value["exitCode"] = .number(Double(code))
-            value["terminationReason"] = .string(signal == 0 ? "exit" : "signal")
+            value["terminationReason"] = .string(status?.reason ?? (signal == 0 ? "exit" : "signal"))
             value["phase"] = .string(phase)
             value["succeeded"] = .bool(cancelAt == nil && phase == "command" && signal == 0 && code == 0)
             if let error = status?.error {

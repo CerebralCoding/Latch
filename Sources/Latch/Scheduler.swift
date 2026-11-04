@@ -19,12 +19,17 @@ struct TaskReservation {
 final class Scheduler {
     let path: String
     let directory: URL
+    let capacity: MachineCapacity
     private let collect: () throws -> SensorSnapshot
     private var coldHistory = ColdHistory()
     private var cachedState: (identity: FileIdentity, state: SchedulerState, unfinishedJobs: Set<String>)?
 
-    init(path: String, collect: @escaping () throws -> SensorSnapshot = NativeSensors.sample) throws {
+    init(
+        path: String, capacity: MachineCapacity = .machine,
+        collect: @escaping () throws -> SensorSnapshot = NativeSensors.sample
+    ) throws {
         self.path = path
+        self.capacity = capacity
         self.collect = collect
         directory = URL(fileURLWithPath: path + ".queue", isDirectory: true)
         do {
@@ -45,7 +50,7 @@ final class Scheduler {
         supervisorPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil,
         owner: String? = nil, sessionID: String? = nil
     ) throws -> TaskReservation {
-        try requirements.validate()
+        try requirements.validate(capacity: capacity)
         let updatePermit = inheritedUpdatePermit ? nil : try UpdateDrain.admit(in: directory)
         if useService {
             _ = try SchedulerService.requireRunning(in: directory)
@@ -69,6 +74,8 @@ final class Scheduler {
                     let index = state.tasks.firstIndex(where: { $0.id == id && $0.state == .queued })
                 else { throw LatchError("durable admission ticket is missing", exitCode: 74) }
                 state.tasks[index].pid = getpid()
+                // The saved stall clock is an uptime from the process that queued the job, possibly before a reboot.
+                state.tasks[index].stalledSince = nil
             } else {
                 guard state.tasks.count < DurableJobs.globalOutstandingLimit else {
                     throw LatchError("shared queue limit reached", exitCode: 75)
@@ -95,6 +102,7 @@ final class Scheduler {
                 }
             }
             var reason = "waiting for admission"
+            var stallExpiry: Double?
             try transaction { state in
                 let now = ProcessInfo.processInfo.systemUptime
                 guard let index = state.tasks.firstIndex(where: { $0.id == id }) else {
@@ -127,6 +135,16 @@ final class Scheduler {
                 }
                 if !admitted {
                     state.tasks[index].waitingFor = reason
+                    if let clock = trackStall(&state, at: index, now: now) {
+                        // Whichever deadline passes first decides the outcome: a stall that expires after the
+                        // admission timeout leaves the job to time out as busy below.
+                        if now >= clock.expiry, deadline.map({ clock.expiry < $0 }) ?? true {
+                            throw LatchError(
+                                clock.stall.message(elapsed: now - clock.since),
+                                exitCode: LatchError.unsatisfiableExitCode, admissionReason: "unsatisfiable")
+                        }
+                        stallExpiry = max(0, clock.expiry - now)
+                    }
                 }
                 view = state
             }
@@ -142,14 +160,38 @@ final class Scheduler {
             }
             if useService {
                 watcher.wait(
-                    seconds: remaining ?? 3600,
+                    seconds: min(remaining ?? 3600, stallExpiry ?? 3600),
                     pids: view.tasks.map(\.pid) + [servicePID!] + (supervisorPID.map { [$0] } ?? []))
             } else {
                 // Queue notifications wake cancelled standalone waiters even while the process latch is held.
                 watcher.wait(
-                    seconds: min(remaining ?? 1, 1), pids: view.tasks.filter { $0.state == .running }.map(\.pid))
+                    seconds: min(remaining ?? 1, 1, stallExpiry ?? 1),
+                    pids: view.tasks.filter { $0.state == .running }.map(\.pid))
             }
         }
+    }
+
+    /// Runs the stall clock for the queued task at `index`: starts it at the first shortfall no Latch job can
+    /// release and ends it when that shortfall goes away. Returns the running clock and the uptime it expires at,
+    /// nil when it is not running or never expires; the caller decides whether an expired clock ends the job.
+    private func trackStall(_ state: inout SchedulerState, at index: Int, now: Double) -> (
+        stall: AdmissionStall, since: Double, expiry: Double
+    )? {
+        let task = state.tasks[index]
+        guard let stall = SchedulingPolicy.stall(for: task, in: state, now: now) else {
+            // Stale readings say nothing about the shortfall, so they leave the clock alone.
+            if task.stalledSince != nil, state.currentSensors(now: now) != nil {
+                state.tasks[index].stalledSince = nil
+            }
+            return nil
+        }
+        // A clock ahead of the current uptime was saved before a reboot; restart it rather than wait for uptime
+        // to catch up.
+        let since = task.stalledSince.flatMap { $0 <= now ? $0 : nil } ?? now
+        state.tasks[index].stalledSince = since
+        let limit = task.requirements.stallTimeout ?? SchedulingPolicy.defaultStallTimeout
+        guard limit > 0 else { return nil }
+        return (stall, since, since + limit)
     }
 
     func snapshot() throws -> SchedulerState {

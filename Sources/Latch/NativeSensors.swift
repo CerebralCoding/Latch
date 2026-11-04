@@ -95,7 +95,7 @@ final class NativeSensors {
             cpuActive: activities.reduce(0, +) / Double(activities.count),
             busiestCore: activities.max() ?? 0, gpuActive: accelerator?.gpu,
             aneWatts: accelerator?.ane, memoryAvailableMiB: memory,
-            memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
+            memoryTotalMiB: MachineCapacity.machine.memoryMiB,
             memoryPressure: pressureName, thermalState: thermal,
             diskBytesPerSecond: disk, unavailable: unavailable,
             cpuTemperature: temperature?.cpu, gpuTemperature: temperature?.gpu,

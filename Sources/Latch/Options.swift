@@ -96,7 +96,7 @@ struct Options {
         }
         let valueOptions: Set<String> = [
             "--file", "--timeout", "--name", "--mode", "--cpu", "--memory-mib",
-            "--max-cpu-temp", "--max-gpu-temp", "--cooldown", "--interval", "--owner", "--session",
+            "--max-cpu-temp", "--max-gpu-temp", "--cooldown", "--interval", "--owner", "--session", "--stall-timeout",
         ]
         var seen: Set<String> = []
         var operandsOnly = false
@@ -182,6 +182,13 @@ struct Options {
                         "--timeout requires seconds between 0 and \(Int32.max); cannot combine with --no-wait")
                 }
                 timeout = value
+            case "--stall-timeout":
+                let text = try optionValue()
+                guard [.run, .schedule, .guard].contains(command), let value = Double(text), value.isFinite, value >= 0
+                else {
+                    throw LatchError("--stall-timeout requires seconds of 0 or more for run, schedule, or guard")
+                }
+                requirements.stallTimeout = value
             case "--restart-service":
                 guard [.update, .rollback].contains(command) else {
                     throw LatchError("--restart-service is only valid for update or rollback")

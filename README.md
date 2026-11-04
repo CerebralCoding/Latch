@@ -149,7 +149,7 @@ New submissions and controls need a stable retry key. Latch supplies a unique pr
 
 #### Results and cancellation
 
-Results expose `complete`, `state`, `succeeded`, `exitCode`, `terminationReason` and `phase`. Check these together: a command failure differs from an admission or execution failure. `terminationReason: "unknown"` means execution is uncertain; never blindly replay it.
+Results expose `complete`, `state`, `succeeded`, `exitCode`, `terminationReason` and `phase`. Check these together: a command failure differs from an admission or execution failure. `terminationReason: "unknown"` means execution is uncertain; never blindly replay it. `terminationReason: "unsatisfiable"` (phase `admission`, exit code 73, explanation in `error`) means the job never started because the memory it needs is held by something outside Latch and stayed unavailable for the stall timeout. Free that memory or ask the user to, then resubmit with a new retry key; waiting longer on the same job cannot help.
 
 Disconnecting or cancelling a tool request stops only the wait. Use `latch_cancel`, then `latch_wait`, to stop work and retrieve its final status.
 
@@ -295,6 +295,19 @@ Unlike MCP, the human CLI accepts explicit peak resource requirements and guard 
 
 `--timeout` bounds admission only, never runtime. `--no-wait` makes one admission attempt. `--gpu`, `--io` and `--bandwidth` reserve those resources for batch work.
 
+#### Requests that cannot be admitted
+
+Latch tells the submitter when waiting cannot help, instead of leaving the job queued behind a wait that never ends. There are two cases.
+
+| Case | When | Result |
+| --- | --- | --- |
+| `capacity` | The request asks for more than the machine could ever grant: more cores than it has, or more memory than its total minus the 10% reserve. Current load is irrelevant. | Refused before queueing. Exit 64, `latch: capacity: ...`. |
+| `unsatisfiable` | The job heads the queue and is short of memory that no Latch job holds: nothing Latch runs, parks or cancels could release it, and sensors are current. | Ends once the shortfall has stood for the stall timeout, and leaves the queue so the next job can be admitted. Exit 73, `latch: unsatisfiable: ...` with the memory needed and available. |
+
+`--stall-timeout SECONDS` sets the grace period for `run`, `schedule` and `guard`. It defaults to 300 seconds, which rides out transient pressure and a process that is still exiting; `0` waits indefinitely, as before. Heat, memory pressure, temperature guards and measurement quiet windows are not stalls: they clear on their own and keep waiting. So does a shortfall while any Latch job runs or holds memory, because that job will finish. A model server or other process outside Latch that holds the memory is the typical cause.
+
+While the shortfall stands, `latch list` and `latch view` show the job as `queued (stalled)` with the shortfall in its admission detail. In `--json` output and the MCP `latch_view` and `latch_jobs` results `state` stays `queued` and a `stalled` object carries `kind`, `neededMiB`, `headroomMiB`, `since`, `elapsedSeconds` and `remainingSeconds` (absent when the timeout is 0). A pending `latch_wait` repeats the wording in its progress message. MCP agents cannot declare memory, so only the `unsatisfiable` case reaches them, with the default timeout. Checkpoint jobs are not ended this way.
+
 ### Admission and lock status
 
 `run` requires the running scheduler and uses FIFO admission and thermal guards. `wait` and `guard` wait and immediately release, protecting no subsequent work. Use `schedule` for measurements or explicit resource requirements. `status` reports only whether the process lock is free (exit 0) or held (exit 75), not whether a task is eligible for admission.
@@ -418,9 +431,10 @@ CLI `run` and `schedule` preserve command arguments, streams, signals and exit s
 | Exit code before command execution | Meaning |
 | --- | --- |
 | 0 | Success |
-| 64 | Invalid usage or requirements |
+| 64 | Invalid usage or requirements, including a request over what the machine could ever grant (more cores than it has, or more memory than its total minus the 10% reserve) |
 | 69 | Service unavailable or management failure |
 | 71 | Allocation failure |
+| 73 | Unsatisfiable: memory that no Latch job holds stayed short for the stall timeout |
 | 74 | Filesystem, state or I/O error |
 | 75 | Busy or admission timeout |
 | 126 | Command cannot execute |

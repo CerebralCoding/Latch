@@ -4,15 +4,21 @@ import Foundation
 struct LatchError: Error, CustomStringConvertible {
     let description: String
     let exitCode: Int32
+    /// The `terminationReason` an MCP result reports when admission ended for a named reason.
+    let admissionReason: String?
 
-    init(_ description: String, exitCode: Int32 = 64) {
+    init(_ description: String, exitCode: Int32 = 64, admissionReason: String? = nil) {
         self.description = description
         self.exitCode = exitCode
+        self.admissionReason = admissionReason
     }
 
     static func system(_ operation: String) -> LatchError {
         LatchError("\(operation): \(String(cString: strerror(errno)))", exitCode: 74)
     }
+
+    /// Admission cannot succeed by waiting: the missing resource is held by nothing Latch runs.
+    static let unsatisfiableExitCode: Int32 = 73
 }
 
 @main

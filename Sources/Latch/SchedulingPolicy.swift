@@ -1,5 +1,27 @@
 import Foundation
 
+/// What a scheduler admits against: the cores and memory it may reserve from. The default is this machine; a
+/// scheduler built over injected sensors takes the same totals from them, so validation and admission agree.
+struct MachineCapacity: Equatable {
+    var cpuCores: Int
+    var memoryMiB: Int
+
+    static var machine: MachineCapacity {
+        MachineCapacity(
+            cpuCores: ProcessInfo.processInfo.activeProcessorCount,
+            memoryMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576))
+    }
+
+    init(cpuCores: Int, memoryMiB: Int) {
+        self.cpuCores = cpuCores
+        self.memoryMiB = memoryMiB
+    }
+
+    init(sensors: SensorSnapshot) {
+        self.init(cpuCores: sensors.cpuCores, memoryMiB: sensors.memoryTotalMiB)
+    }
+}
+
 struct TaskRequirements: Codable, Equatable {
     enum Mode: String, Codable { case isolated, batch }
 
@@ -11,16 +33,49 @@ struct TaskRequirements: Codable, Equatable {
     var bandwidth = false
     var measurement = false
     var temperatureGuard: TemperatureGuard?
+    /// Seconds a head-of-queue job may stay short of memory that no Latch job can release before it ends as
+    /// unsatisfiable. nil uses `SchedulingPolicy.defaultStallTimeout`; 0 waits indefinitely.
+    var stallTimeout: Double?
 
-    func validate() throws {
+    func validate(capacity: MachineCapacity = .machine) throws {
+        let cpuCount = capacity.cpuCores
+        let total = capacity.memoryMiB
         try temperatureGuard?.validate()
         guard !measurement || mode == .isolated else { throw LatchError("measurements require exclusive admission") }
-        guard cpuCores > 0, cpuCores <= ProcessInfo.processInfo.activeProcessorCount else {
-            throw LatchError("--cpu must fit this machine's available core count")
+        guard cpuCores > 0 else { throw LatchError("--cpu requires at least one core") }
+        guard memoryMiB > 0 else { throw LatchError("--memory-mib requires a positive MiB count") }
+        if let stallTimeout, !stallTimeout.isFinite || stallTimeout < 0 {
+            throw LatchError("--stall-timeout requires seconds of 0 or more")
         }
-        guard memoryMiB > 0, UInt64(memoryMiB) <= ProcessInfo.processInfo.physicalMemory / 1_048_576 else {
-            throw LatchError("--memory-mib must fit this machine's physical memory")
+        guard cpuCores <= cpuCount else {
+            throw LatchError(
+                "capacity: --cpu \(cpuCores) exceeds the \(cpuCount) cores this machine has; this request can never be admitted",
+                admissionReason: "capacity")
         }
+        let grantable = SchedulingPolicy.grantableMemoryMiB(total: total)
+        guard memoryMiB <= grantable else {
+            throw LatchError(
+                "capacity: --memory-mib \(memoryMiB) exceeds the \(grantable) MiB this machine can grant "
+                    + "(\(total) MiB total minus the \(SchedulingPolicy.memoryReserveMiB(total: total)) MiB 10% reserve); "
+                    + "this request can never be admitted",
+                admissionReason: "capacity")
+        }
+    }
+}
+
+/// A shortfall that waiting cannot fix because no Latch job holds the missing resource.
+struct AdmissionStall: Equatable {
+    enum Kind: String { case memory }
+
+    var kind: Kind
+    var neededMiB: Int
+    var headroomMiB: Int
+
+    /// What the submitter is told when the job ends; `elapsed` is how long the shortfall has stood.
+    func message(elapsed: Double) -> String {
+        "unsatisfiable: needs \(HumanOutput.memory(Double(neededMiB))) additional \(kind.rawValue) but only "
+            + "\(HumanOutput.memory(Double(headroomMiB))) is available after the 10% reserve, and no Latch job is "
+            + "running or holding memory, so waiting cannot help (short for \(HumanOutput.duration(elapsed)), the stall timeout)"
     }
 }
 
@@ -94,6 +149,9 @@ struct ScheduledTask: Codable, Equatable, Identifiable {
     var residentMemoryMiB: Int?
     var plan: TaskPlan?
     var admission: AdmissionSnapshot?
+    /// Uptime at which this job, at the head of the queue, first found itself short of memory that no Latch job
+    /// holds. Cleared when the shortfall ends.
+    var stalledSince: Double?
     /// Who queued the job and from which session. Both are self-declared labels for operators, never an authorization.
     var owner: String?
     var sessionID: String?
@@ -117,6 +175,13 @@ struct SchedulerState: Codable, Equatable {
         for index in tasks.indices {
             tasks[index].coolSince = nil
         }
+    }
+
+    /// The readings admission may act on: no sensor error and a sample no older than `maximumSampleAge`.
+    func currentSensors(now: Double) -> SensorSnapshot? {
+        guard sensorError == nil, let sensors, (0...SchedulingPolicy.maximumSampleAge).contains(now - sensors.uptime)
+        else { return nil }
+        return sensors
     }
 
     var hasActiveWork: Bool { tasks.contains { $0.state == .running || $0.state == .cancelling } }
@@ -182,6 +247,36 @@ enum SchedulingPolicy {
     static let sampleInterval = 1.0
     static let maximumSampleAge = 2.0
     static let quietPeriod = 2.0
+    /// Long enough to ride out transient pressure and a process that is still tearing down, short enough that a
+    /// request nothing will satisfy does not hold the queue for the length of a coffee break.
+    static let defaultStallTimeout = 300.0
+
+    /// Admission keeps a tenth of physical memory free.
+    static func memoryReserveMiB(total: Int) -> Int { total / 10 }
+
+    /// The most memory any reservation could ever be granted on a machine with `total` MiB.
+    static func grantableMemoryMiB(total: Int) -> Int { total - memoryReserveMiB(total: total) }
+
+    /// Available memory beyond the reserve, before any Latch reservation is subtracted.
+    static func memoryHeadroomMiB(sensors: SensorSnapshot) -> Int {
+        sensors.memoryAvailableMiB - memoryReserveMiB(total: sensors.memoryTotalMiB)
+    }
+
+    /// The job's memory shortfall when waiting on the queue cannot clear it: the job heads the queue, sensors are
+    /// current, and no other Latch job runs, parks, cancels or holds resident memory that could be released. Heat,
+    /// memory pressure, guards and quiet windows are separate waits; they neither create nor hide a stall.
+    static func stall(for task: ScheduledTask, in state: SchedulerState, now: Double) -> AdmissionStall? {
+        guard task.state == .queued, state.tasks.first(where: { $0.state == .queued })?.id == task.id,
+            let sensors = state.currentSensors(now: now),
+            !state.tasks.contains(where: {
+                $0.id != task.id && ($0.state != .queued || $0.residentMemoryMiB != nil)
+            })
+        else { return nil }
+        let needed = max(0, task.requirements.memoryMiB - (task.residentMemoryMiB ?? 0))
+        let headroom = memoryHeadroomMiB(sensors: sensors)
+        guard needed > headroom else { return nil }
+        return AdmissionStall(kind: .memory, neededMiB: needed, headroomMiB: max(0, headroom))
+    }
 
     static func cpuHeadroom(in state: SchedulerState, sensors: SensorSnapshot, ordinary: Bool) -> Int {
         let running = state.tasks.filter { $0.state == .running }
@@ -238,7 +333,7 @@ enum SchedulingPolicy {
         // Count outstanding reservations conservatively even if some are already resident.
         // Parked allocations are already reflected in available memory; reserve only additional headroom on resume.
         let additionalMemory = max(0, request.memoryMiB - (task.residentMemoryMiB ?? 0))
-        guard reservedMemory + additionalMemory <= sensors.memoryAvailableMiB - sensors.memoryTotalMiB / 10 else {
+        guard reservedMemory + additionalMemory <= memoryHeadroomMiB(sensors: sensors) else {
             return "insufficient memory headroom"
         }
         if request.measurement {

@@ -10,8 +10,8 @@ struct TaskPlan: Codable, Equatable {
 enum TaskPlanner {
     static func plan(
         arguments: [String], measurement: Bool, classification: MCPSubmission.Classification = .sensitive,
-        cpuCount: Int = ProcessInfo.processInfo.activeProcessorCount,
-        memoryMiB: Int = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
+        cpuCount: Int = MachineCapacity.machine.cpuCores,
+        memoryMiB: Int = MachineCapacity.machine.memoryMiB
     ) -> TaskPlan {
         let guardrail =
             measurement

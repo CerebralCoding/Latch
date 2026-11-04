@@ -555,10 +555,10 @@ func `MCP task result blocks until completion and retains the final result`(mode
         let now = ProcessInfo.processInfo.systemUptime
         try scheduler.transaction { state in
             state.sensors = SensorSnapshot(
-                sampledAt: Date(), uptime: now, cpuCores: ProcessInfo.processInfo.activeProcessorCount,
+                sampledAt: Date(), uptime: now, cpuCores: MachineCapacity.machine.cpuCores,
                 cpuActive: 0.2, busiestCore: 0.3, gpuActive: 0, aneWatts: 0,
-                memoryAvailableMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
-                memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
+                memoryAvailableMiB: MachineCapacity.machine.memoryMiB,
+                memoryTotalMiB: MachineCapacity.machine.memoryMiB,
                 memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
                 unavailable: [], cpuTemperature: 40, gpuTemperature: 38)
             for index in state.tasks.indices { state.tasks[index].coolSince = now - 30 }
@@ -706,7 +706,7 @@ private func mcpService(_ scheduler: Scheduler) throws -> FileLatch {
 }
 
 private func admission(
-    _ scheduler: Scheduler, expectedTasks: Int = 1, cpuCores: Int = ProcessInfo.processInfo.activeProcessorCount
+    _ scheduler: Scheduler, expectedTasks: Int = 1, cpuCores: Int = MachineCapacity.machine.cpuCores
 ) throws {
     let deadline = ProcessInfo.processInfo.systemUptime + 4
     while try scheduler.snapshot().tasks.count < expectedTasks, ProcessInfo.processInfo.systemUptime < deadline {
@@ -721,8 +721,8 @@ private func admission(
                     sampledAt: Date(), uptime: now - Double(seconds),
                     cpuCores: cpuCores, cpuActive: 0, busiestCore: 0,
                     gpuActive: 0, aneWatts: 0,
-                    memoryAvailableMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576) * 8 / 10,
-                    memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
+                    memoryAvailableMiB: MachineCapacity.machine.memoryMiB * 8 / 10,
+                    memoryTotalMiB: MachineCapacity.machine.memoryMiB,
                     memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
                     unavailable: [], cpuTemperature: 30, gpuTemperature: 30))
         }
@@ -1335,6 +1335,57 @@ func `MCP retirement respects log levels while retaining stderr recovery guidanc
                 #expect(response["result"]?["isError"] == true)
             }
         }
+    }
+}
+
+@Test func `MCP ends a stalled job as unsatisfiable and admits the next one`() throws {
+    let fixture = try Fixture()
+    let scheduler = try Scheduler(path: fixture.lockPath)
+    let service = try mcpService(scheduler)
+    // The worker plans against this machine, so the readings carry this machine's totals.
+    let capacity = MachineCapacity.machine
+    let total = capacity.memoryMiB
+    // Sensitive work plans a quarter of memory and ordinary work a tenth; 15% is headroom for only the second.
+    let feeder = SensorFeeder(
+        path: fixture.lockPath, available: total * 25 / 100, total: total, cores: capacity.cpuCores)
+    defer { feeder.stop() }
+    try withExtendedLifetime(service) {
+        let client = try MCPClient(fixture: fixture)
+        let stalled = try jobID(client.tool("latch_submit", arguments: submission(fixture)))
+        var ordinary = try #require(submission(fixture).object)
+        ordinary["classification"] = "ordinary"
+        let next = try jobID(client.tool("latch_submit", arguments: .object(ordinary)))
+        var reported: MCPValue?
+        let deadline = ProcessInfo.processInfo.systemUptime + 8
+        while reported == nil, ProcessInfo.processInfo.systemUptime < deadline {
+            let jobs = try client.tool("latch_jobs")["result"]?["structuredContent"]?["jobs"]
+            if case .array(let list) = jobs, let first = list.first(where: { $0["jobID"] == .string(stalled) }) {
+                reported = first["stalled"]
+            }
+            if reported == nil { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        #expect(reported?["kind"] == "memory")
+        let pending = try client.tool(
+            "latch_wait", arguments: ["jobID": .string(stalled), "timeoutSeconds": .number(0.05)])
+        let status = pending["result"]?["structuredContent"]
+        #expect(status?["complete"] == false)
+        #expect(status?["progressMessage"]?.string?.contains("unsatisfiable") == true)
+        try scheduler.transaction { state in
+            for index in state.tasks.indices where state.tasks[index].id == stalled {
+                state.tasks[index].requirements.stallTimeout = 0.5
+            }
+        }
+        let response = try client.tool("latch_wait", arguments: ["jobID": .string(stalled), "timeoutSeconds": 10])
+        let result = try #require(response["result"]?["structuredContent"])
+        #expect(result["complete"] == true)
+        #expect(result["succeeded"] == false)
+        #expect(result["phase"] == "admission")
+        #expect(result["terminationReason"] == "unsatisfiable")
+        #expect(result["exitCode"] == .number(Double(LatchError.unsatisfiableExitCode)))
+        #expect(result["error"]?.string?.hasPrefix("unsatisfiable: ") == true)
+        #expect(response["result"]?["isError"] == true)
+        let admitted = try client.tool("latch_wait", arguments: ["jobID": .string(next), "timeoutSeconds": 10])
+        #expect(admitted["result"]?["structuredContent"]?["succeeded"] == true)
     }
 }
 

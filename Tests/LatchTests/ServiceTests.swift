@@ -97,8 +97,8 @@ private func fakeService(_ scheduler: Scheduler) throws -> FileLatch {
             let now = ProcessInfo.processInfo.systemUptime
             for offset in 0...seconds {
                 var sensors = coolSensors(at: now - Double(seconds - offset))
-                sensors.cpuCores = ProcessInfo.processInfo.activeProcessorCount
-                sensors.memoryTotalMiB = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
+                sensors.cpuCores = MachineCapacity.machine.cpuCores
+                sensors.memoryTotalMiB = MachineCapacity.machine.memoryMiB
                 sensors.memoryAvailableMiB = sensors.memoryTotalMiB * 3 / 4
                 state.record(sensors)
             }
