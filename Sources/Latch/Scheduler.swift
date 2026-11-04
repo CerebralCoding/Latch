@@ -19,12 +19,17 @@ struct TaskReservation {
 final class Scheduler {
     let path: String
     let directory: URL
+    let capacity: MachineCapacity
     private let collect: () throws -> SensorSnapshot
     private var coldHistory = ColdHistory()
     private var cachedState: (identity: FileIdentity, state: SchedulerState, unfinishedJobs: Set<String>)?
 
-    init(path: String, collect: @escaping () throws -> SensorSnapshot = NativeSensors.sample) throws {
+    init(
+        path: String, capacity: MachineCapacity = .machine,
+        collect: @escaping () throws -> SensorSnapshot = NativeSensors.sample
+    ) throws {
         self.path = path
+        self.capacity = capacity
         self.collect = collect
         directory = URL(fileURLWithPath: path + ".queue", isDirectory: true)
         do {
@@ -45,7 +50,7 @@ final class Scheduler {
         supervisorPID: Int32? = nil, inheritedUpdatePermit: Bool = false, ticketID: String? = nil,
         owner: String? = nil, sessionID: String? = nil
     ) throws -> TaskReservation {
-        try requirements.validate()
+        try requirements.validate(capacity: capacity)
         let updatePermit = inheritedUpdatePermit ? nil : try UpdateDrain.admit(in: directory)
         if useService {
             _ = try SchedulerService.requireRunning(in: directory)

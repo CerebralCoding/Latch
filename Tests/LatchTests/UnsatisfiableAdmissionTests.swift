@@ -6,13 +6,21 @@ import Testing
 /// 24,000 of 32,000 MiB free leaves 20,800 MiB of headroom after the 10% reserve.
 func stallSensors(
     at uptime: Double = ProcessInfo.processInfo.systemUptime, available: Int = 24000, total: Int = 32000,
-    cpuTemperature: Double? = 40
+    cpuTemperature: Double? = 40, cores: Int = 8
 ) -> SensorSnapshot {
     SensorSnapshot(
-        sampledAt: Date(), uptime: uptime, cpuCores: 8, cpuActive: 0, busiestCore: 0,
+        sampledAt: Date(), uptime: uptime, cpuCores: cores, cpuActive: 0, busiestCore: 0,
         gpuActive: 0, aneWatts: 0, memoryAvailableMiB: available, memoryTotalMiB: total,
         memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0, unavailable: [],
         cpuTemperature: cpuTemperature, gpuTemperature: 40)
+}
+
+/// A scheduler whose capacity is the totals of the sensors it samples, as admission sees them, so no test depends
+/// on the machine running it.
+func stallScheduler(path: String, cpuTemperature: Double? = 40) throws -> Scheduler {
+    try Scheduler(
+        path: path, capacity: MachineCapacity(sensors: stallSensors()),
+        collect: { stallSensors(cpuTemperature: cpuTemperature) })
 }
 
 /// Keeps fresh readings in a queue for work whose admission runs in other processes.
@@ -20,12 +28,12 @@ final class SensorFeeder: @unchecked Sendable {
     private let lock = NSLock()
     private var running = true
 
-    init(path: String, available: Int, total: Int) {
+    init(path: String, available: Int, total: Int, cores: Int) {
         let thread = Thread { [self] in
             guard let scheduler = try? Scheduler(path: path) else { return }
             while isRunning {
                 try? scheduler.transaction {
-                    $0.record(stallSensors(available: available, total: total))
+                    $0.record(stallSensors(available: available, total: total, cores: cores))
                 }
                 Thread.sleep(forTimeInterval: 0.2)
             }
@@ -72,10 +80,10 @@ private func serviceStatus() -> SchedulerService.Status {
     let total = 262_144
     let ceiling = total - total / 10
     #expect(throws: Never.self) {
-        try TaskRequirements(memoryMiB: ceiling).validate(cpuCount: 32, memoryMiB: total)
+        try TaskRequirements(memoryMiB: ceiling).validate(capacity: MachineCapacity(cpuCores: 32, memoryMiB: total))
     }
     #expect {
-        try TaskRequirements(memoryMiB: ceiling + 1).validate(cpuCount: 32, memoryMiB: total)
+        try TaskRequirements(memoryMiB: ceiling + 1).validate(capacity: MachineCapacity(cpuCores: 32, memoryMiB: total))
     } throws: { error in
         guard let error = error as? LatchError else { return false }
         return error.exitCode == 64 && error.admissionReason == "capacity"
@@ -87,9 +95,11 @@ private func serviceStatus() -> SchedulerService.Status {
 }
 
 @Test func `cores above the machine are refused as over capacity`() {
-    #expect(throws: Never.self) { try TaskRequirements(cpuCores: 32).validate(cpuCount: 32, memoryMiB: 262_144) }
+    #expect(throws: Never.self) {
+        try TaskRequirements(cpuCores: 32).validate(capacity: MachineCapacity(cpuCores: 32, memoryMiB: 262_144))
+    }
     #expect {
-        try TaskRequirements(cpuCores: 33).validate(cpuCount: 32, memoryMiB: 262_144)
+        try TaskRequirements(cpuCores: 33).validate(capacity: MachineCapacity(cpuCores: 32, memoryMiB: 262_144))
     } throws: { error in
         guard let error = error as? LatchError else { return false }
         return error.exitCode == 64 && error.admissionReason == "capacity"
@@ -100,13 +110,13 @@ private func serviceStatus() -> SchedulerService.Status {
 @Test func `non-positive requests stay usage errors`() {
     for requirements in [TaskRequirements(cpuCores: 0), TaskRequirements(memoryMiB: 0)] {
         #expect {
-            try requirements.validate(cpuCount: 32, memoryMiB: 262_144)
+            try requirements.validate(capacity: MachineCapacity(cpuCores: 32, memoryMiB: 262_144))
         } throws: { error in (error as? LatchError)?.exitCode == 64 }
     }
 }
 
 @Test func `the CLI refuses a memory request between the reserve and physical memory before queueing`() throws {
-    let physical = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
+    let physical = MachineCapacity.machine.memoryMiB
     #expect {
         try Options(arguments: ["schedule", "--memory-mib", String(physical), "--", "true"])
     } throws: { error in
@@ -122,6 +132,29 @@ private func serviceStatus() -> SchedulerService.Status {
 @Test func `the unsatisfiable exit is distinct from usage and busy`() {
     #expect(![0, 64, 69, 71, 74, 75, 126, 127].contains(LatchError.unsatisfiableExitCode))
     #expect(LatchError("x", exitCode: 75).admissionReason == nil)
+}
+
+@Test func `a scheduler validates against the capacity it admits against, not the host's`() throws {
+    let fixture = try Fixture()
+    let scheduler = try stallScheduler(path: fixture.lockPath)
+    // stallSensors() describes 8 cores and 32000 MiB, so 28800 MiB is the most it can ever grant.
+    let grantable = SchedulingPolicy.grantableMemoryMiB(total: 32000)
+    #expect(scheduler.capacity == MachineCapacity(cpuCores: 8, memoryMiB: 32000))
+    #expect {
+        try scheduler.reserve(
+            name: "too big", arguments: ["true"],
+            requirements: TaskRequirements(mode: .batch, memoryMiB: grantable + 1), timeout: 0)
+    } throws: { error in
+        (error as? LatchError)?.admissionReason == "capacity"
+    }
+    #expect(try scheduler.snapshot().tasks.isEmpty)
+    #expect {
+        try scheduler.reserve(
+            name: "fits capacity", arguments: ["true"],
+            requirements: TaskRequirements(mode: .batch, cpuCores: 8, memoryMiB: grantable), timeout: 0)
+    } throws: { error in
+        (error as? LatchError)?.admissionReason != "capacity"
+    }
 }
 
 // MARK: --stall-timeout
@@ -211,10 +244,10 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
     let path = fixture.lockPath
     let outcome = Outcome()
     // Create the queue directory before the second scheduler opens it; two first openings can race.
-    let observer = try Scheduler(path: path, collect: { stallSensors() })
+    let observer = try stallScheduler(path: path)
     let thread = Thread {
         do {
-            let scheduler = try Scheduler(path: path, collect: { stallSensors() })
+            let scheduler = try stallScheduler(path: path)
             _ = try scheduler.reserve(
                 name: "stalled", arguments: ["true"],
                 requirements: TaskRequirements(mode: .batch, memoryMiB: 21000, stallTimeout: 0.4), timeout: nil)
@@ -247,7 +280,7 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
 
 @Test func `a thermal wait outlasting the stall timeout times out as busy and not unsatisfiable`() throws {
     let fixture = try Fixture()
-    let scheduler = try Scheduler(path: fixture.lockPath, collect: { stallSensors(cpuTemperature: 70) })
+    let scheduler = try stallScheduler(path: fixture.lockPath, cpuTemperature: 70)
     let requirements = TaskRequirements(
         mode: .batch, memoryMiB: 1000, temperatureGuard: TemperatureGuard(maxCPU: 50, maxGPU: 50, cooldown: 0),
         stallTimeout: 0.2)
@@ -261,7 +294,7 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
 
 @Test func `a shortfall behind memory a Latch job holds waits instead of ending`() throws {
     let fixture = try Fixture()
-    let scheduler = try Scheduler(path: fixture.lockPath, collect: { stallSensors() })
+    let scheduler = try stallScheduler(path: fixture.lockPath)
     let holder = try scheduler.reserve(
         name: "holder", arguments: ["true"], requirements: TaskRequirements(mode: .batch, memoryMiB: 15000),
         timeout: 0)
@@ -275,7 +308,7 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
 
 @Test func `a stall timeout of zero waits as before`() throws {
     let fixture = try Fixture()
-    let scheduler = try Scheduler(path: fixture.lockPath, collect: { stallSensors() })
+    let scheduler = try stallScheduler(path: fixture.lockPath)
     let requirements = TaskRequirements(mode: .batch, memoryMiB: 21000, stallTimeout: 0)
     #expect {
         try scheduler.reserve(name: "patient", arguments: ["true"], requirements: requirements, timeout: 1.2)
@@ -284,7 +317,7 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
 
 @Test func `the stall clock starts once and clears when the shortfall does`() throws {
     let fixture = try Fixture()
-    let scheduler = try Scheduler(path: fixture.lockPath, collect: { stallSensors() })
+    let scheduler = try stallScheduler(path: fixture.lockPath)
     #expect {
         try scheduler.reserve(
             name: "waits", arguments: ["true"],

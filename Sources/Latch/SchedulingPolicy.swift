@@ -1,5 +1,27 @@
 import Foundation
 
+/// What a scheduler admits against: the cores and memory it may reserve from. The default is this machine; a
+/// scheduler built over injected sensors takes the same totals from them, so validation and admission agree.
+struct MachineCapacity: Equatable {
+    var cpuCores: Int
+    var memoryMiB: Int
+
+    static var machine: MachineCapacity {
+        MachineCapacity(
+            cpuCores: ProcessInfo.processInfo.activeProcessorCount,
+            memoryMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576))
+    }
+
+    init(cpuCores: Int, memoryMiB: Int) {
+        self.cpuCores = cpuCores
+        self.memoryMiB = memoryMiB
+    }
+
+    init(sensors: SensorSnapshot) {
+        self.init(cpuCores: sensors.cpuCores, memoryMiB: sensors.memoryTotalMiB)
+    }
+}
+
 struct TaskRequirements: Codable, Equatable {
     enum Mode: String, Codable { case isolated, batch }
 
@@ -15,10 +37,9 @@ struct TaskRequirements: Codable, Equatable {
     /// unsatisfiable. nil uses `SchedulingPolicy.defaultStallTimeout`; 0 waits indefinitely.
     var stallTimeout: Double?
 
-    func validate(
-        cpuCount: Int = ProcessInfo.processInfo.activeProcessorCount,
-        memoryMiB total: Int = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
-    ) throws {
+    func validate(capacity: MachineCapacity = .machine) throws {
+        let cpuCount = capacity.cpuCores
+        let total = capacity.memoryMiB
         try temperatureGuard?.validate()
         guard !measurement || mode == .isolated else { throw LatchError("measurements require exclusive admission") }
         guard cpuCores > 0 else { throw LatchError("--cpu requires at least one core") }

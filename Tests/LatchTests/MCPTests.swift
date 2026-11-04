@@ -555,10 +555,10 @@ func `MCP task result blocks until completion and retains the final result`(mode
         let now = ProcessInfo.processInfo.systemUptime
         try scheduler.transaction { state in
             state.sensors = SensorSnapshot(
-                sampledAt: Date(), uptime: now, cpuCores: ProcessInfo.processInfo.activeProcessorCount,
+                sampledAt: Date(), uptime: now, cpuCores: MachineCapacity.machine.cpuCores,
                 cpuActive: 0.2, busiestCore: 0.3, gpuActive: 0, aneWatts: 0,
-                memoryAvailableMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
-                memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
+                memoryAvailableMiB: MachineCapacity.machine.memoryMiB,
+                memoryTotalMiB: MachineCapacity.machine.memoryMiB,
                 memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
                 unavailable: [], cpuTemperature: 40, gpuTemperature: 38)
             for index in state.tasks.indices { state.tasks[index].coolSince = now - 30 }
@@ -706,7 +706,7 @@ private func mcpService(_ scheduler: Scheduler) throws -> FileLatch {
 }
 
 private func admission(
-    _ scheduler: Scheduler, expectedTasks: Int = 1, cpuCores: Int = ProcessInfo.processInfo.activeProcessorCount
+    _ scheduler: Scheduler, expectedTasks: Int = 1, cpuCores: Int = MachineCapacity.machine.cpuCores
 ) throws {
     let deadline = ProcessInfo.processInfo.systemUptime + 4
     while try scheduler.snapshot().tasks.count < expectedTasks, ProcessInfo.processInfo.systemUptime < deadline {
@@ -721,8 +721,8 @@ private func admission(
                     sampledAt: Date(), uptime: now - Double(seconds),
                     cpuCores: cpuCores, cpuActive: 0, busiestCore: 0,
                     gpuActive: 0, aneWatts: 0,
-                    memoryAvailableMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576) * 8 / 10,
-                    memoryTotalMiB: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576),
+                    memoryAvailableMiB: MachineCapacity.machine.memoryMiB * 8 / 10,
+                    memoryTotalMiB: MachineCapacity.machine.memoryMiB,
                     memoryPressure: "normal", thermalState: "nominal", diskBytesPerSecond: 0,
                     unavailable: [], cpuTemperature: 30, gpuTemperature: 30))
         }
@@ -1342,9 +1342,12 @@ func `MCP retirement respects log levels while retaining stderr recovery guidanc
     let fixture = try Fixture()
     let scheduler = try Scheduler(path: fixture.lockPath)
     let service = try mcpService(scheduler)
-    let total = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576)
+    // The worker plans against this machine, so the readings carry this machine's totals.
+    let capacity = MachineCapacity.machine
+    let total = capacity.memoryMiB
     // Sensitive work plans a quarter of memory and ordinary work a tenth; 15% is headroom for only the second.
-    let feeder = SensorFeeder(path: fixture.lockPath, available: total * 25 / 100, total: total)
+    let feeder = SensorFeeder(
+        path: fixture.lockPath, available: total * 25 / 100, total: total, cores: capacity.cpuCores)
     defer { feeder.stop() }
     try withExtendedLifetime(service) {
         let client = try MCPClient(fixture: fixture)

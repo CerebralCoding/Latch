@@ -75,9 +75,9 @@ struct SchedulerView: Encodable {
         let cpu = running.reduce(0) { $0 + $1.requirements.cpuCores }
         let memory = running.reduce(0) { $0 + $1.requirements.memoryMiB }
         capacity = Capacity(
-            totalCPUCores: state.sensors?.cpuCores ?? ProcessInfo.processInfo.activeProcessorCount,
+            totalCPUCores: state.sensors?.cpuCores ?? MachineCapacity.machine.cpuCores,
             reservedCPUCores: cpu,
-            unreservedCPUCores: max(0, (state.sensors?.cpuCores ?? ProcessInfo.processInfo.activeProcessorCount) - cpu),
+            unreservedCPUCores: max(0, (state.sensors?.cpuCores ?? MachineCapacity.machine.cpuCores) - cpu),
             reservedMemoryMiB: memory,
             gpuReserved: running.contains { $0.requirements.gpu },
             ioReserved: running.contains { $0.requirements.io },
