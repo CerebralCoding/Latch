@@ -315,6 +315,95 @@ func `rejects an invalid stall timeout`(arguments: [String]) {
     } throws: { error in (error as? LatchError)?.exitCode == 75 }
 }
 
+@Test func `a recovered job whose saved stall clock is ahead of uptime restarts the clock`() throws {
+    let fixture = try Fixture()
+    let scheduler = try stallScheduler(path: fixture.lockPath)
+    let requirements = TaskRequirements(mode: .batch, memoryMiB: 21000, stallTimeout: 0.4)
+    let id = UUID().uuidString
+    let submission = try MCPSubmission([
+        "requestKey": "recovered", "name": "recovered", "executable": "/usr/bin/true", "workingDirectory": "/",
+    ])
+    try scheduler.transaction { state in
+        state.jobs = [DurableJobRecord(id: id, submission: submission)]
+        var saved = ScheduledTask(
+            id: id, name: "recovered", pid: getpid(), arguments: ["true"], requirements: requirements)
+        // Saved before a reboot: an uptime the new boot will not reach for a day.
+        saved.stalledSince = ProcessInfo.processInfo.systemUptime + 86_400
+        state.tasks = [saved]
+    }
+    let started = ProcessInfo.processInfo.systemUptime
+    #expect {
+        try scheduler.reserve(
+            name: "recovered", arguments: ["true"], requirements: requirements, timeout: 5, ticketID: id)
+    } throws: { error in (error as? LatchError)?.exitCode == LatchError.unsatisfiableExitCode }
+    #expect(ProcessInfo.processInfo.systemUptime - started < 3)
+}
+
+@Test func `a stall clock that jumps ahead of uptime while waiting restarts instead of blocking`() throws {
+    let fixture = try Fixture()
+    let path = fixture.lockPath
+    let observer = try stallScheduler(path: path)
+    let outcome = Outcome()
+    let thread = Thread {
+        do {
+            _ = try stallScheduler(path: path).reserve(
+                name: "rolled back", arguments: ["true"],
+                requirements: TaskRequirements(mode: .batch, memoryMiB: 21000, stallTimeout: 0.4), timeout: 5)
+            outcome.finish(code: 0, text: "admitted")
+        } catch let error as LatchError {
+            outcome.finish(code: error.exitCode, text: error.description)
+        } catch {
+            outcome.finish(code: -1, text: String(describing: error))
+        }
+    }
+    let started = ProcessInfo.processInfo.systemUptime
+    thread.start()
+    var planted = false
+    while !planted, ProcessInfo.processInfo.systemUptime < started + 2 {
+        try observer.transaction { state in
+            guard let index = state.tasks.firstIndex(where: { $0.stalledSince != nil }) else { return }
+            state.tasks[index].stalledSince = ProcessInfo.processInfo.systemUptime + 86_400
+            planted = true
+        }
+        if !planted { Thread.sleep(forTimeInterval: 0.01) }
+    }
+    #expect(planted, "the job never started its stall clock")
+    #expect(outcome.finished.wait(timeout: .now() + 5) == .success)
+    #expect(outcome.exitCode == LatchError.unsatisfiableExitCode, "\(outcome.message ?? "no outcome")")
+    #expect(ProcessInfo.processInfo.systemUptime - started < 3)
+}
+
+@Test func `an admission timeout that passes before the stall timeout ends the job as busy`() throws {
+    let fixture = try Fixture()
+    let collections = Counter()
+    // A slow second collection lets the wait overshoot both deadlines before the next check.
+    let scheduler = try Scheduler(
+        path: fixture.lockPath, capacity: MachineCapacity(sensors: stallSensors()),
+        collect: {
+            if collections.next() == 2 { Thread.sleep(forTimeInterval: 0.4) }
+            return stallSensors()
+        })
+    let requirements = TaskRequirements(mode: .batch, memoryMiB: 21000, stallTimeout: 1.2)
+    #expect {
+        try scheduler.reserve(name: "slow", arguments: ["true"], requirements: requirements, timeout: 1.05)
+    } throws: { error in
+        guard let error = error as? LatchError else { return false }
+        return error.exitCode == 75 && error.description.hasPrefix("timeout: ") && error.admissionReason == nil
+    }
+}
+
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func next() -> Int {
+        lock.withLock {
+            value += 1
+            return value
+        }
+    }
+}
+
 @Test func `the stall clock starts once and clears when the shortfall does`() throws {
     let fixture = try Fixture()
     let scheduler = try stallScheduler(path: fixture.lockPath)
