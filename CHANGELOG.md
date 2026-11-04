@@ -2,11 +2,16 @@
 
 Versions before 0.17.0 describe development milestones. Changes made while a version remained unchanged are grouped under that version.
 
-## Unreleased
+## 0.23.0
 
-- Refuse a request that could never be admitted. A `--cpu` above the machine's cores, or a `--memory-mib` above its total memory minus the 10% admission reserve, now fails before queueing with exit 64 and a `capacity:` message. A `--memory-mib` between the 10% reserve and total memory used to queue indefinitely.
-- End a job that cannot be admitted by waiting. When the job at the head of the queue is short of memory that no Latch job holds, and sensors are current, it ends as `unsatisfiable` (exit 73, `terminationReason: "unsatisfiable"` in MCP results) after a stall timeout and leaves the queue so FIFO moves on. `--stall-timeout SECONDS` sets it for `run`, `schedule` and `guard`; the default is 300 seconds and 0 waits indefinitely. Thermal, memory-pressure, temperature-guard and quiet-window waits, and any shortfall while a Latch job runs or holds memory, are not stalls. Whichever of the admission timeout and the stall timeout passes first decides the outcome, and a job recovered after a restart or reboot starts its stall clock again.
-- Show a stall while it happens: `latch list` and `latch view` read `queued (stalled)`, and `--json` output and the MCP job views carry a `stalled` object with the memory needed and available, when it began and how long remains.
+Latch now rejects impossible resource requests and gives prolonged memory stalls a clear outcome, helping shared queues keep moving.
+
+- Requests above the machine's CPU capacity or memory limit after the 10% reserve fail before queueing, with exit 64 and a `capacity:` explanation.
+- A job at the front of the queue can end as `unsatisfiable` (exit 73) when fresh readings show a sustained memory shortfall and no other Latch job runs or holds memory. The default stall timeout is five minutes; `--stall-timeout SECONDS` configures it for `run`, `schedule`, and `guard`, and `0` waits indefinitely.
+- `latch list` and `latch view` mark stalled jobs. JSON and MCP diagnostics include the memory shortfall and remaining time; MCP waiters receive a final admission failure when the stall expires.
+- Recovered jobs restart their stall clocks, and the earlier admission or stall deadline determines the outcome.
+
+Special thanks to [@STRML](https://github.com/STRML) for contributing this feature and the accompanying regression tests in [#3](https://github.com/CerebralCoding/Latch/pull/3).
 
 ## 0.22.0
 
